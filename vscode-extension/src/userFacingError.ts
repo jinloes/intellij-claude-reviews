@@ -14,6 +14,7 @@ type ErrorContext =
 type TemplateKey =
     | 'github_auth_failed'
     | 'provider_binary_missing'
+    | 'provider_not_installed'
     | 'request_timed_out'
     | 'invalid_review_format'
     | 'network_error'
@@ -63,6 +64,17 @@ function template(key: TemplateKey, vars: Record<string, string>): string {
         rendered = rendered.split(`{${name}}`).join(value);
     }
     return rendered;
+}
+
+/**
+ * Proactive copy for when the configured provider CLI is not installed/resolvable, surfaced by the
+ * pre-generate preflight before any spawn is attempted. Wording is kept in sync with the IntelliJ
+ * host (`UserFacingErrors.java`).
+ */
+export function providerNotInstalledMessage(provider: 'claude' | 'copilot'): string {
+    return provider === 'copilot'
+        ? template('provider_not_installed', { binary: 'copilot', provider_cli: 'GitHub Copilot CLI' })
+        : template('provider_not_installed', { binary: 'claude', provider_cli: 'Claude Code CLI' });
 }
 
 export function toUserFacingError(err: unknown, context: ErrorContext): string {

@@ -448,17 +448,22 @@ open class CopilotService @JvmOverloads constructor(
 
 
         @JvmStatic
-        fun findCopilotBinary(): String {
+        fun findCopilotBinary(): String =
+            ProcessUtil.findBinary("copilot", copilotBinaryCandidates())
+
+        /** Proactive preflight: true when the `copilot` CLI is resolvable without spawning it. */
+        @JvmStatic
+        fun isBinaryAvailable(): Boolean =
+            ProcessUtil.isBinaryAvailable("copilot", copilotBinaryCandidates())
+
+        private fun copilotBinaryCandidates(): List<String> {
             val home = System.getProperty("user.home", "")
-            return ProcessUtil.findBinary(
-                "copilot",
-                listOf(
-                    "$home/.local/bin/copilot",
-                    "$home/.npm-global/bin/copilot",
-                    "/usr/local/bin/copilot",
-                    "/opt/homebrew/bin/copilot",
-                    "/usr/bin/copilot",
-                )
+            return listOf(
+                "$home/.local/bin/copilot",
+                "$home/.npm-global/bin/copilot",
+                "/usr/local/bin/copilot",
+                "/opt/homebrew/bin/copilot",
+                "/usr/bin/copilot",
             )
         }
     }

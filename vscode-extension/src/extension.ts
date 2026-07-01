@@ -8,9 +8,10 @@ import * as worktree from './worktree';
 import * as settings from './settings';
 import * as workspace from './workspace';
 import { hasStaleCommits } from './draftState';
+import { mergeBySource, notificationMessage, prNotificationKey } from './notifications';
 import { isValidBridgeRequest } from './bridgeValidation';
 import { classifySetupAuthError } from './authError';
-import { toUserFacingError } from './userFacingError';
+import { toUserFacingError, providerNotInstalledMessage } from './userFacingError';
 import { resolveWebviewDistPath } from './webviewAssets';
 
 type Provider = 'claude' | 'copilot';
@@ -124,10 +125,11 @@ class PRNotificationPoller implements vscode.Disposable {
         this.running = true;
         try {
             const token = await github.resolveToken(githubBaseUrl());
-            const found: github.PR[] = [];
+            const reviewRequested: github.PR[] = [];
+            const starred: github.PR[] = [];
 
             if (config().get<boolean>('notifyReviewRequested', true)) {
-                found.push(...await github.searchPRsByQuery(
+                reviewRequested.push(...await github.searchPRsByQuery(
                     token,
                     githubBaseUrl(),
                     'is:open is:pr draft:false review-requested:@me',
@@ -135,10 +137,10 @@ class PRNotificationPoller implements vscode.Disposable {
             }
 
             if (config().get<boolean>('notifyStarredRepos', false)) {
-                const starred = (await github.getStarredRepos(token, githubBaseUrl())).slice(0, 25);
-                if (starred.length > 0) {
-                    const repoQ = starred.map((repo) => `repo:${repo}`).join(' ');
-                    found.push(...await github.searchPRsByQuery(
+                const starredRepos = (await github.getStarredRepos(token, githubBaseUrl())).slice(0, 25);
+                if (starredRepos.length > 0) {
+                    const repoQ = starredRepos.map((repo) => `repo:${repo}`).join(' ');
+                    starred.push(...await github.searchPRsByQuery(
                         token,
                         githubBaseUrl(),
                         `is:open is:pr draft:false ${repoQ}`,
@@ -146,20 +148,20 @@ class PRNotificationPoller implements vscode.Disposable {
                 }
             }
 
-            const unique = dedupePRs(found);
+            const merged = mergeBySource(reviewRequested, starred);
             if (!this.seeded) {
-                for (const pr of unique) this.seen.add(prNotificationKey(pr));
+                for (const { pr } of merged) this.seen.add(prNotificationKey(pr));
                 this.seeded = true;
                 await this.persist();
                 return;
             }
 
-            for (const pr of unique) {
+            for (const { pr, source } of merged) {
                 const key = prNotificationKey(pr);
                 if (this.seen.has(key)) continue;
                 this.seen.add(key);
                 void vscode.window.showInformationMessage(
-                    `${pr.owner}/${pr.repo} #${pr.number}: ${pr.title}`,
+                    notificationMessage(pr, source),
                     'Open PR',
                 ).then((choice) => {
                     if (choice === 'Open PR') void vscode.env.openExternal(vscode.Uri.parse(pr.htmlUrl));
@@ -173,22 +175,6 @@ class PRNotificationPoller implements vscode.Disposable {
             this.running = false;
         }
     }
-}
-
-function prNotificationKey(pr: github.PR): string {
-    return `${pr.owner}/${pr.repo}#${pr.number}`;
-}
-
-function dedupePRs(prs: github.PR[]): github.PR[] {
-    const seen = new Set<string>();
-    const result: github.PR[] = [];
-    for (const pr of prs) {
-        const key = prNotificationKey(pr);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        result.push(pr);
-    }
-    return result;
 }
 
 function trimSeenSet(seen: Set<string>, maxSize: number): void {
@@ -267,7 +253,12 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
       color: var(--vscode-foreground);
       background: var(--vscode-sideBar-background);
       font-family: var(--vscode-font-family);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
       padding: 16px;
+      text-align: center;
     }
     a.button {
       color: var(--vscode-button-foreground);
@@ -285,12 +276,14 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
     p {
       color: var(--vscode-descriptionForeground);
       line-height: 1.4;
+      margin: 0;
+      font-size: 0.9em;
     }
   </style>
 </head>
 <body>
-  <p>PR Pilot opens in an editor tab.</p>
   <a class="button" href="command:pr-pilot.open">Open PR Pilot</a>
+  <p>The PR Pilot workspace opens in an editor tab.</p>
 </body>
 </html>`;
     }
@@ -749,6 +742,18 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
     if (!number || !owner || !repo) return;
     const key = prKeyFromParts(number, owner, repo);
 
+    // Provider preflight: fail fast with actionable guidance instead of a raw CLI spawn error
+    // when the configured review provider's binary isn't installed/resolvable.
+    const isCopilot = provider() === 'copilot';
+    if (isCopilot ? !copilot.copilotBinaryAvailable() : !claude.claudeBinaryAvailable()) {
+        push(state, {
+            type: 'reviewError',
+            prKey: key,
+            message: providerNotInstalledMessage(isCopilot ? 'copilot' : 'claude'),
+        });
+        return;
+    }
+
     push(state, { type: 'reviewGenerating', prKey: key, message: 'Fetching PR data…' });
     try {
         const token = await getToken(state);
@@ -799,7 +804,6 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
             focusAreas,
             customInstructions,
         });
-        const isCopilot = provider() === 'copilot';
 
         const result = isCopilot
             ? await copilot.reviewPR({
@@ -846,6 +850,7 @@ async function handleSaveDraft(state: ViewState, msg: Record<string, unknown>): 
         );
         state.pendingReviewId = reviewId;
         push(state, { type: 'draftSaved', prKey: key, reviewId, commentsDropped });
+        push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasDraft: true });
     } catch (err) {
         state.cachedToken = null;
         push(state, {
@@ -873,6 +878,7 @@ async function handleSubmitReview(state: ViewState, msg: Record<string, unknown>
         );
         state.pendingReviewId = null;
         push(state, { type: 'reviewSubmitted', prKey: key });
+        push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasDraft: false });
     } catch (err) {
         state.cachedToken = null;
         push(state, {
@@ -897,6 +903,7 @@ async function handleDeleteDraft(state: ViewState, msg: Record<string, unknown>)
         );
         state.pendingReviewId = null;
         push(state, { type: 'draftDeleted', prKey: key });
+        push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasDraft: false });
     } catch (err) {
         state.cachedToken = null;
         push(state, {

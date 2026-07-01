@@ -142,6 +142,7 @@ function findByPathSuffix(map: FileCommentMap, path: string): LineCommentMap | u
 interface PendingNew {
   file: string
   line: number
+  rowId: string
 }
 
 export function DiffViewer({
@@ -301,8 +302,8 @@ export function DiffViewer({
               comments={fileComments}
               focusedCommentIdx={focusedCommentIdx}
               searchQuery={searchQuery}
-              pendingNew={pendingNew?.file === displayPath ? pendingNew.line : undefined}
-              onLineClick={onAddComment ? (line) => setPendingNew({ file: displayPath, line }) : undefined}
+              pendingNew={pendingNew?.file === displayPath ? pendingNew : undefined}
+              onLineClick={onAddComment ? ({ line, rowId }) => setPendingNew({ file: displayPath, line, rowId }) : undefined}
               onPendingCancel={() => setPendingNew(null)}
               onPendingSave={(type, body) => {
                 if (pendingNew) onAddComment?.({ file: pendingNew.file, line: pendingNew.line, type, body })
@@ -335,8 +336,8 @@ interface FileViewProps {
   comments: LineCommentMap
   focusedCommentIdx?: number
   searchQuery?: string
-  pendingNew?: number
-  onLineClick?: (line: number) => void
+  pendingNew?: PendingNew
+  onLineClick?: (target: { line: number; rowId: string }) => void
   onPendingCancel: () => void
   onPendingSave: (type: LineComment['type'], body: string) => void
   onEditComment?: (idx: number, body: string) => void
@@ -376,7 +377,7 @@ function FileView({
               comments={comments}
               focusedCommentIdx={focusedCommentIdx}
               searchQuery={searchQuery}
-              pendingNewLine={pendingNew}
+              pendingNew={pendingNew}
               onLineClick={onLineClick}
               onPendingCancel={onPendingCancel}
               onPendingSave={onPendingSave}
@@ -399,8 +400,8 @@ interface HunkRowsProps {
   comments: LineCommentMap
   focusedCommentIdx?: number
   searchQuery?: string
-  pendingNewLine?: number
-  onLineClick?: (line: number) => void
+  pendingNew?: PendingNew
+  onLineClick?: (target: { line: number; rowId: string }) => void
   onPendingCancel: () => void
   onPendingSave: (type: LineComment['type'], body: string) => void
   onEditComment?: (idx: number, body: string) => void
@@ -414,7 +415,7 @@ function HunkRows({
   comments,
   focusedCommentIdx,
   searchQuery,
-  pendingNewLine,
+  pendingNew,
   onLineClick,
   onPendingCancel,
   onPendingSave,
@@ -438,10 +439,11 @@ function HunkRows({
         const oldLine = oldLineOf(change)
         const lineComments = newLine !== undefined ? (comments.get(newLine) ?? []) : []
         const clickableLine = newLine ?? oldLine
+        const rowId = `${change.type}:${oldLine ?? 'na'}:${newLine ?? 'na'}:${i}`
         const canAddOldLineComment = onLineClick && oldLine !== undefined && clickableLine !== undefined
         const canAddNewLineComment = onLineClick && newLine !== undefined && clickableLine !== undefined
         const handleAddComment = () => {
-          if (onLineClick && clickableLine !== undefined) onLineClick(clickableLine)
+          if (onLineClick && clickableLine !== undefined) onLineClick({ line: clickableLine, rowId })
         }
         const handleAddCommentKeyDown = (e: React.KeyboardEvent<HTMLTableCellElement>) => {
           if (e.key !== 'Enter' && e.key !== ' ') return
@@ -495,7 +497,7 @@ function HunkRows({
               />
             ))}
 
-            {pendingNewLine !== undefined && clickableLine === pendingNewLine && (
+            {pendingNew?.rowId === rowId && (
               <NewCommentRow onSave={onPendingSave} onCancel={onPendingCancel} />
             )}
           </Fragment>

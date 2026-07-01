@@ -35,6 +35,7 @@ When logic changes in one host, update the parallel file in the other host:
 | `GitWorktreeService.kt` worktree create/remove/find-root logic | `vscode-extension/src/worktree.ts` matching functions |
 | `WebviewPanel.resolvePrClaudeService`/worktree lifecycle | `vscode-extension/src/extension.ts` `resolveWorkingDir`/`clearWorktree` |
 | `PRToolWindowFactory.buildQuery` query behavior | `vscode-extension/src/github.ts` `searchPRs` |
+| `PRNotificationService` poll/source-labeling/merge logic | `vscode-extension/src/notifications.ts` + `extension.ts` `PRNotificationPoller.poll` |
 | `GitHubAuthService.findGhBinary` binary path probes | `vscode-extension/src/github.ts` `findGhBinary` |
 | `ClaudeService.findClaudeBinary` / `CopilotService.findCopilotBinary` | `vscode-extension/src/claude.ts` + `vscode-extension/src/copilot.ts` |
 | `CopilotService.kt` SDK session setup, stream events, effort normalization | `vscode-extension/src/copilot.ts` |

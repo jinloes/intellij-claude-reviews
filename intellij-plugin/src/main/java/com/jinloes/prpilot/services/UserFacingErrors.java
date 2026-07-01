@@ -17,6 +17,7 @@ public final class UserFacingErrors {
     private static final String TEMPLATE_RESOURCE = "user-facing-errors.yaml";
     private static final String TEMPLATE_GITHUB_AUTH_FAILED = "github_auth_failed";
     private static final String TEMPLATE_PROVIDER_BINARY_MISSING = "provider_binary_missing";
+    private static final String TEMPLATE_PROVIDER_NOT_INSTALLED = "provider_not_installed";
     private static final String TEMPLATE_REQUEST_TIMED_OUT = "request_timed_out";
     private static final String TEMPLATE_INVALID_REVIEW_FORMAT = "invalid_review_format";
     private static final String TEMPLATE_NETWORK_ERROR = "network_error";
@@ -24,6 +25,22 @@ public final class UserFacingErrors {
     private static final Map<String, String> TEMPLATES = loadTemplates();
 
     private UserFacingErrors() {}
+
+    /**
+     * Proactive copy for when the configured provider CLI is not installed/resolvable, surfaced by
+     * the pre-generate preflight before any spawn is attempted. Wording is kept in sync with the VS
+     * Code host (`userFacingError.ts`).
+     */
+    public static String forProviderNotInstalled(ReviewProvider provider) {
+        boolean copilot = provider == ReviewProvider.COPILOT;
+        return template(
+                TEMPLATE_PROVIDER_NOT_INSTALLED,
+                Map.of(
+                        "binary",
+                        copilot ? "copilot" : "claude",
+                        "provider_cli",
+                        copilot ? "GitHub Copilot CLI" : "Claude Code CLI"));
+    }
 
     public static String forProvider(ReviewProvider provider, Exception e, String operation) {
         String msg = normalize(e);

@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as os from 'os';
+import * as path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import type { ReviewResult, LineComment } from './github';
 import { parseReview } from './review';
@@ -148,6 +149,24 @@ function findClaudeBinary(): string {
         try { if (fs.statSync(p).isFile()) return p; } catch { /* not found */ }
     }
     return 'claude';
+}
+
+/** True when `name` exists as a file in any directory on the process PATH. */
+export function existsOnPath(name: string): boolean {
+    const dirs = (process.env.PATH ?? '').split(path.delimiter);
+    for (const dir of dirs) {
+        if (!dir) continue;
+        try { if (fs.statSync(path.join(dir, name)).isFile()) return true; } catch { /* not here */ }
+    }
+    return false;
+}
+
+/**
+ * Proactive preflight: true when the `claude` CLI is resolvable without spawning it — either a
+ * hard-coded candidate path exists, or `claude` is found on PATH.
+ */
+export function claudeBinaryAvailable(): boolean {
+    return findClaudeBinary() !== 'claude' || existsOnPath('claude');
 }
 
 // ── Prompt building ────────────────────────────────────────────────────────────

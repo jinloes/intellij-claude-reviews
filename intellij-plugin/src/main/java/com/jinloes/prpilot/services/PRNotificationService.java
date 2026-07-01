@@ -12,6 +12,7 @@ import com.intellij.util.concurrency.AppExecutorUtil;
 import com.jinloes.prpilot.model.PullRequest;
 import com.jinloes.prpilot.settings.PluginSettings;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -115,11 +116,12 @@ public final class PRNotificationService implements Disposable {
         }
 
         String pollError = null;
-        List<PullRequest> found = new ArrayList<>();
+        List<PullRequest> reviewRequested = new ArrayList<>();
+        List<PullRequest> starredPrs = new ArrayList<>();
 
         if (settings.isNotifyReviewRequested()) {
             try {
-                found.addAll(githubService.searchPRs(token, REVIEW_REQUESTED_QUERY));
+                reviewRequested.addAll(githubService.searchPRs(token, REVIEW_REQUESTED_QUERY));
             } catch (Exception e) {
                 log.warn("PR notification poll failed", e);
                 pollError = sanitizeError(e);
@@ -134,7 +136,8 @@ public final class PRNotificationService implements Disposable {
                 if (!slice.isEmpty()) {
                     String repoQ =
                             slice.stream().map(r -> "repo:" + r).collect(Collectors.joining(" "));
-                    found.addAll(githubService.searchPRs(token, buildStarredReposQuery(repoQ)));
+                    starredPrs.addAll(
+                            githubService.searchPRs(token, buildStarredReposQuery(repoQ)));
                 }
             } catch (Exception e) {
                 log.warn("PR notification poll failed", e);
@@ -144,20 +147,23 @@ public final class PRNotificationService implements Disposable {
 
         recordPollStatus(pollError);
 
+        List<Candidate> candidates = mergeCandidates(reviewRequested, starredPrs);
+
         if (!seenSet.isSeeded()) {
             // First run: populate the seen set without showing any notifications
-            for (PullRequest pr : found) seenSet.add(pr);
+            for (Candidate c : candidates) seenSet.add(c.pr());
             seenSet.markSeeded();
             seenSet.save();
             return;
         }
 
         // Notify about PRs that weren't seen before and have no in-progress draft
-        for (PullRequest pr : found) {
+        for (Candidate c : candidates) {
+            PullRequest pr = c.pr();
             if (!seenSet.contains(pr)) {
                 seenSet.add(pr);
                 if (!pendingIndex.hasDraft(pr.getOwner(), pr.getRepo(), pr.getNumber())) {
-                    fireNotification(pr);
+                    fireNotification(pr, c.source());
                 }
             }
         }
@@ -167,12 +173,54 @@ public final class PRNotificationService implements Disposable {
         seenSet.save();
     }
 
+    /** Provenance of a notified PR, surfaced in the balloon so the source is unambiguous. */
+    enum NotificationSource {
+        REVIEW_REQUESTED("Review requested"),
+        STARRED_REPO("\u2605 Starred repo");
+
+        private final String label;
+
+        NotificationSource(String label) {
+            this.label = label;
+        }
+
+        String label() {
+            return label;
+        }
+    }
+
+    record Candidate(PullRequest pr, NotificationSource source) {}
+
+    static String prKey(PullRequest pr) {
+        return pr.getOwner() + "/" + pr.getRepo() + "#" + pr.getNumber();
+    }
+
+    /**
+     * Merges review-requested and starred-repo results, deduped by PR. Review-requested wins when a
+     * PR appears in both sources so its more actionable label is shown.
+     */
+    static List<Candidate> mergeCandidates(
+            List<PullRequest> reviewRequested, List<PullRequest> starred) {
+        LinkedHashMap<String, Candidate> merged = new LinkedHashMap<>();
+        for (PullRequest pr : reviewRequested) {
+            merged.putIfAbsent(prKey(pr), new Candidate(pr, NotificationSource.REVIEW_REQUESTED));
+        }
+        for (PullRequest pr : starred) {
+            merged.putIfAbsent(prKey(pr), new Candidate(pr, NotificationSource.STARRED_REPO));
+        }
+        return new ArrayList<>(merged.values());
+    }
+
+    static String notificationTitle(PullRequest pr, NotificationSource source) {
+        return source.label() + " · " + pr.getOwner() + "/" + pr.getRepo() + " #" + pr.getNumber();
+    }
+
     static String buildStarredReposQuery(String repoQ) {
         return "is:open is:pr draft:false " + repoQ;
     }
 
-    private void fireNotification(PullRequest pr) {
-        String title = pr.getOwner() + "/" + pr.getRepo() + " #" + pr.getNumber();
+    private void fireNotification(PullRequest pr, NotificationSource source) {
+        String title = notificationTitle(pr, source);
         String content = pr.getTitle();
 
         ApplicationManager.getApplication()

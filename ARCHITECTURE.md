@@ -81,6 +81,7 @@ webview/                               – Vite + React + TypeScript webview
     bridge/types.ts
     lib/validateComments.ts
     lib/reviewQuality.ts            – Review Quality Check heuristics, repair helpers, and diff chunk planning
+    lib/autosave.ts                 – Pure draft-autosave decisions (dirty check, snapshot, debounce delay)
     components/...
     App.tsx
 
@@ -95,6 +96,7 @@ vscode-extension/                      – VS Code extension host
     worktree.ts                        – Creates/removes temporary git worktrees for PR branch reviews (mirrors GitWorktreeService.kt)
     settings.ts                        – Settings webview controller (panel lifecycle + config read/write); mirrors PluginSettingsConfigurable
     settingsView.ts                    – Pure settings-webview view logic (HTML, model-merge, escaping); no vscode import, unit-tested
+    notifications.ts                   – Pure background-notification helpers (source labeling, dedupe/merge with review-requested precedence); no vscode import, unit-tested
     userFacingError.ts                 – Maps host/provider errors to user-actionable copy
     workspace.ts                       – Resolves the VS Code workspace dir, including dev-host target repo override
     core.d.ts
@@ -159,6 +161,9 @@ The shared PR list sends an explicit `searchScope` on `refreshPRs`: `currentRepo
 ### Binary resolution
 Probe known hard-coded paths for `gh`, `claude`, and `copilot` before falling back to command name, because GUI-launched IntelliJ often has incomplete `PATH`.
 
+### Provider preflight
+Before running a review, both hosts check that the configured provider's CLI (`claude`/`copilot`) is resolvable — a hard-coded candidate path exists, or the binary is found on `PATH` — and, if not, push a `reviewError` with actionable `provider_not_installed` copy instead of attempting a doomed spawn. This surfaces in-context in the review pane (which already offers a "Try Again") rather than as the full-pane PR-list setup screen. Availability checks: `ProcessUtil.isBinaryAvailable` + `ClaudeService.isBinaryAvailable()`/`CopilotService.isBinaryAvailable()` (JVM); `claudeBinaryAvailable()`/`copilotBinaryAvailable()` + shared `existsOnPath` (`claude.ts`/`copilot.ts`). The shared `provider_not_installed` template wording is kept in sync across `UserFacingErrors.java` and `userFacingError.ts`.
+
 ### Prompt-injection hardening
 When wrapping untrusted payloads in XML-like tags, escape matching closing tags inside payload to prevent tag breakout in tool-enabled model runs.
 
@@ -201,18 +206,21 @@ PR-scoped lifecycle messages (`draftLoaded`, review generation/chunks/results/er
 If stream-json returns `error_max_turns` with `session_id`, auto-resume via `claude --resume <session_id> --max-turns 3` and nudge for final JSON.
 
 ### Draft review storage semantics
-Inline comment metadata is encoded in review body HTML comment for resilient draft reload. Pending review creation omits `event`. On 422 for inline comments, fallback to body-first creation then per-comment POST. When a pending draft lacks usable hidden metadata, hosts fall back to GitHub API review comments and set `importedFromGitHub`; the webview warns that recovered review details may be incomplete.
+Inline comment metadata is encoded in review body HTML comment for resilient draft reload. Pending review creation omits `event`. On 422 for inline comments, fallback to body-first creation then per-comment POST. When a pending draft lacks usable hidden metadata, hosts fall back to GitHub API review comments and set `importedFromGitHub`; the webview warns that recovered review details may be incomplete and offers a **Re-anchor from current diff** action that re-runs `validateComments` to snap comments back to valid positions, clears the imported flag, and (via autosave) re-encodes proper hidden metadata to GitHub so the draft reloads cleanly next time.
+
+### Draft autosave
+The GitHub pending review is the single source of truth for in-progress reviews — there is no separate host-local draft buffer (rejected because the product can't operate offline anyway: diff fetch, worktree review, and submit all require `gh` auth + network). The webview autosaves the draft from shared code in `ReviewPane.tsx` driven by `lib/autosave.ts`: a freshly generated review saves immediately (save-on-generate, the costliest state to reproduce), and later edits to an already-saved draft are flushed on a 30s debounce, plus an immediate flush on panel hide (`visibilitychange`/`pagehide`) and on PR-switch/unmount. Autosave reuses the existing `saveDraft`/`draftSaved`/`draftSaveError` bridge messages, so it needs no host or schema changes and both hosts inherit it. The footer's secondary button is a status indicator (`Saving…` / `Save now` / `Saved`); the manual click is a "save now" convenience, never a required step. Dirty state is snapshot equality (`reviewSnapshot`) against the last successfully-saved result; saves are serialized via the in-flight `saving` flag so autosave never stacks on a manual save/submit. Submit always saves-first when the in-memory review may differ from the GitHub draft.
 
 ### Large diff visibility
 GitHub diffs are truncated at 80 KB in both hosts. The webview detects the truncation marker and warns that diff display and chat context are incomplete, while `DiffViewer` still lazily limits rendered changed lines for browser performance.
 
 ### Review quality gate and chunked review mode
-The webview supports a pre-submit `Review Quality Check` pass that runs local heuristics over the current draft and validation diff to flag trust risks (unanchored comments, low-evidence high-severity findings, and missing rationale metadata). The pass provides one-click in-memory repairs (`remove unanchored`, `add rationale placeholders`, `downgrade high-risk issues`) before save/submit.
+The webview runs a `Review Quality Check` pass automatically over the current draft and validation diff to flag trust risks (unanchored comments, low-evidence high-severity findings, and missing rationale metadata). When risks are present it surfaces a non-blocking badge (`N trust risks detected — Review`) that expands to a panel with one-click in-memory repairs (`remove unanchored`, `add rationale placeholders`, `downgrade high-risk issues`); a clean draft shows no nag. The check is informational, not a submit blocker.
 
 For larger PRs, reviewers can enable chunked mode in per-review overrides. The webview splits the changed files into risk-priority batches, runs one model pass per batch with batch-scoped file instructions, then merges batch outputs into a single draft and shows explicit batch progress with per-file confidence summaries.
 
 ### Notification parity
-Background PR notifications are available in both hosts and are off by default. The first poll seeds existing PRs silently. Both hosts support review-requested PR notifications and optional starred-repository PR notifications, using the persisted settings listed below. The seen-PR set is persisted across reloads/restarts (IntelliJ via `SeenPRSet`, VS Code via extension `globalState`) so PRs that appear while the editor is closed are still announced on the next poll rather than silently absorbed by a re-seed. Changing the notification scope (enable/disable, review-requested, starred repos, or GitHub base URL) re-seeds silently so existing in-scope PRs are not announced retroactively.
+Background PR notifications are available in both hosts and are off by default. The first poll seeds existing PRs silently. Both hosts support review-requested PR notifications and optional starred-repository PR notifications, using the persisted settings listed below. Each notification is labeled with its provenance (`Review requested` vs `★ Starred repo`) so a starred-repo PR — which need not appear in the main list's current-repo scope — is never mistaken for a review request; when a PR matches both sources, review-requested takes precedence. The labeling/merge logic is shared-shaped across hosts (`PRNotificationService.mergeCandidates`/`notificationTitle` in IntelliJ, `notifications.ts` `mergeBySource`/`notificationMessage` in VS Code). The seen-PR set is persisted across reloads/restarts (IntelliJ via `SeenPRSet`, VS Code via extension `globalState`) so PRs that appear while the editor is closed are still announced on the next poll rather than silently absorbed by a re-seed. Changing the notification scope (enable/disable, review-requested, starred repos, or GitHub base URL) re-seeds silently so existing in-scope PRs are not announced retroactively.
 
 ### Comment anchoring policy
 Client-side validation partitions comments: keep in-hunk, snap within +-3 lines, orphan otherwise. Orphans are excluded from inline POST and appended to review body section.
@@ -224,12 +232,12 @@ Client-side validation partitions comments: keep in-hunk, snap within +-3 lines,
 Repo detection walks upward to `.git/config` and reads the `[remote "origin"]` URL specifically (not the first `url=` in the file) so multi-remote/fork setups resolve to origin consistently across hosts, handling SCP and `ssh://` remotes correctly. Webview assets are served via loopback `HttpServer` for proper same-origin module loading; path normalization blocks traversal.
 
 ### VS Code webview surfaces
-The VS Code host exposes PR Pilot as an editor-tab `WebviewPanel` opened by `pr-pilot.open`. The Activity Bar webview view (`pr-pilot.main`) is a lightweight launcher that immediately reveals the editor tab and includes an "Open PR Pilot" command link; the full PR loading, review generation, chat, and worktree lifecycle run only in the editor-tab panel.
+The VS Code host exposes PR Pilot as an editor-tab `WebviewPanel` opened by `pr-pilot.open`. The Activity Bar webview view (`pr-pilot.main`) is a thin launcher: on resolve it auto-opens/reveals the editor tab and renders only a single "Open PR Pilot" button (no intermediate panel), so it reads as a launch button rather than a competing surface. The full PR loading, review generation, chat, and worktree lifecycle run only in the editor-tab panel.
 
 For development, the extension loads UI assets from the sibling `webview/dist` folder. For packaged `.vsix` builds, the release/package flow stages that same output into `vscode-extension/webview-dist`, and the extension resolves the bundled copy first so installed releases do not depend on the source repo layout.
 
 ### IntelliJ webview surfaces
-The IntelliJ host now mirrors VS Code's split: the `PR Pilot` tool window is a lightweight launcher with an "Open PR Pilot" action/link, and the full interactive UI runs in a center editor tab backed by a singleton `PRPilotVirtualFile` per project. PR loading/review/chat behavior remains in `WebviewPanel`; `PRToolWindowFactory` and `PRPilotFileEditorProvider` both wire the same load pipeline so both surfaces behave consistently.
+The IntelliJ host mirrors VS Code's split: the `PR Pilot` tool window is a thin launcher whose content is a single centered "Open PR Pilot" button (no explanatory panel), and `createToolWindowContent` opens the center editor tab automatically — so the tool window is "effectively a button" rather than a second surface. The full interactive UI runs in a center editor tab backed by a singleton `PRPilotVirtualFile` per project. PR loading/review/chat behavior remains in `WebviewPanel`; `PRToolWindowFactory` and `PRPilotFileEditorProvider` both wire the same load pipeline so both surfaces behave consistently.
 
 ### VS Code extension development target repo
 The `.vscode/launch.json` config `Run PR Pilot Extension Against Target Repo` prompts for an absolute repository path and passes it as `PR_PILOT_TARGET_REPO` to the Extension Development Host. Use it when the PR Pilot source repo is open in the main VS Code window but PR Pilot should inspect PRs for a different local checkout; `workspace.ts` makes repo detection, worktree creation, and CLI working directories resolve against the target repo instead of whichever folder VS Code opened in the dev host.

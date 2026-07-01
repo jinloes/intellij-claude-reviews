@@ -20,7 +20,10 @@ import com.jinloes.prpilot.model.ChatMessage;
 import com.jinloes.prpilot.model.LineComment;
 import com.jinloes.prpilot.model.PRReviewRequest;
 import com.jinloes.prpilot.model.PullRequest;
+import com.jinloes.prpilot.model.ReviewProvider;
 import com.jinloes.prpilot.model.ReviewResult;
+import com.jinloes.prpilot.services.ClaudeService;
+import com.jinloes.prpilot.services.CopilotService;
 import com.jinloes.prpilot.services.GitHubService;
 import com.jinloes.prpilot.services.GitWorktreeService;
 import com.jinloes.prpilot.services.IntellijClaudeService;
@@ -787,6 +790,18 @@ public class WebviewPanel implements Disposable {
             return;
         }
 
+        // Provider preflight: fail fast with actionable guidance instead of a raw CLI spawn error
+        // when the configured review provider's binary isn't installed/resolvable.
+        ReviewProvider provider = PluginSettings.getInstance().getReviewProvider();
+        if (!isProviderBinaryAvailable(provider)) {
+            pushMessage(
+                    new ErrorMsg(
+                            "reviewError",
+                            key,
+                            UserFacingErrors.forProviderNotInstalled(provider)));
+            return;
+        }
+
         // Dispatch all blocking work to a pooled thread so the JCEF bridge returns immediately
         // and status messages can flow during the network-fetch phase.
         final PullRequest finalPr = pr;
@@ -964,6 +979,12 @@ public class WebviewPanel implements Disposable {
                                         }
                                     });
                         });
+    }
+
+    private static boolean isProviderBinaryAvailable(ReviewProvider provider) {
+        return provider == ReviewProvider.COPILOT
+                ? CopilotService.isBinaryAvailable()
+                : ClaudeService.isBinaryAvailable();
     }
 
     // --- saveDraft ---

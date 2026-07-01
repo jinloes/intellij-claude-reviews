@@ -8,7 +8,7 @@ import {
 } from '@github/copilot-sdk';
 import type { ReviewResult, LineComment } from './github';
 import type { ChatMessage, PR } from './claude';
-import { buildPrompt, buildChatPrompt, buildFocusedChatPrompt } from './claude';
+import { buildPrompt, buildChatPrompt, buildFocusedChatPrompt, existsOnPath } from './claude';
 import { parseReview } from './review';
 
 export type { ReviewResult, LineComment, ChatMessage, PR };
@@ -39,6 +39,14 @@ function findCopilotBinary(): string {
         try { if (fs.statSync(p).isFile()) return p; } catch { /* not found */ }
     }
     return 'copilot';
+}
+
+/**
+ * Proactive preflight: true when the `copilot` CLI is resolvable without spawning it — either a
+ * hard-coded candidate path exists, or `copilot` is found on PATH.
+ */
+export function copilotBinaryAvailable(): boolean {
+    return findCopilotBinary() !== 'copilot' || existsOnPath('copilot');
 }
 
 type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';

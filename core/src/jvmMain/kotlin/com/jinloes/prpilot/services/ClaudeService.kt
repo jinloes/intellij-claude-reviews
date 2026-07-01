@@ -723,17 +723,22 @@ open class ClaudeService @JvmOverloads constructor(projectDir: String? = null) {
         private fun isScalar(value: Any?): Boolean =
             value is String || value is Number || value is Boolean
 
-        private fun findClaudeBinary(): String {
+        private fun findClaudeBinary(): String =
+            ProcessUtil.findBinary("claude", claudeBinaryCandidates())
+
+        /** Proactive preflight: true when the `claude` CLI is resolvable without spawning it. */
+        @JvmStatic
+        fun isBinaryAvailable(): Boolean =
+            ProcessUtil.isBinaryAvailable("claude", claudeBinaryCandidates())
+
+        private fun claudeBinaryCandidates(): List<String> {
             val home = System.getProperty("user.home", "")
-            return ProcessUtil.findBinary(
-                "claude",
-                listOf(
-                    "$home/.local/bin/claude", // Claude Code default install
-                    "$home/.npm-global/bin/claude", // npm global without sudo
-                    "/usr/local/bin/claude", // manual install
-                    "/opt/homebrew/bin/claude", // Homebrew
-                    "/usr/bin/claude", // system package managers
-                )
+            return listOf(
+                "$home/.local/bin/claude", // Claude Code default install
+                "$home/.npm-global/bin/claude", // npm global without sudo
+                "/usr/local/bin/claude", // manual install
+                "/opt/homebrew/bin/claude", // Homebrew
+                "/usr/bin/claude", // system package managers
             )
         }
 

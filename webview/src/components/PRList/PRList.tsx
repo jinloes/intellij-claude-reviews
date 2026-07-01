@@ -423,8 +423,12 @@ function PRItem({ pr, selected, onClick }: ItemProps) {
           #{pr.number}
         </span>
         {pr.hasDraft && (
-          <span className="text-[9px] font-bold tracking-wider text-[hsl(var(--status-comment))] leading-none">
-            DRAFT
+          <span
+            className="text-[9px] font-bold tracking-wider text-[hsl(var(--status-comment))] leading-none"
+            title="Saved review draft"
+            aria-label="Saved review draft"
+          >
+            REV-DRAFT
           </span>
         )}
       </div>

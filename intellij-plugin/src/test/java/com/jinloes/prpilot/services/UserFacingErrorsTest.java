@@ -52,4 +52,23 @@ class UserFacingErrorsTest {
             assertThat(msg).contains("invalid review format").contains("Retry");
         }
     }
+
+    @Nested
+    class ForProviderNotInstalled {
+
+        @Test
+        void copilotGuidanceNamesTheCopilotCli() {
+            String msg = UserFacingErrors.forProviderNotInstalled(ReviewProvider.COPILOT);
+            assertThat(msg)
+                    .contains("copilot")
+                    .contains("GitHub Copilot CLI")
+                    .contains("try again");
+        }
+
+        @Test
+        void claudeGuidanceNamesTheClaudeCli() {
+            String msg = UserFacingErrors.forProviderNotInstalled(ReviewProvider.CLAUDE);
+            assertThat(msg).contains("claude").contains("Claude Code CLI").contains("try again");
+        }
+    }
 }

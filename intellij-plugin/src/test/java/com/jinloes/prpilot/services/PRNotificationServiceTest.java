@@ -2,11 +2,54 @@ package com.jinloes.prpilot.services;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.jinloes.prpilot.model.PullRequest;
+import com.jinloes.prpilot.services.PRNotificationService.Candidate;
+import com.jinloes.prpilot.services.PRNotificationService.NotificationSource;
 import java.io.IOException;
+import java.util.List;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 class PRNotificationServiceTest {
+
+    private static PullRequest pr(String owner, String repo, int number) {
+        return new PullRequest(
+                "Title #" + number, "https://github.test", owner, repo, number, "", "octocat", "");
+    }
+
+    @Nested
+    class NotificationLabeling {
+
+        @Test
+        void reviewRequestedTitleNamesTheSourceAndPr() {
+            String title =
+                    PRNotificationService.notificationTitle(
+                            pr("acme", "foo", 7), NotificationSource.REVIEW_REQUESTED);
+            assertThat(title).contains("Review requested").contains("acme/foo #7");
+        }
+
+        @Test
+        void starredRepoTitleIsDistinctFromReviewRequested() {
+            String title =
+                    PRNotificationService.notificationTitle(
+                            pr("acme", "bar", 9), NotificationSource.STARRED_REPO);
+            assertThat(title).contains("Starred repo").contains("acme/bar #9");
+        }
+
+        @Test
+        void reviewRequestedWinsWhenAPrMatchesBothSources() {
+            PullRequest shared = pr("acme", "foo", 1);
+            PullRequest starredOnly = pr("acme", "bar", 2);
+            List<Candidate> merged =
+                    PRNotificationService.mergeCandidates(
+                            List.of(shared), List.of(shared, starredOnly));
+
+            assertThat(merged).hasSize(2);
+            assertThat(merged.get(0).source()).isEqualTo(NotificationSource.REVIEW_REQUESTED);
+            assertThat(merged.get(1).pr().getNumber()).isEqualTo(2);
+            assertThat(merged.get(1).source()).isEqualTo(NotificationSource.STARRED_REPO);
+        }
+    }
 
     @Nested
     class QueryBuilders {

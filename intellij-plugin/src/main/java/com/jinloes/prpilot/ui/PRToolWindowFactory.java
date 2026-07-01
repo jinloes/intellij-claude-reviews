@@ -15,7 +15,7 @@ import com.jinloes.prpilot.model.PullRequest;
 import com.jinloes.prpilot.services.IntellijGitHubService;
 import com.jinloes.prpilot.services.UserFacingErrors;
 import com.jinloes.prpilot.settings.PluginSettings;
-import java.awt.BorderLayout;
+import java.awt.GridBagLayout;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -60,19 +60,14 @@ public class PRToolWindowFactory implements ToolWindowFactory {
         toolWindow.setTitleActions(titleActions);
     }
 
+    // The tool window is a thin launcher: the full PR Pilot UI lives in a center editor tab, which
+    // is opened automatically in createToolWindowContent. This keeps the tool window "effectively a
+    // button" rather than a second, competing surface.
     private JPanel createLauncherPanel(Project project) {
-        JPanel panel = new JPanel(new BorderLayout());
-        JLabel text =
-                new JLabel(
-                        "<html><center>PR Pilot runs in the editor area.<br>"
-                                + "Use <b>Back to Editor</b> to focus it.</center></html>",
-                        SwingConstants.CENTER);
-        JPanel buttonRow = new JPanel();
-        JButton openButton = new JButton("Back to Editor");
+        JPanel panel = new JPanel(new GridBagLayout());
+        JButton openButton = new JButton("Open PR Pilot");
         openButton.addActionListener(event -> PRPilotEditorOpener.openInEditor(project));
-        buttonRow.add(openButton);
-        panel.add(text, BorderLayout.CENTER);
-        panel.add(buttonRow, BorderLayout.SOUTH);
+        panel.add(openButton);
         return panel;
     }
 

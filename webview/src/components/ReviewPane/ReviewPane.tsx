@@ -16,6 +16,7 @@ import {
   type ReviewQualityAction,
   type ReviewQualityReport,
 } from '@/lib/reviewQuality'
+import { autosaveDelayMs, isReviewDirty, reviewSnapshot } from '@/lib/autosave'
 import {
   AlertTriangle,
   Check,
@@ -304,13 +305,25 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   const [pendingChatMessage, setPendingChatMessage] = useState<{ q: string; ctx: string; id: number } | null>(null)
   const [chunkedMode, setChunkedMode] = useState(false)
   const [chunkedProgress, setChunkedProgress] = useState<ChunkedProgress | null>(null)
-  const [qualityCheckedAt, setQualityCheckedAt] = useState<number | null>(null)
+  const [qualityExpanded, setQualityExpanded] = useState(false)
   const [chatHeight, setChatHeight] = useState(loadChatHeight)
   const chatHeightRef = useRef(chatHeight)
   const chatDragRef = useRef<{ startY: number; startHeight: number } | null>(null)
   const pendingSubmit = useRef<{ verdict: Verdict; comment: string } | null>(null)
   const currentPrRef = useRef(pr)
   const chunkSessionRef = useRef<ChunkSession | null>(null)
+  // Autosave bookkeeping. The draft IS the autosave target: a generated review
+  // is saved to GitHub immediately, and subsequent edits are flushed on a 30s
+  // debounce (and on hide / PR-switch). No separate local store.
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastSavedSnapshotRef = useRef<string | null>(null)
+  const lastSaveWasAutoRef = useRef(false)
+  const pendingAutosaveRef = useRef<{
+    pr: PR
+    result: ReviewResult
+    orphans: LineComment[]
+    snapshot: string
+  } | null>(null)
 
   useEffect(() => {
     currentPrRef.current = pr
@@ -327,9 +340,16 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     setFocusedCommentIdx(0)
     setChatVisible(false)
     setSelectedContext('')
-    setQualityCheckedAt(null)
+    setQualityExpanded(false)
     setChunkedProgress(null)
     chunkSessionRef.current = null
+    lastSavedSnapshotRef.current = null
+    lastSaveWasAutoRef.current = false
+    pendingAutosaveRef.current = null
+    if (autosaveTimerRef.current !== null) {
+      clearTimeout(autosaveTimerRef.current)
+      autosaveTimerRef.current = null
+    }
   }, [pr])
 
   useEffect(() => {
@@ -354,6 +374,9 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
             const diff = msg.diff ?? msg.validationDiff ?? ''
             const validationDiff = msg.validationDiff ?? diff
             const result = withSortedComments(withValidatedComments(msg.result, validationDiff))
+            // A freshly loaded draft is already on GitHub: treat it as the saved
+            // baseline so autosave only fires on subsequent edits.
+            lastSavedSnapshotRef.current = reviewSnapshot(result)
             setFocusedCommentIdx(0)
             setState({
               kind: 'draftPresent',
@@ -536,22 +559,27 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
 
         case 'draftSaved': {
           setSaving(false)
-          if (msg.commentsDropped) {
+          if (msg.commentsDropped && !lastSaveWasAutoRef.current) {
             toast.warning('Some comments were dropped', {
               description: 'Outdated line references were removed when saving to GitHub.',
             })
           }
           setState((prev) => {
-            if (prev.kind !== 'reviewUnsaved' && prev.kind !== 'draftPresent') return prev
+            const saved = resultOf(prev)
+            if (!saved) return prev
+            const elapsed =
+              'generationElapsedSec' in prev
+                ? (prev as { generationElapsedSec?: number }).generationElapsedSec
+                : undefined
             return {
               kind: 'draftPresent',
-              result: prev.result,
+              result: saved,
               reviewId: msg.reviewId,
               staleCommits: false,
               importedFromGitHub: false,
-              diff: prev.diff,
-              validationDiff: prev.validationDiff,
-              generationElapsedSec: prev.generationElapsedSec,
+              diff: diffOf(prev),
+              validationDiff: validationDiffOf(prev),
+              generationElapsedSec: elapsed,
             }
           })
           const pending = pendingSubmit.current
@@ -573,6 +601,10 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
 
         case 'draftSaveError':
           setSaving(false)
+          // The optimistic snapshot set when dispatching the save is no longer
+          // valid — clear it so the review is treated as unsaved (dirty) again.
+          lastSavedSnapshotRef.current = null
+          lastSaveWasAutoRef.current = false
           pendingSubmit.current = null
           setState((prev) => ({
             kind: 'saveError',
@@ -673,14 +705,132 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     () => (result ? runReviewQualityCheck(result, validationDiff) : null),
     [result, validationDiff],
   )
+  const qualityRiskCount = qualityReport ? qualityReport.issues.reduce((n, issue) => n + issue.count, 0) : 0
   const preflight = useMemo(() => summarizeDiffPreflight(validationDiff), [validationDiff])
   const recommendation = useMemo(
     () => chunkRecommendation(preflight, isDiffTruncated(validationDiff) || isDiffTruncated(diff)),
     [preflight, validationDiff, diff],
   )
 
+  const savableResult: ReviewResult | null =
+    state.kind === 'reviewUnsaved' || state.kind === 'draftPresent' ? state.result : null
+  const savableSnapshot = savableResult ? reviewSnapshot(savableResult) : null
+  const autosaveDirty = isReviewDirty(savableSnapshot, lastSavedSnapshotRef.current)
+
+  // Persists a review to its GitHub draft. Used by manual Save, Submit, and
+  // autosave alike so the saved-snapshot bookkeeping stays consistent.
+  const dispatchSave = useCallback(
+    (targetPr: PR, r: ReviewResult, orphans: LineComment[], isAuto: boolean) => {
+      lastSaveWasAutoRef.current = isAuto
+      lastSavedSnapshotRef.current = reviewSnapshot(r)
+      if (autosaveTimerRef.current !== null) {
+        clearTimeout(autosaveTimerRef.current)
+        autosaveTimerRef.current = null
+      }
+      setSaving(true)
+      sendToHost({
+        type: 'saveDraft',
+        number: targetPr.number,
+        owner: targetPr.owner,
+        repo: targetPr.repo,
+        result: r,
+        orphans,
+      })
+    },
+    [],
+  )
+
+  // Schedule autosave: immediately after generation, debounced for later edits.
+  useEffect(() => {
+    if (!pr || !savableResult || !savableSnapshot || !autosaveDirty) {
+      pendingAutosaveRef.current = null
+      return
+    }
+    pendingAutosaveRef.current = {
+      pr,
+      result: savableResult,
+      orphans: partition.orphans,
+      snapshot: savableSnapshot,
+    }
+    // Don't stack saves on top of an in-flight save/submit/delete.
+    if (saving || submitting || deleting) return
+    const delay = autosaveDelayMs(state.kind === 'reviewUnsaved' ? 'reviewUnsaved' : 'draftPresent')
+    if (delay === 0) {
+      dispatchSave(pr, savableResult, partition.orphans, true)
+      return
+    }
+    autosaveTimerRef.current = setTimeout(() => {
+      autosaveTimerRef.current = null
+      dispatchSave(pr, savableResult, partition.orphans, true)
+    }, delay)
+    return () => {
+      if (autosaveTimerRef.current !== null) {
+        clearTimeout(autosaveTimerRef.current)
+        autosaveTimerRef.current = null
+      }
+    }
+  }, [
+    pr,
+    savableResult,
+    savableSnapshot,
+    autosaveDirty,
+    saving,
+    submitting,
+    deleting,
+    state,
+    partition,
+    dispatchSave,
+  ])
+
+  // Flush a pending debounced autosave when the panel is hidden or unloaded so
+  // edits aren't stranded if the user tabs away or closes the editor.
+  useEffect(() => {
+    function flushPending() {
+      const p = pendingAutosaveRef.current
+      if (!p || p.snapshot === lastSavedSnapshotRef.current) return
+      if (autosaveTimerRef.current !== null) {
+        clearTimeout(autosaveTimerRef.current)
+        autosaveTimerRef.current = null
+      }
+      dispatchSave(p.pr, p.result, p.orphans, true)
+    }
+    function onVisibilityChange() {
+      if (document.visibilityState === 'hidden') flushPending()
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    window.addEventListener('pagehide', flushPending)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      window.removeEventListener('pagehide', flushPending)
+    }
+  }, [dispatchSave])
+
+  // Flush a pending autosave for the outgoing PR when switching PRs or
+  // unmounting (fire-and-forget; this component's state is moving on).
+  useEffect(() => {
+    return () => {
+      if (autosaveTimerRef.current !== null) {
+        clearTimeout(autosaveTimerRef.current)
+        autosaveTimerRef.current = null
+      }
+      const p = pendingAutosaveRef.current
+      if (p && p.snapshot !== lastSavedSnapshotRef.current) {
+        lastSavedSnapshotRef.current = p.snapshot
+        sendToHost({
+          type: 'saveDraft',
+          number: p.pr.number,
+          owner: p.pr.owner,
+          repo: p.pr.repo,
+          result: p.result,
+          orphans: p.orphans,
+        })
+      }
+      pendingAutosaveRef.current = null
+    }
+  }, [pr])
+
   function handleRunQualityCheck() {
-    setQualityCheckedAt(Date.now())
+    setQualityExpanded(true)
   }
 
   function applyQualityRepair(action: ReviewQualityAction) {
@@ -692,7 +842,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
         return applyReviewQualityRepairs(baseResult, qualityReport, [action]).lineComments
       }),
     )
-    setQualityCheckedAt(Date.now())
+    setQualityExpanded(true)
   }
 
   if (!pr) {
@@ -790,16 +940,9 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   }
 
   function handleSave() {
-    if (state.kind !== 'reviewUnsaved' && state.kind !== 'draftPresent') return
-    setSaving(true)
-    sendToHost({
-      type: 'saveDraft',
-      number: currentPr.number,
-      owner: currentPr.owner,
-      repo: currentPr.repo,
-      result: state.result,
-      orphans: orphanComments,
-    })
+    const r = resultOf(state)
+    if (!r) return
+    dispatchSave(currentPr, r, orphanComments, false)
   }
 
   function handleDelete() {
@@ -812,18 +955,28 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     sendToHost({ type: 'selectPR', number: currentPr.number, owner: currentPr.owner, repo: currentPr.repo })
   }
 
+  // Re-anchor an imported draft against the current diff: snap comments back to
+  // valid positions and clear the imported flag. The resulting edit autosaves,
+  // which re-encodes proper hidden metadata to GitHub so the draft reloads
+  // cleanly next time.
+  function handleReanchorDraft() {
+    setState((prev) => {
+      if (prev.kind !== 'draftPresent') return prev
+      const reanchored = withSortedComments(withValidatedComments(prev.result, validationDiffOf(prev)))
+      return { ...prev, result: reanchored, importedFromGitHub: false }
+    })
+  }
+
   function handleSubmit(verdict: Verdict, comment = '') {
-    if (state.kind === 'reviewUnsaved') {
+    const r = resultOf(state)
+    // Save first whenever the in-memory review may differ from the GitHub draft
+    // (never-saved review, unsaved edits, or a prior save error) so the submit
+    // always reflects what the reviewer sees.
+    const needsSaveFirst =
+      state.kind === 'reviewUnsaved' || state.kind === 'saveError' || autosaveDirty
+    if (r && needsSaveFirst) {
       pendingSubmit.current = { verdict, comment }
-      setSaving(true)
-      sendToHost({
-        type: 'saveDraft',
-        number: currentPr.number,
-        owner: currentPr.owner,
-        repo: currentPr.repo,
-        result: state.result,
-        orphans: orphanComments,
-      })
+      dispatchSave(currentPr, r, orphanComments, false)
       return
     }
     setSubmitting(true)
@@ -1038,17 +1191,17 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
                   onChunkedModeChange={setChunkedMode}
                 />
               )}
-              {result && !qualityCheckedAt && (
+              {result && qualityReport && qualityRiskCount > 0 && !qualityExpanded && (
                 <div className="px-4 pt-3">
-                  <QualityCheckHintCard onRunQualityCheck={handleRunQualityCheck} />
+                  <QualityCheckBadge count={qualityRiskCount} onReview={() => setQualityExpanded(true)} />
                 </div>
               )}
-              {result && qualityCheckedAt && qualityReport && (
+              {result && qualityReport && qualityExpanded && (
                 <div className="px-4 pt-3">
                   <ReviewQualityCheckCard
-                    checkedAt={qualityCheckedAt}
                     report={qualityReport}
                     onApplyRepair={applyQualityRepair}
+                    onCollapse={() => setQualityExpanded(false)}
                   />
                 </div>
               )}
@@ -1069,6 +1222,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
                 onEditOrphan={orphanHandlers.onEditOrphan}
                 onDeleteOrphan={orphanHandlers.onDeleteOrphan}
                 onReloadDraft={handleReloadDraft}
+                onReanchor={handleReanchorDraft}
                 onOpenSettings={() => sendToHost({ type: 'openSettings' })}
                 onOpenAuthGuide={() => sendToHost({ type: 'openUrl', url: 'https://cli.github.com/manual/gh_auth_login' })}
               />
@@ -1133,6 +1287,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
         <ReviewFooter
           state={state}
           saving={saving}
+          autosaveDirty={autosaveDirty}
           submitting={submitting}
           deleting={deleting}
           onSave={handleSave}
@@ -1235,35 +1390,32 @@ function ReviewOverrides({
   )
 }
 
-function QualityCheckHintCard({ onRunQualityCheck }: { onRunQualityCheck: () => void }) {
+function QualityCheckBadge({ count, onReview }: { count: number; onReview: () => void }) {
   return (
-    <div className="rounded border border-border bg-muted/20 px-3 py-2.5">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="min-w-0">
-          <p className="text-xs font-semibold text-foreground">Quality Check not run yet</p>
-          <p className="mt-1 text-[11px] text-muted-foreground">
-            Scans for outdated anchors, low-evidence high-severity comments, and missing rationale before submit.
-          </p>
-        </div>
-        <Button variant="outline" size="sm" className="gap-1.5 text-xs" onClick={onRunQualityCheck}>
-          <Check className="w-3.5 h-3.5" />
-          Run Quality Check
-        </Button>
-      </div>
-    </div>
+    <button
+      type="button"
+      onClick={onReview}
+      className="flex w-full items-center gap-2 rounded border border-status-issue/50 bg-status-issue/10 px-3 py-2 text-left text-xs transition-colors hover:bg-status-issue/20"
+    >
+      <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-status-issue" />
+      <span className="font-semibold text-foreground">
+        {count} trust {count === 1 ? 'risk' : 'risks'} detected
+      </span>
+      <span className="text-muted-foreground">— scanned automatically</span>
+      <span className="ml-auto font-medium text-foreground">Review</span>
+    </button>
   )
 }
 
 function ReviewQualityCheckCard({
-  checkedAt,
   report,
   onApplyRepair,
+  onCollapse,
 }: {
-  checkedAt: number
   report: ReviewQualityReport
   onApplyRepair: (action: ReviewQualityAction) => void
+  onCollapse: () => void
 }) {
-  const checkedAtLabel = new Date(checkedAt).toLocaleTimeString()
   const scoreTone = report.score >= 85 ? 'text-status-approve' : report.score >= 65 ? 'text-status-suggestion' : 'text-status-issue'
 
   return (
@@ -1271,7 +1423,9 @@ function ReviewQualityCheckCard({
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs font-semibold">Review Quality Check</span>
         <span className={cn('text-xs font-mono', scoreTone)}>Score {report.score}/100</span>
-        <span className="text-[11px] text-muted-foreground">Checked at {checkedAtLabel}</span>
+        <Button variant="ghost" size="sm" className="ml-auto h-6 px-2 text-[11px]" onClick={onCollapse}>
+          Hide
+        </Button>
       </div>
       {report.issues.length === 0 ? (
         <p className="mt-1 text-xs text-status-approve">No major trust issues detected in this draft.</p>
@@ -1365,6 +1519,7 @@ interface ContentProps {
   onEditOrphan: (orphan: LineComment, body: string) => void
   onDeleteOrphan: (orphan: LineComment) => void
   onReloadDraft: () => void
+  onReanchor: () => void
   onOpenSettings: () => void
   onOpenAuthGuide: () => void
 }
@@ -1419,6 +1574,7 @@ function ReviewAndDiff({
   onVerifyComment,
   staleCommits,
   importedFromGitHub,
+  onReanchor,
   inlineComments,
   orphanComments,
   onEditOrphan,
@@ -1433,6 +1589,7 @@ function ReviewAndDiff({
   onVerifyComment?: (comment: LineComment) => void
   staleCommits?: boolean
   importedFromGitHub?: boolean
+  onReanchor?: () => void
   inlineComments: LineComment[]
   orphanComments: LineComment[]
   onEditOrphan: (orphan: LineComment, body: string) => void
@@ -1453,7 +1610,23 @@ function ReviewAndDiff({
         <Alert className="mx-4 mt-3 mb-0 border-status-suggestion/40 bg-status-suggestion/5">
           <AlertTriangle className="h-3.5 w-3.5 text-status-suggestion" />
           <AlertDescription className="text-xs text-status-suggestion/90">
-            Draft was reconstructed from GitHub comments — hidden PR Pilot metadata was missing, so review details may be incomplete.
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span>
+                Draft was reconstructed from GitHub comments — hidden PR Pilot metadata was missing, so review details
+                may be incomplete.
+              </span>
+              {onReanchor && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 shrink-0 gap-1.5 px-2 text-[11px]"
+                  onClick={onReanchor}
+                >
+                  <RefreshCw className="h-3 w-3" />
+                  Re-anchor from current diff
+                </Button>
+              )}
+            </div>
           </AlertDescription>
         </Alert>
       )}
@@ -1559,6 +1732,7 @@ function PaneContent({
   onEditOrphan,
   onDeleteOrphan,
   onReloadDraft,
+  onReanchor,
   onOpenSettings,
   onOpenAuthGuide,
 }: ContentProps) {
@@ -1661,6 +1835,7 @@ function PaneContent({
           onVerifyComment={onVerifyComment}
           staleCommits={state.staleCommits}
           importedFromGitHub={state.importedFromGitHub}
+          onReanchor={onReanchor}
           inlineComments={inlineComments}
           orphanComments={orphanComments}
           onEditOrphan={onEditOrphan}
@@ -1758,6 +1933,7 @@ function PaneContent({
 interface FooterProps {
   state: PaneState
   saving: boolean
+  autosaveDirty: boolean
   submitting: boolean
   deleting: boolean
   onSave: () => void
@@ -1774,6 +1950,7 @@ interface FooterProps {
 function ReviewFooter({
   state,
   saving,
+  autosaveDirty,
   submitting,
   deleting,
   onSave,
@@ -1879,10 +2056,29 @@ function ReviewFooter({
           </AlertDialog>
         )}
 
-        <Button variant="secondary" size="sm" onClick={onSave} disabled={busy} className="gap-1.5 text-xs">
-          {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CloudUpload className="w-3.5 h-3.5" />}
-          {saving ? 'Saving…' : 'Save Draft'}
-        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={onSave}
+              disabled={saving || submitting || deleting || (!autosaveDirty && state.kind === 'draftPresent')}
+              className="gap-1.5 text-xs"
+            >
+              {saving ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : autosaveDirty ? (
+                <CloudUpload className="w-3.5 h-3.5" />
+              ) : (
+                <Check className="w-3.5 h-3.5" />
+              )}
+              {saving ? 'Saving…' : autosaveDirty ? 'Save now' : 'Saved'}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="top" className="max-w-xs text-xs leading-relaxed">
+            Changes save to the GitHub draft automatically. Click to save right now.
+          </TooltipContent>
+        </Tooltip>
 
         <SubmitSplitButton
           verdict={state.kind === 'draftPresent' || state.kind === 'reviewUnsaved' ? state.result.verdict : 'APPROVE'}

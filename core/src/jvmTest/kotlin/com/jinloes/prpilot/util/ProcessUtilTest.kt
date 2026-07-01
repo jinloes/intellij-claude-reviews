@@ -30,4 +30,26 @@ class ProcessUtilJvmTest : FunSpec({
             ProcessUtil.findBinary("fallback", listOf(tempDir.absolutePath)) shouldBe "fallback"
         }
     }
+
+    context("isBinaryAvailable") {
+
+        test("true when a candidate path exists") {
+            val bin = File(tempDir, "claude").also { it.createNewFile() }
+            ProcessUtil.isBinaryAvailable("claude", listOf(bin.absolutePath)) shouldBe true
+        }
+
+        test("false when no candidate exists and the name is not on PATH") {
+            ProcessUtil.isBinaryAvailable(
+                "pr-pilot-nonexistent-binary-xyz",
+                listOf("/no/such/path", "/also/missing"),
+            ) shouldBe false
+        }
+
+        test("directory candidate is not treated as an available binary") {
+            ProcessUtil.isBinaryAvailable(
+                "pr-pilot-nonexistent-binary-xyz",
+                listOf(tempDir.absolutePath),
+            ) shouldBe false
+        }
+    }
 })
