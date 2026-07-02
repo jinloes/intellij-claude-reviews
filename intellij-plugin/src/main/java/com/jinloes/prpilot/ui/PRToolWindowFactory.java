@@ -208,13 +208,19 @@ public class PRToolWindowFactory implements ToolWindowFactory {
             boolean finalLimited = limited;
             ApplicationManager.getApplication()
                     .invokeLater(
-                            () ->
-                                    webviewPanel.loadPRs(
-                                            prs,
-                                            defaultRepo,
-                                            webviewPanel.getSearchScope(),
-                                            currentRepo,
-                                            finalLimited));
+                            () -> {
+                                webviewPanel.loadPRs(
+                                        prs,
+                                        defaultRepo,
+                                        webviewPanel.getSearchScope(),
+                                        currentRepo,
+                                        finalLimited);
+                                PRPilotEditorOpener.PendingActivation pending =
+                                        PRPilotEditorOpener.consumePendingActivation(project);
+                                if (pending != null) {
+                                    webviewPanel.activatePr(pending.pr(), pending.source());
+                                }
+                            });
         } catch (Exception e) {
             log.warn("Failed to load PR list for webview: {}", e.getMessage());
             String detail = UserFacingErrors.forGitHub(e, "load pull requests");
@@ -237,7 +243,6 @@ public class PRToolWindowFactory implements ToolWindowFactory {
         } else if (!"all".equals(state)) {
             q.append(" is:open");
         }
-        q.append(" draft:false");
 
         switch (WebviewPanel.normalizeSearchScope(searchScope)) {
             case "assigned" -> q.append(" assignee:@me");

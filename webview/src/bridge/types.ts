@@ -35,6 +35,7 @@ export interface DraftLoadedMessage {
   staleCommits?: boolean
   importedFromGitHub?: boolean
   status?: string
+  providerReadiness?: ProviderReadiness
 }
 
 export interface ReviewGeneratingMessage {
@@ -104,7 +105,13 @@ export interface PrDraftStatusUpdatedMessage {
   number: number
   owner: string
   repo: string
-  hasDraft: boolean
+  hasReviewDraft: boolean
+}
+
+export interface ActivatePrMessage {
+  type: 'activatePR'
+  pr: PR
+  source?: 'notification'
 }
 
 export interface ChatChunkMessage {
@@ -148,6 +155,7 @@ export type IncomingMessage =
   | DraftDeletedMessage
   | DraftDeleteErrorMessage
   | PrDraftStatusUpdatedMessage
+  | ActivatePrMessage
   | ChatChunkMessage
   | ChatResponseMessage
   | ChatErrorMessage
@@ -161,7 +169,14 @@ export interface PR {
   author: string
   createdAt: string
   htmlUrl: string
-  hasDraft: boolean
+  isDraft: boolean
+  hasReviewDraft: boolean
+}
+
+export interface ProviderReadiness {
+  provider: 'claude' | 'copilot'
+  available: boolean
+  detail: string
 }
 
 export interface ReviewResult {

@@ -111,6 +111,16 @@ class GitHubServiceNetworkTest : FunSpec({
             prs[0].author shouldBe "alice"
         }
 
+        test("maps GitHub draft PR flag from search results") {
+            val responseBody = """{"items":[{"title":"WIP: fix bug","html_url":"https://github.com/owner/repo/pull/2","number":2,"draft":true,"body":"desc","user":{"login":"alice"},"created_at":"2024-01-02","repository_url":"https://api.github.com/repos/owner/repo"}]}"""
+            val svc = mockServiceResponses(responseBody)
+
+            val prs = svc.searchPRs("token", "is:open")
+
+            prs shouldHaveSize 1
+            prs[0].isDraft.shouldBeTrue()
+        }
+
         test("empty items list returns empty list") {
             val svc = mockServiceResponses("""{"items":[]}""")
             svc.searchPRs("token", "is:open").shouldBeEmpty()

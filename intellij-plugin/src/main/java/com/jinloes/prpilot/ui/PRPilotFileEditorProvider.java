@@ -38,13 +38,18 @@ public class PRPilotFileEditorProvider implements FileEditorProvider, DumbAware 
 
         WebviewPanel webviewPanel = new WebviewPanel(project);
         try {
+            PRPilotEditorOpener.registerWebviewPanel(project, webviewPanel);
             PRToolWindowFactory.wireWebviewLoading(project, webviewPanel);
             return new PRPilotFileEditor(
                     project,
                     webviewPanel,
                     (PRPilotVirtualFile) file,
-                    () -> clearPrimaryEditorOpen(project));
+                    () -> {
+                        PRPilotEditorOpener.unregisterWebviewPanel(project, webviewPanel);
+                        clearPrimaryEditorOpen(project);
+                    });
         } catch (RuntimeException e) {
+            PRPilotEditorOpener.unregisterWebviewPanel(project, webviewPanel);
             clearPrimaryEditorOpen(project);
             throw e;
         }

@@ -36,31 +36,30 @@ class PRToolWindowFactoryTest {
 
         @Test
         void noRepos_fallsBackToAuthorMe() {
-            assertThat(buildQuery("", List.of())).isEqualTo("is:pr is:open draft:false author:@me");
+            assertThat(buildQuery("", List.of())).isEqualTo("is:pr is:open author:@me");
         }
 
         @Test
         void nullCurrentRepo_withNoStarred_fallsBackToAuthorMe() {
-            assertThat(buildQuery(null, List.of()))
-                    .isEqualTo("is:pr is:open draft:false author:@me");
+            assertThat(buildQuery(null, List.of())).isEqualTo("is:pr is:open author:@me");
         }
 
         @Test
         void currentRepoOnly_buildsRepoQuery() {
             assertThat(buildQuery("acme/platform", List.of()))
-                    .isEqualTo("is:pr is:open draft:false repo:acme/platform");
+                    .isEqualTo("is:pr is:open repo:acme/platform");
         }
 
         @Test
         void starredOnly_noCurrentRepo_doesNotAffectCurrentRepoScope() {
             String q = buildQuery("", List.of("alice/foo", "bob/bar"));
-            assertThat(q).isEqualTo("is:pr is:open draft:false author:@me");
+            assertThat(q).isEqualTo("is:pr is:open author:@me");
         }
 
         @Test
         void currentRepoScopeIgnoresStarredRepos() {
             String q = buildQuery("acme/platform", List.of("acme/infra", "alice/foo"));
-            assertThat(q).isEqualTo("is:pr is:open draft:false repo:acme/platform");
+            assertThat(q).isEqualTo("is:pr is:open repo:acme/platform");
             assertThat(q).doesNotContain("acme/infra").doesNotContain("alice/foo");
         }
 
@@ -136,7 +135,7 @@ class PRToolWindowFactoryTest {
         @Test
         void unknownScopeFallsBackToCurrentRepo() {
             assertThat(buildQuery("acme/platform", List.of(), "open", "surprise"))
-                    .isEqualTo("is:pr is:open draft:false repo:acme/platform");
+                    .isEqualTo("is:pr is:open repo:acme/platform");
         }
 
         // ── Helpers ──────────────────────────────────────────────────────────

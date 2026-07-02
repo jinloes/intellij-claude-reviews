@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Toaster } from 'sonner'
 import { PRList } from './components/PRList'
 import { ReviewPane } from './components/ReviewPane'
-import { type PR } from './bridge/types'
+import { onHostMessage, sendToHost, type PR } from './bridge/types'
 
 // Dev-mode fixture data — replaced by real bridge messages in production
 const DEV_PRS: PR[] = [
@@ -14,7 +14,8 @@ const DEV_PRS: PR[] = [
     author: 'jsmith',
     createdAt: '2026-04-28T14:32:00Z',
     htmlUrl: '#',
-    hasDraft: true,
+    isDraft: false,
+    hasReviewDraft: true,
   },
   {
     number: 4819,
@@ -24,7 +25,8 @@ const DEV_PRS: PR[] = [
     author: 'mchen',
     createdAt: '2026-04-27T09:11:00Z',
     htmlUrl: '#',
-    hasDraft: false,
+    isDraft: true,
+    hasReviewDraft: false,
   },
   {
     number: 312,
@@ -34,7 +36,8 @@ const DEV_PRS: PR[] = [
     author: 'rlopez',
     createdAt: '2026-04-26T17:45:00Z',
     htmlUrl: '#',
-    hasDraft: false,
+    isDraft: false,
+    hasReviewDraft: false,
   },
   {
     number: 4815,
@@ -44,7 +47,8 @@ const DEV_PRS: PR[] = [
     author: 'jsmith',
     createdAt: '2026-04-25T11:00:00Z',
     htmlUrl: '#',
-    hasDraft: true,
+    isDraft: true,
+    hasReviewDraft: true,
   },
   {
     number: 88,
@@ -54,7 +58,8 @@ const DEV_PRS: PR[] = [
     author: 'bot',
     createdAt: '2026-04-24T08:00:00Z',
     htmlUrl: '#',
-    hasDraft: false,
+    isDraft: false,
+    hasReviewDraft: false,
   },
 ]
 
@@ -91,12 +96,42 @@ export default function App() {
   const dragging = useRef(false)
   const dragStartX = useRef(0)
   const dragStartW = useRef(0)
+  const selectedPrRef = useRef<PR | null>(null)
+  const unsavedReviewRef = useRef(false)
   // Tracks the latest width synchronously so handleMouseUp can persist without stale closure
   const currentWidthRef = useRef(leftWidth)
 
   useEffect(() => {
+    selectedPrRef.current = selectedPR
+  }, [selectedPR])
+
+  useEffect(() => {
+    unsavedReviewRef.current = hasUnsavedReview
+  }, [hasUnsavedReview])
+
+  useEffect(() => {
     const id = setTimeout(seedDevData, 100)
     return () => clearTimeout(id)
+  }, [])
+
+  useEffect(() => {
+    return onHostMessage((msg) => {
+      if (msg.type !== 'activatePR') return
+      const nextPr = msg.pr
+      const currentPr = selectedPrRef.current
+      const samePr = currentPr
+        && currentPr.number === nextPr.number
+        && currentPr.owner === nextPr.owner
+        && currentPr.repo === nextPr.repo
+      if (!samePr && unsavedReviewRef.current) {
+        const confirmed = window.confirm(
+          'You have unsaved review changes for the currently selected PR. Switch anyway and discard in-memory edits?',
+        )
+        if (!confirmed) return
+      }
+      setSelectedPR(nextPr)
+      sendToHost({ type: 'selectPR', number: nextPr.number, owner: nextPr.owner, repo: nextPr.repo })
+    })
   }, [])
 
   const handleMouseMove = useCallback((e: MouseEvent) => {
@@ -147,6 +182,7 @@ export default function App() {
       {/* Left column — PR list */}
       <div data-testid="pr-list-shell" style={{ width: leftWidth, maxWidth: '45vw' }} className="shrink-0 flex flex-col overflow-hidden">
         <PRList
+          selectedPr={selectedPR}
           onSelect={(nextPr) => {
             if (!nextPrSelectionAllowed(nextPr)) return false
             setSelectedPR(nextPr)

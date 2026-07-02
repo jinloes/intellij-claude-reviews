@@ -13,7 +13,8 @@ function pr(owner: string, repo: string, number: number): PR {
     author: 'octocat',
     createdAt: '',
     htmlUrl: 'https://github.test',
-    hasDraft: false,
+    isDraft: false,
+    hasReviewDraft: false,
   };
 }
 
@@ -46,4 +47,5 @@ test('mergeBySource gives review-requested precedence and preserves order', () =
   assert.equal(merged[1].source, 'starredRepo');
   assert.equal(merged[1].pr.number, 2);
 });
+
 

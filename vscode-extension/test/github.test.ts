@@ -16,35 +16,35 @@ import {
 test('buildPRSearchQuery uses current repo when scope is currentRepo', () => {
   assert.equal(
     buildPRSearchQuery('open', 'currentRepo', 'acme/platform'),
-    'is:pr is:open draft:false repo:acme/platform',
+    'is:pr is:open repo:acme/platform',
   );
 });
 
 test('buildPRSearchQuery falls back to authored PRs when current repo is missing', () => {
   assert.equal(
     buildPRSearchQuery('open', 'currentRepo'),
-    'is:pr is:open draft:false author:@me',
+    'is:pr is:open author:@me',
   );
 });
 
 test('buildPRSearchQuery supports review-requested scope', () => {
   assert.equal(
     buildPRSearchQuery('open', 'reviewRequested', 'acme/platform'),
-    'is:pr is:open draft:false review-requested:@me',
+    'is:pr is:open review-requested:@me',
   );
 });
 
 test('buildPRSearchQuery supports assigned scope', () => {
   assert.equal(
     buildPRSearchQuery('closed', 'assigned'),
-    'is:pr is:closed draft:false assignee:@me',
+    'is:pr is:closed assignee:@me',
   );
 });
 
 test('buildPRSearchQuery supports authored scope', () => {
   assert.equal(
     buildPRSearchQuery('all', 'authored'),
-    'is:pr draft:false author:@me',
+    'is:pr author:@me',
   );
 });
 

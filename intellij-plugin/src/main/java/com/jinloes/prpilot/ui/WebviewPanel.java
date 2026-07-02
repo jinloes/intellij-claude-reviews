@@ -89,7 +89,8 @@ public class WebviewPanel implements Disposable {
             String author,
             @JsonProperty("createdAt") String createdAt,
             @JsonProperty("htmlUrl") String htmlUrl,
-            @JsonProperty("hasDraft") boolean hasDraft) {}
+            @JsonProperty("isDraft") boolean isDraft,
+            @JsonProperty("hasReviewDraft") boolean hasReviewDraft) {}
 
     private record PrListStatus(
             String searchScope, String currentRepo, int resultLimit, boolean limited) {}
@@ -112,7 +113,8 @@ public class WebviewPanel implements Disposable {
             @JsonProperty("validationDiff") String validationDiff,
             boolean staleCommits,
             boolean importedFromGitHub,
-            String status) {}
+            String status,
+            @JsonProperty("providerReadiness") ProviderReadinessDto providerReadiness) {}
 
     private record ReviewGeneratingMsg(
             String type, @JsonProperty("prKey") String prKey, String message) {}
@@ -147,7 +149,11 @@ public class WebviewPanel implements Disposable {
             int number,
             String owner,
             String repo,
-            @JsonProperty("hasDraft") boolean hasDraft) {}
+            @JsonProperty("hasReviewDraft") boolean hasReviewDraft) {}
+
+    private record ProviderReadinessDto(String provider, boolean available, String detail) {}
+
+    private record ActivatePrMsg(String type, @JsonProperty("pr") WebviewPr pr, String source) {}
 
     private record SetupRequiredMsg(String type, String reason, String detail) {}
 
@@ -567,7 +573,8 @@ public class WebviewPanel implements Disposable {
                                                 null,
                                                 false,
                                                 false,
-                                                "No GitHub token configured."));
+                                                "No GitHub token configured.",
+                                                currentProviderReadiness()));
                                 return;
                             }
 
@@ -685,6 +692,7 @@ public class WebviewPanel implements Disposable {
                                     StringUtils.isNotBlank(fetchedValidationDiff)
                                             ? fetchedValidationDiff
                                             : fetchedDiff;
+                            ProviderReadinessDto providerReadiness = currentProviderReadiness();
 
                             // Write prefetched data only if the same PR is still active to
                             // avoid clobbering state for a PR the user already switched away from.
@@ -709,6 +717,13 @@ public class WebviewPanel implements Disposable {
 
                             if (merged) {
                                 pushMessage(
+                                        new PrDraftStatusMsg(
+                                                "prDraftStatusUpdated",
+                                                number,
+                                                owner,
+                                                repo,
+                                                false));
+                                pushMessage(
                                         new DraftLoadedMsg(
                                                 "draftLoaded",
                                                 key,
@@ -719,7 +734,8 @@ public class WebviewPanel implements Disposable {
                                                 effectiveValidationDiff,
                                                 false,
                                                 false,
-                                                "PR is merged."));
+                                                "PR is merged.",
+                                                providerReadiness));
                                 return;
                             }
 
@@ -729,6 +745,9 @@ public class WebviewPanel implements Disposable {
                                                 && !savedHeadSha.equals(currentHeadSha);
                                 ReviewResultDto dto =
                                         ReviewMapper.INSTANCE.toDto(pending.getResult());
+                                pushMessage(
+                                        new PrDraftStatusMsg(
+                                                "prDraftStatusUpdated", number, owner, repo, true));
                                 pushMessage(
                                         new DraftLoadedMsg(
                                                 "draftLoaded",
@@ -740,12 +759,16 @@ public class WebviewPanel implements Disposable {
                                                 effectiveValidationDiff,
                                                 stale,
                                                 pending.component3(),
-                                                "Loaded pending draft review."));
+                                                "Loaded pending draft review.",
+                                                providerReadiness));
                                 pendingReviewId = pending.getId();
                                 lastResult = pending.getResult();
                                 return;
                             }
 
+                            pushMessage(
+                                    new PrDraftStatusMsg(
+                                            "prDraftStatusUpdated", number, owner, repo, false));
                             pushMessage(
                                     new DraftLoadedMsg(
                                             "draftLoaded",
@@ -757,7 +780,8 @@ public class WebviewPanel implements Disposable {
                                             effectiveValidationDiff,
                                             false,
                                             false,
-                                            ""));
+                                            "",
+                                            providerReadiness));
                         });
     }
 
@@ -985,6 +1009,17 @@ public class WebviewPanel implements Disposable {
         return provider == ReviewProvider.COPILOT
                 ? CopilotService.isBinaryAvailable()
                 : ClaudeService.isBinaryAvailable();
+    }
+
+    private static ProviderReadinessDto currentProviderReadiness() {
+        ReviewProvider provider = PluginSettings.getInstance().getReviewProvider();
+        boolean available = isProviderBinaryAvailable(provider);
+        return new ProviderReadinessDto(
+                provider == ReviewProvider.COPILOT ? "copilot" : "claude",
+                available,
+                available
+                        ? "Ready to generate reviews with the configured CLI."
+                        : UserFacingErrors.forProviderNotInstalled(provider));
     }
 
     // --- saveDraft ---
@@ -1433,14 +1468,8 @@ public class WebviewPanel implements Disposable {
                 prs.stream()
                         .map(
                                 pr ->
-                                        new WebviewPr(
-                                                pr.getNumber(),
-                                                pr.getTitle(),
-                                                pr.getOwner(),
-                                                pr.getRepo(),
-                                                pr.getAuthor(),
-                                                pr.getCreatedAt(),
-                                                pr.getHtmlUrl(),
+                                        toWebviewPr(
+                                                pr,
                                                 draftKeys.contains(
                                                         pr.getOwner()
                                                                 + "/"
@@ -1467,6 +1496,35 @@ public class WebviewPanel implements Disposable {
     /** Pushes a setup-required screen into the webview. Call from the EDT. */
     public void pushSetupRequired(String reason, String detail) {
         pushMessage(new SetupRequiredMsg("setupRequired", reason, detail));
+    }
+
+    public void activatePr(PullRequest pr, String source) {
+        boolean hasReviewDraft = pendingIndex.hasDraft(pr.getOwner(), pr.getRepo(), pr.getNumber());
+        if (cachedPRs.stream().anyMatch(existing -> isSamePr(existing, pr))) {
+            cachedPRs =
+                    cachedPRs.stream()
+                            .map(existing -> isSamePr(existing, pr) ? pr : existing)
+                            .toList();
+        } else {
+            List<PullRequest> next = new ArrayList<>();
+            next.add(pr);
+            next.addAll(cachedPRs);
+            cachedPRs = next;
+        }
+        pushMessage(new ActivatePrMsg("activatePR", toWebviewPr(pr, hasReviewDraft), source));
+    }
+
+    private static WebviewPr toWebviewPr(PullRequest pr, boolean hasReviewDraft) {
+        return new WebviewPr(
+                pr.getNumber(),
+                pr.getTitle(),
+                pr.getOwner(),
+                pr.getRepo(),
+                pr.getAuthor(),
+                pr.getCreatedAt(),
+                pr.getHtmlUrl(),
+                pr.isDraft(),
+                hasReviewDraft);
     }
 
     public String getPrStateFilter() {

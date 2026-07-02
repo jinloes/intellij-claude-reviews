@@ -324,6 +324,7 @@ class GitHubService(
         @SerialName("html_url") val htmlUrl: String = "",
         val number: Int = 0,
         val body: String? = null,
+        val draft: Boolean = false,
         val user: GhUser? = null,
         @SerialName("created_at") val createdAt: String? = null,
         @SerialName("repository_url") val repositoryUrl: String? = null,
@@ -496,6 +497,7 @@ class GitHubService(
                 body = el.body ?: "",
                 author = el.user?.login ?: "",
                 createdAt = el.createdAt ?: "",
+                isDraft = el.draft,
             )
         }
     }

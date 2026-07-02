@@ -34,7 +34,8 @@ export interface PR {
     author: string;
     createdAt: string;
     htmlUrl: string;
-    hasDraft: boolean;
+    isDraft: boolean;
+    hasReviewDraft: boolean;
 }
 
 export interface LineComment {
@@ -94,6 +95,7 @@ interface SearchItem {
     title: string;
     html_url: string;
     number: number;
+    draft?: boolean | null;
     body: string | null;
     user: { login: string } | null;
     created_at: string | null;
@@ -285,7 +287,8 @@ export async function searchPRsByQuery(
             author: el.user?.login ?? '',
             createdAt: el.created_at ?? '',
             htmlUrl: el.html_url,
-            hasDraft: false,
+            isDraft: el.draft === true,
+            hasReviewDraft: false,
         };
     });
 }
@@ -298,7 +301,6 @@ export function buildPRSearchQuery(
     let q = 'is:pr';
     if (state === 'closed') q += ' is:closed';
     else if (state !== 'all') q += ' is:open';
-    q += ' draft:false';
 
     switch (searchScope) {
         case 'currentRepo':

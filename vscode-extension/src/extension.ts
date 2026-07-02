@@ -30,7 +30,7 @@ function cancelActiveProvider(): void {
 
 export function activate(context: vscode.ExtensionContext) {
     const provider = new ClaudeReviewsViewProvider(context.extensionUri);
-    const notificationPoller = new PRNotificationPoller(context);
+    const notificationPoller = new PRNotificationPoller(context, (pr) => provider.openPullRequest(pr));
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider('pr-pilot.main', provider, {
             webviewOptions: { retainContextWhenHidden: true },
@@ -79,7 +79,10 @@ class PRNotificationPoller implements vscode.Disposable {
     private readonly seen: Set<string>;
     private running = false;
 
-    constructor(private readonly context: vscode.ExtensionContext) {
+    constructor(
+        private readonly context: vscode.ExtensionContext,
+        private readonly onOpenPr: (pr: github.PR) => void,
+    ) {
         // Restore prior seen state so a reload/restart does not silently re-seed and swallow PRs
         // that appeared while the window was closed.
         const saved = context.globalState.get<SeenState>(NOTIFY_STATE_KEY);
@@ -162,9 +165,9 @@ class PRNotificationPoller implements vscode.Disposable {
                 this.seen.add(key);
                 void vscode.window.showInformationMessage(
                     notificationMessage(pr, source),
-                    'Open PR',
+                    'Open in PR Pilot',
                 ).then((choice) => {
-                    if (choice === 'Open PR') void vscode.env.openExternal(vscode.Uri.parse(pr.htmlUrl));
+                    if (choice === 'Open in PR Pilot') this.onOpenPr(pr);
                 });
             }
             trimSeenSet(this.seen, MAX_SEEN_NOTIFICATION_PRS);
@@ -203,6 +206,8 @@ interface ActivePR {
 class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
     private readonly distUri: vscode.Uri;
     private panel: vscode.WebviewPanel | undefined;
+    private state: ViewState | undefined;
+    private pendingActivation: { pr: github.PR; source: 'notification' } | null = null;
 
     constructor(extensionUri: vscode.Uri) {
         this.distUri = vscode.Uri.file(resolveWebviewDistPath(extensionUri.fsPath, fs.existsSync));
@@ -226,8 +231,18 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
         );
         this.panel = panel;
         this.initializeWebview(panel.webview, panel.onDidDispose, () => {
+            if (this.state?.webview === panel.webview) this.state = undefined;
             if (this.panel === panel) this.panel = undefined;
         });
+    }
+
+    openPullRequest(pr: github.PR): void {
+        this.pendingActivation = { pr, source: 'notification' };
+        const hadLiveState = Boolean(this.state);
+        this.openPanel();
+        if (hadLiveState) {
+            this.flushPendingActivation();
+        }
     }
 
     resolveWebviewView(
@@ -311,6 +326,7 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
             gitRoot: null,
             worktreeKey: null,
         };
+        this.state = state;
 
         this.setupMessageBridge(state);
 
@@ -323,7 +339,20 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
 
         // Trigger initial PR load so the user sees results (or setup guidance) immediately
         // rather than an indefinite loading spinner.
-        handleRefreshPRs(state, {}).catch(console.error);
+        handleRefreshPRs(state, {})
+            .catch(console.error)
+            .finally(() => this.flushPendingActivation());
+    }
+
+    private flushPendingActivation(): void {
+        if (!this.state || !this.pendingActivation) return;
+        const activation = this.pendingActivation;
+        this.pendingActivation = null;
+        push(this.state, {
+            type: 'activatePR',
+            pr: activation.pr,
+            source: activation.source,
+        });
     }
 
     private getHtmlContent(webview: vscode.Webview): string {
@@ -417,6 +446,18 @@ interface ViewState {
     worktreeDir: string | null;
     gitRoot: string | null;
     worktreeKey: string | null;
+}
+
+function providerReadiness(): { provider: Provider; available: boolean; detail: string } {
+    const current = provider();
+    const available = current === 'copilot' ? copilot.copilotBinaryAvailable() : claude.claudeBinaryAvailable();
+    return {
+        provider: current,
+        available,
+        detail: available
+            ? 'Ready to generate reviews with the configured CLI.'
+            : providerNotInstalledMessage(current),
+    };
 }
 
 function prKey(pr: ActivePR | null): string | null {
@@ -633,7 +674,12 @@ async function handleRefreshPRs(state: ViewState, msg: Record<string, unknown>):
         );
         // searchPRs over-fetches by one to distinguish "exactly the limit" from "more exist".
         const limited = found.length > github.PR_SEARCH_LIMIT;
-        const prs = limited ? found.slice(0, github.PR_SEARCH_LIMIT) : found;
+        const prs = (limited ? found.slice(0, github.PR_SEARCH_LIMIT) : found).map((pr) => {
+            if (!state.activePR || !state.pendingReviewId) return pr;
+            return pr.number === state.activePR.number && pr.owner === state.activePR.owner && pr.repo === state.activePR.repo
+                ? { ...pr, hasReviewDraft: true }
+                : pr;
+        });
         prs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
         push(state, {
             type: 'prListLoaded',
@@ -682,6 +728,7 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
     try {
         const token = await getToken(state);
         const base = githubBaseUrl();
+        const readiness = providerReadiness();
 
         const [diff, validationDiffRaw, detail, draft] = await Promise.all([
             github.getPRDiff(token, base, owner, repo, number),
@@ -706,9 +753,11 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
         state.pendingReviewId = draft?.id ?? null;
 
         if (detail.merged) {
-            push(state, { type: 'draftLoaded', prKey: key, prState: 'MERGED', diff, validationDiff });
+            push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasReviewDraft: false });
+            push(state, { type: 'draftLoaded', prKey: key, prState: 'MERGED', diff, validationDiff, providerReadiness: readiness });
         } else if (draft) {
             const staleCommits = hasStaleCommits(draft.commitId, detail.head?.sha ?? '');
+            push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasReviewDraft: true });
             push(state, {
                 type: 'draftLoaded',
                 prKey: key,
@@ -719,9 +768,11 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
                 validationDiff,
                 staleCommits,
                 importedFromGitHub: draft.importedFromGitHub,
+                providerReadiness: readiness,
             });
         } else {
-            push(state, { type: 'draftLoaded', prKey: key, prState: 'NO_DRAFT', diff, validationDiff });
+            push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasReviewDraft: false });
+            push(state, { type: 'draftLoaded', prKey: key, prState: 'NO_DRAFT', diff, validationDiff, providerReadiness: readiness });
         }
     } catch (err) {
         state.cachedToken = null;
@@ -731,6 +782,7 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
             prKey: key,
             prState: 'NO_DRAFT',
             status: toUserFacingError(err, 'load PR details'),
+            providerReadiness: providerReadiness(),
         });
     }
 }
@@ -850,7 +902,7 @@ async function handleSaveDraft(state: ViewState, msg: Record<string, unknown>): 
         );
         state.pendingReviewId = reviewId;
         push(state, { type: 'draftSaved', prKey: key, reviewId, commentsDropped });
-        push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasDraft: true });
+        push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasReviewDraft: true });
     } catch (err) {
         state.cachedToken = null;
         push(state, {
@@ -878,7 +930,7 @@ async function handleSubmitReview(state: ViewState, msg: Record<string, unknown>
         );
         state.pendingReviewId = null;
         push(state, { type: 'reviewSubmitted', prKey: key });
-        push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasDraft: false });
+        push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasReviewDraft: false });
     } catch (err) {
         state.cachedToken = null;
         push(state, {
@@ -903,7 +955,7 @@ async function handleDeleteDraft(state: ViewState, msg: Record<string, unknown>)
         );
         state.pendingReviewId = null;
         push(state, { type: 'draftDeleted', prKey: key });
-        push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasDraft: false });
+        push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasReviewDraft: false });
     } catch (err) {
         state.cachedToken = null;
         push(state, {
