@@ -1,5 +1,6 @@
 package com.jinloes.prpilot.ui;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.List;
 
@@ -13,4 +14,13 @@ record ReviewResultDto(
         String verdict,
         @JsonProperty("lineComments") List<LineCommentDto> lineComments) {}
 
-record LineCommentDto(String file, int line, String type, String body) {}
+@JsonInclude(JsonInclude.Include.NON_EMPTY)
+record LineCommentDto(
+        String file,
+        int line,
+        String type,
+        String body,
+        String severity,
+        String category,
+        String confidence,
+        String rationale) {}

@@ -12,6 +12,7 @@ import io.kotest.matchers.collections.shouldHaveSize
 import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
+import io.kotest.matchers.string.shouldNotContain
 import io.kotest.matchers.string.shouldStartWith
 import java.io.File
 import java.io.Closeable
@@ -152,6 +153,18 @@ private class FakeRuntimeSession : CopilotService.RuntimeSession {
 
 class CopilotServiceTest : FunSpec({
 
+    context("permissionDecision") {
+        test("denies all tools by default") {
+            CopilotService.permissionDecision("shell", false).kind shouldBe "reject"
+            CopilotService.permissionDecision("mcp", false).kind shouldBe "reject"
+        }
+
+        test("only approves MCP after explicit elevation") {
+            CopilotService.permissionDecision("mcp", true).kind shouldBe "approve-once"
+            CopilotService.permissionDecision("write", true).kind shouldBe "reject"
+        }
+    }
+
     context("ReviewProvider.fromId") {
         test("blank — defaults to CLAUDE") {
             ReviewProvider.fromId("") shouldBe ReviewProvider.CLAUDE
@@ -210,11 +223,11 @@ class CopilotServiceTest : FunSpec({
                 model shouldBe "claude-sonnet-4.6"
                 effort shouldBe "high"
                 workingDir shouldBe File("/tmp/pr-pilot-repo")
-                enableConfigDiscovery shouldBe true
+                enableConfigDiscovery shouldBe false
                 configDir shouldBe null
             }
             client.lastSession.shouldNotBeNull().apply {
-                lastPrompt.shouldNotBeNull().shouldContain("<fetch_diff>")
+                lastPrompt.shouldNotBeNull().shouldContain("<pr_diff>")
                 lastTimeoutMs shouldBe 30L * 60L * 1000L
                 closeCount shouldBe 1
             }
@@ -391,9 +404,10 @@ class CopilotServiceTest : FunSpec({
         }
 
         test("non-JSON output — parse error") {
+            val sensitiveOutput = "not even close to JSON"
             val factory = FakeRuntimeFactory {
                 FakeRuntimeClient {
-                    FakeRuntimeSession().apply { sendAction = { emitMessage("not even close to JSON") } }
+                    FakeRuntimeSession().apply { sendAction = { emitMessage(sensitiveOutput) } }
                 }
             }
             val svc = CopilotService(runtimeFactory = factory)
@@ -403,6 +417,7 @@ class CopilotServiceTest : FunSpec({
             }
 
             ex.message!!.shouldContain("Failed to parse review JSON")
+            ex.message!!.shouldNotContain(sensitiveOutput)
         }
 
         test("legacy effort values — normalize before creating the session") {

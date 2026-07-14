@@ -2,11 +2,13 @@ package com.jinloes.prpilot.ui;
 
 import static com.intellij.openapi.application.ApplicationManager.getApplication;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.module.kotlin.KotlinModule;
 import com.intellij.ide.BrowserUtil;
 import com.intellij.openapi.Disposable;
@@ -51,11 +53,12 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import javax.swing.JComponent;
 import javax.swing.SwingUtilities;
-import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.cef.browser.CefBrowser;
 import org.cef.browser.CefFrame;
 import org.cef.handler.CefLoadHandlerAdapter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * JCEF browser panel that loads the React webview and wires the Java↔JS bridge.
@@ -71,8 +74,9 @@ import org.cef.handler.CefLoadHandlerAdapter;
  *   <li>JS→Java: {@code window.cefQuery({request: json})} — injected via JBCefJSQuery
  * </ul>
  */
-@Slf4j
 public class WebviewPanel implements Disposable {
+
+    private static final Logger log = LoggerFactory.getLogger(WebviewPanel.class);
 
     /** Maximum PRs shown in the list. The search over-fetches by one to detect truncation. */
     static final int PR_SEARCH_LIMIT = 50;
@@ -103,7 +107,8 @@ public class WebviewPanel implements Disposable {
 
     private record DraftLoadingMsg(String type, @JsonProperty("prKey") String prKey) {}
 
-    private record DraftLoadedMsg(
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    record DraftLoadedMsg(
             String type,
             @JsonProperty("prKey") String prKey,
             String prState,
@@ -151,7 +156,7 @@ public class WebviewPanel implements Disposable {
             String repo,
             @JsonProperty("hasReviewDraft") boolean hasReviewDraft) {}
 
-    private record ProviderReadinessDto(String provider, boolean available, String detail) {}
+    record ProviderReadinessDto(String provider, boolean available, String detail) {}
 
     private record ActivatePrMsg(String type, @JsonProperty("pr") WebviewPr pr, String source) {}
 
@@ -183,6 +188,9 @@ public class WebviewPanel implements Disposable {
     private volatile PullRequest activePR = null;
     private volatile ReviewResult lastResult = null;
     private volatile String pendingReviewId = null;
+    private volatile String pendingReviewKey = null;
+    private volatile long selectionRevision = 0;
+    private final Object draftMutationLock = new Object();
     private volatile String prefetchedDiff = null;
     private volatile String prefetchedValidationDiff = null;
     private volatile String prefetchedExistingReviews = null;
@@ -467,27 +475,33 @@ public class WebviewPanel implements Disposable {
                     final List<LineComment> finalOrphans = bridgeOrphans;
                     getApplication()
                             .executeOnPooledThread(
-                                    () ->
+                                    () -> {
+                                        synchronized (draftMutationLock) {
                                             handleSaveDraft(
-                                                    number,
-                                                    owner,
-                                                    repo,
-                                                    finalResult,
-                                                    finalOrphans));
+                                                    number, owner, repo, finalResult, finalOrphans);
+                                        }
+                                    });
                 }
                 case "submitReview" -> {
                     String verdict = node.path("verdict").asText();
                     String comment = node.path("comment").asText("");
                     getApplication()
                             .executeOnPooledThread(
-                                    () ->
+                                    () -> {
+                                        synchronized (draftMutationLock) {
                                             handleSubmitReview(
-                                                    number, owner, repo, verdict, comment));
+                                                    number, owner, repo, verdict, comment);
+                                        }
+                                    });
                 }
                 case "deleteDraft" ->
                         getApplication()
                                 .executeOnPooledThread(
-                                        () -> handleDeleteDraft(number, owner, repo));
+                                        () -> {
+                                            synchronized (draftMutationLock) {
+                                                handleDeleteDraft(number, owner, repo);
+                                            }
+                                        });
                 case "clearChat" -> chatHistory = List.of();
                 case "askClaude" -> {
                     String question = node.path("question").asText();
@@ -503,24 +517,7 @@ public class WebviewPanel implements Disposable {
     }
 
     static boolean isValidIncomingMessage(JsonNode node) {
-        if (node == null || !node.hasNonNull("type")) {
-            return false;
-        }
-        String type = node.path("type").asText();
-        return switch (type) {
-            case "refreshPRs", "cancelReview", "openSettings", "clearChat", "runAuthLogin" -> true;
-            case "openUrl" -> node.path("url").isTextual();
-            case "askClaude" -> node.path("question").isTextual();
-            case "selectPR", "generateReview", "saveDraft", "submitReview", "deleteDraft" ->
-                    hasValidPrIdentity(node);
-            default -> false;
-        };
-    }
-
-    private static boolean hasValidPrIdentity(JsonNode node) {
-        return node.path("number").asInt(0) > 0
-                && StringUtils.isNotBlank(node.path("owner").asText(null))
-                && StringUtils.isNotBlank(node.path("repo").asText(null));
+        return BridgeMessageValidator.isValid(node);
     }
 
     // --- selectPR ---
@@ -537,6 +534,19 @@ public class WebviewPanel implements Disposable {
                         .findFirst()
                         .orElse(null);
         if (pr == null) {
+            pushMessage(
+                    new DraftLoadedMsg(
+                            "draftLoaded",
+                            key,
+                            "NO_DRAFT",
+                            null,
+                            null,
+                            null,
+                            null,
+                            false,
+                            false,
+                            "Pull request is no longer available. Refresh the pull request list and try again.",
+                            currentProviderReadiness()));
             return;
         }
 
@@ -544,14 +554,17 @@ public class WebviewPanel implements Disposable {
 
         // Synchronize the field-clearing so a concurrent handleGenerateReview
         // on a pooled thread cannot read a stale activePR/prefetchedDiff pair.
+        long revision;
         synchronized (this) {
             activePR = pr;
             lastResult = null;
             pendingReviewId = null;
+            pendingReviewKey = null;
             prefetchedDiff = null;
             prefetchedValidationDiff = null;
             prefetchedExistingReviews = null;
             chatHistory = List.of();
+            revision = ++selectionRevision;
         }
 
         getApplication().invokeLater(() -> onPRSelected.accept(pr));
@@ -697,11 +710,12 @@ public class WebviewPanel implements Disposable {
                             // Write prefetched data only if the same PR is still active to
                             // avoid clobbering state for a PR the user already switched away from.
                             synchronized (WebviewPanel.this) {
-                                if (activePR == pr) {
-                                    prefetchedDiff = fetchedDiff;
-                                    prefetchedValidationDiff = effectiveValidationDiff;
-                                    prefetchedExistingReviews = fetchedReviews;
+                                if (activePR != pr || selectionRevision != revision) {
+                                    return;
                                 }
+                                prefetchedDiff = fetchedDiff;
+                                prefetchedValidationDiff = effectiveValidationDiff;
+                                prefetchedExistingReviews = fetchedReviews;
                             }
 
                             // Delete stale draft on a merged PR, best-effort.
@@ -761,8 +775,13 @@ public class WebviewPanel implements Disposable {
                                                 pending.component3(),
                                                 "Loaded pending draft review.",
                                                 providerReadiness));
-                                pendingReviewId = pending.getId();
-                                lastResult = pending.getResult();
+                                synchronized (WebviewPanel.this) {
+                                    if (activePR == pr && selectionRevision == revision) {
+                                        pendingReviewId = pending.getId();
+                                        pendingReviewKey = key;
+                                        lastResult = pending.getResult();
+                                    }
+                                }
                                 return;
                             }
 
@@ -833,22 +852,6 @@ public class WebviewPanel implements Disposable {
         getApplication()
                 .executeOnPooledThread(
                         () -> {
-                            // Delete any existing draft before regenerating so GitHub doesn't
-                            // accumulate multiple pending drafts on the same PR.
-                            String existingReviewId = pendingReviewId;
-                            if (StringUtils.isNotBlank(existingReviewId)) {
-                                try {
-                                    ghSvc.deleteDraftReview(
-                                            finalToken, owner, repo, number, existingReviewId);
-                                    pendingIndex.remove(owner, repo, number);
-                                    pendingReviewId = null;
-                                } catch (Exception e) {
-                                    log.warn(
-                                            "pre-regen deleteDraftReview failed: {}",
-                                            e.getMessage());
-                                }
-                            }
-
                             // Atomically snapshot prefetched data to prevent check-then-act
                             // races with a concurrent handleSelectPR on the JCEF bridge thread.
                             String snapshotDiff;
@@ -957,7 +960,7 @@ public class WebviewPanel implements Disposable {
                             finalReviewService.reviewPR(
                                     new PRReviewRequest(
                                             finalPr,
-                                            "",
+                                            finalDiff,
                                             "",
                                             finalPriorReview,
                                             finalExisting,
@@ -1031,6 +1034,15 @@ public class WebviewPanel implements Disposable {
             ReviewResult bridgeResult,
             List<LineComment> orphans) {
         String key = bridgePrKey(number, owner, repo);
+        if (!isActivePrKey(key)) {
+            pushMessage(
+                    new ErrorMsg(
+                            "draftSaveError",
+                            key,
+                            "The selected pull request changed before the draft could be saved."));
+            return;
+        }
+        long revision = selectionRevision;
         ReviewResult result = bridgeResult != null ? bridgeResult : lastResult;
         if (result == null) {
             pushMessage(new ErrorMsg("draftSaveError", key, "No review result to save."));
@@ -1074,7 +1086,11 @@ public class WebviewPanel implements Disposable {
                         .orElse(null);
         String title = pr != null ? pr.getTitle() : "";
         pendingIndex.add(owner, repo, number, title, headSha);
+        if (!isActivePrKey(key) || selectionRevision != revision) {
+            return;
+        }
         pendingReviewId = saved.getReviewId();
+        pendingReviewKey = key;
 
         pushMessage(
                 new DraftSavedMsg(
@@ -1088,9 +1104,14 @@ public class WebviewPanel implements Disposable {
             int number, String owner, String repo, String verdict, String comment) {
         String key = bridgePrKey(number, owner, repo);
         String reviewId = pendingReviewId;
-        if (StringUtils.isBlank(reviewId)) {
+        if (StringUtils.isBlank(reviewId)
+                || !isActivePrKey(key)
+                || !StringUtils.equals(pendingReviewKey, key)) {
             pushMessage(
-                    new ErrorMsg("reviewSubmitError", key, "No pending draft review to submit."));
+                    new ErrorMsg(
+                            "reviewSubmitError",
+                            key,
+                            "No pending draft review belongs to the selected pull request."));
             return;
         }
 
@@ -1112,8 +1133,12 @@ public class WebviewPanel implements Disposable {
         }
 
         pendingIndex.remove(owner, repo, number);
-        lastResult = null;
-        pendingReviewId = null;
+        if (StringUtils.equals(pendingReviewId, reviewId)
+                && StringUtils.equals(pendingReviewKey, key)) {
+            lastResult = null;
+            pendingReviewId = null;
+            pendingReviewKey = null;
+        }
 
         pushMessage(new SimpleMsg("reviewSubmitted", key));
         pushMessage(new PrDraftStatusMsg("prDraftStatusUpdated", number, owner, repo, false));
@@ -1124,9 +1149,14 @@ public class WebviewPanel implements Disposable {
     private void handleDeleteDraft(int number, String owner, String repo) {
         String key = bridgePrKey(number, owner, repo);
         String reviewId = pendingReviewId;
-        if (StringUtils.isBlank(reviewId)) {
+        if (StringUtils.isBlank(reviewId)
+                || !isActivePrKey(key)
+                || !StringUtils.equals(pendingReviewKey, key)) {
             pushMessage(
-                    new ErrorMsg("draftDeleteError", key, "No pending draft review to delete."));
+                    new ErrorMsg(
+                            "draftDeleteError",
+                            key,
+                            "No pending draft review belongs to the selected pull request."));
             return;
         }
 
@@ -1148,8 +1178,12 @@ public class WebviewPanel implements Disposable {
         }
 
         pendingIndex.remove(owner, repo, number);
-        lastResult = null;
-        pendingReviewId = null;
+        if (StringUtils.equals(pendingReviewId, reviewId)
+                && StringUtils.equals(pendingReviewKey, key)) {
+            lastResult = null;
+            pendingReviewId = null;
+            pendingReviewKey = null;
+        }
 
         pushMessage(new SimpleMsg("draftDeleted", key));
         pushMessage(new PrDraftStatusMsg("prDraftStatusUpdated", number, owner, repo, false));
@@ -1233,6 +1267,13 @@ public class WebviewPanel implements Disposable {
         return left.getNumber() == right.getNumber()
                 && StringUtils.equalsIgnoreCase(left.getOwner(), right.getOwner())
                 && StringUtils.equalsIgnoreCase(left.getRepo(), right.getRepo());
+    }
+
+    private boolean isActivePrKey(String key) {
+        PullRequest pr = activePR;
+        return pr != null
+                && StringUtils.equals(
+                        key, bridgePrKey(pr.getNumber(), pr.getOwner(), pr.getRepo()));
     }
 
     /** Candidate contributor-doc files, in priority order, scanned for repo review guidelines. */
@@ -1440,7 +1481,9 @@ public class WebviewPanel implements Disposable {
      */
     private void pushMessage(Object payload) {
         try {
-            String json = mapper.writeValueAsString(payload);
+            ObjectNode versioned = mapper.valueToTree(payload);
+            versioned.put("protocolVersion", BridgeMessageValidator.PROTOCOL_VERSION);
+            String json = mapper.writeValueAsString(versioned);
             String safe = json.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029");
             browser.getCefBrowser()
                     .executeJavaScript(

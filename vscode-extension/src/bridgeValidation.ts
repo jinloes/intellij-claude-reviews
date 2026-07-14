@@ -1,5 +1,9 @@
 type AnyMessage = { type?: unknown } & Record<string, unknown>;
 
+export const BRIDGE_PROTOCOL_VERSION = 1;
+const MAX_TEXT = 100_000;
+const MAX_COMMENTS = 1_000;
+
 const MESSAGE_TYPES = new Set([
   'refreshPRs',
   'selectPR',
@@ -21,33 +25,83 @@ function hasValidPrIdentity(msg: AnyMessage): boolean {
     && msg.number > 0
     && typeof msg.owner === 'string'
     && msg.owner.trim().length > 0
+    && msg.owner.length <= 256
     && typeof msg.repo === 'string'
-    && msg.repo.trim().length > 0;
+    && msg.repo.trim().length > 0
+    && msg.repo.length <= 256;
+}
+
+function isBoundedString(value: unknown, maxLength = MAX_TEXT): value is string {
+  return typeof value === 'string' && value.length <= maxLength;
+}
+
+function isLineComment(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const comment = value as Record<string, unknown>;
+  return isBoundedString(comment.file, 4_096)
+    && Number.isInteger(comment.line) && (comment.line as number) > 0
+    && ['issue', 'suggestion', 'note'].includes(comment.type as string)
+    && isBoundedString(comment.body)
+    && (comment.severity === undefined || ['blocker', 'major', 'minor', 'nit'].includes(comment.severity as string))
+    && (comment.category === undefined || ['correctness', 'security', 'performance', 'tests', 'maintainability', 'style'].includes(comment.category as string))
+    && (comment.confidence === undefined || ['low', 'medium', 'high'].includes(comment.confidence as string))
+    && (comment.rationale === undefined || isBoundedString(comment.rationale));
+}
+
+function isReviewResult(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const review = value as Record<string, unknown>;
+  return isBoundedString(review.summary)
+    && ['APPROVE', 'REQUEST_CHANGES', 'COMMENT'].includes(review.verdict as string)
+    && Array.isArray(review.lineComments)
+    && review.lineComments.length <= MAX_COMMENTS
+    && review.lineComments.every(isLineComment);
 }
 
 export function isValidBridgeRequest(msg: AnyMessage | null | undefined): msg is AnyMessage {
-  if (!msg || typeof msg.type !== 'string' || !MESSAGE_TYPES.has(msg.type)) {
+  if (
+    !msg
+    || msg.protocolVersion !== BRIDGE_PROTOCOL_VERSION
+    || typeof msg.type !== 'string'
+    || !MESSAGE_TYPES.has(msg.type)
+  ) {
     return false;
   }
   switch (msg.type) {
     case 'refreshPRs':
+      return (msg.state === undefined || ['open', 'closed', 'all'].includes(msg.state as string))
+        && (msg.searchScope === undefined
+          || ['currentRepo', 'authored', 'assigned', 'reviewRequested'].includes(msg.searchScope as string))
+        && (msg.assignedToMe === undefined || typeof msg.assignedToMe === 'boolean')
+        && (msg.reviewRequested === undefined || typeof msg.reviewRequested === 'boolean');
     case 'cancelReview':
     case 'clearChat':
     case 'openSettings':
     case 'runAuthLogin':
       return true;
     case 'openUrl':
-      return typeof msg.url === 'string';
+      return isBoundedString(msg.url, 4_096);
     case 'askClaude':
-      return typeof msg.question === 'string';
+      return isBoundedString(msg.question)
+        && (msg.context === undefined || isBoundedString(msg.context));
     case 'selectPR':
+      return hasValidPrIdentity(msg);
     case 'generateReview':
+      return hasValidPrIdentity(msg)
+        && (msg.focusAreas === undefined || isBoundedString(msg.focusAreas, 10_000))
+        && (msg.customInstructions === undefined || isBoundedString(msg.customInstructions, 20_000));
     case 'saveDraft':
+      return hasValidPrIdentity(msg)
+        && (msg.result === undefined || isReviewResult(msg.result))
+        && (msg.orphans === undefined
+          || (Array.isArray(msg.orphans) && msg.orphans.length <= MAX_COMMENTS && msg.orphans.every(isLineComment)));
     case 'submitReview':
+      return hasValidPrIdentity(msg)
+        && ['APPROVE', 'REQUEST_CHANGES', 'COMMENT'].includes(msg.verdict as string)
+        && isBoundedString(msg.comment);
     case 'deleteDraft':
       return hasValidPrIdentity(msg);
     default:
       return false;
   }
 }
-

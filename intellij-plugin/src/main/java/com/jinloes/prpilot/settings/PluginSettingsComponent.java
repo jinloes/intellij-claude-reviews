@@ -54,7 +54,7 @@ public class PluginSettingsComponent {
     private final JComboBox<String> copilotModelCombo = new JComboBox<>(COPILOT_MODEL_SUGGESTIONS);
     private final JComboBox<String> copilotEffortCombo = new JComboBox<>(COPILOT_EFFORTS);
     private final JCheckBox copilotInheritMcpBox =
-            new JCheckBox("Inherit MCP servers from the Copilot CLI config");
+            new JCheckBox("Allow MCP tools for untrusted PR content (advanced)");
     private final JBTextField copilotConfigDirField = new JBTextField();
     private final JBTextField reviewFocusAreasField = new JBTextField();
     private final JBTextArea reviewCustomInstructionsArea = new JBTextArea(3, 0);

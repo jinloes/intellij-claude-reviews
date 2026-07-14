@@ -23,7 +23,7 @@ function readState(): SettingsState {
         reviewModelCopilot: c.get<string>('reviewModelCopilot', ''),
         reviewEffort: c.get<string>('reviewEffort', 'medium'),
         githubBaseUrl: c.get<string>('githubBaseUrl', 'https://github.com'),
-        copilotInheritMcp: c.get<boolean>('copilotInheritMcp', true),
+        copilotInheritMcp: c.get<boolean>('copilotInheritMcp', false),
         copilotConfigDir: c.get<string>('copilotConfigDir', ''),
         reviewFocusAreas: c.get<string>('reviewFocusAreas', ''),
         reviewCustomInstructions: c.get<string>('reviewCustomInstructions', ''),

@@ -25,7 +25,7 @@ core/                                  – KMP module (jvm + js targets); Java s
     model/
       PullRequest.kt                 – @Serializable data class (title, number, owner, repo, author, etc.)
       ReviewResult.kt                – @Serializable class; holds summary, verdict, mutable List<LineComment>
-      LineComment.kt                 – @Serializable class; file, line, type ("issue"|"suggestion"|"note"), body
+      LineComment.kt                 – @Serializable class; anchor/body plus optional severity, category, confidence, and rationale
       ChatMessage.kt                 – @Serializable data class; Role + content for chat history
       PRReviewRequest.kt             – @Serializable data class; parameter object for ClaudeService.reviewPR
       ReviewProvider.kt              – enum (CLAUDE | COPILOT); fromId(id) Java-friendly factory
@@ -99,7 +99,6 @@ vscode-extension/                      – VS Code extension host
     notifications.ts                   – Pure background-notification helpers (source labeling, dedupe/merge with review-requested precedence); no vscode import, unit-tested
     userFacingError.ts                 – Maps host/provider errors to user-actionable copy
     workspace.ts                       – Resolves the VS Code workspace dir, including dev-host target repo override
-    core.d.ts
   shared/
     user-facing-errors.yaml            – Shared message templates consumed by both hosts
   test/
@@ -142,8 +141,10 @@ Copilot and Claude share prompt builders/parsing (`ClaudeService` companion help
 ### Copilot SDK runtime
 Both hosts use official Copilot SDKs (`com.github:copilot-sdk-java` and `@github/copilot-sdk`) to control local `copilot`. Stream `assistant.message_delta` to text chunks, surface `tool.execution_start` names as status, and parse final `assistant.message` JSON with delta fallback.
 
-### Copilot MCP inheritance
-Copilot review/chat sessions inherit the CLI's MCP servers by setting the SDK session option `enableConfigDiscovery=true` (Java `setEnableConfigDiscovery`). Discovery alone loads `~/.copilot/mcp-config.json` (and repo-local `.mcp.json`) even when the working dir is a worktree; setting `configDir`/`setConfigDirectory` without discovery does **not** load them. The optional `copilotConfigDir` setting maps to `configDir` for non-default Copilot homes. This is Copilot-only — the Claude CLI inherits MCP through its own global config, not these settings.
+### Provider capability isolation
+Claude review/chat processes disable tools, use `permission-mode=dontAsk`, pass a strict empty MCP configuration, and read user settings only. The review prompt therefore embeds the bounded GitHub diff instead of asking the CLI to fetch repository data. Temporary stream output is owner-only and deleted in `finally`; raw model output is not retained in logs.
+
+Copilot review/chat sessions reject all SDK permission requests by default and disable config discovery. `copilotInheritMcp` is an explicit capability elevation: when enabled, config discovery loads MCP servers from the Copilot CLI config and repo-local `.mcp.json`, but the permission handler approves only MCP requests once and continues rejecting shell/write capabilities. The optional `copilotConfigDir` setting maps to `configDir`/`setConfigDirectory` for non-default Copilot homes. Never replace the explicit permission handler with blanket approval.
 
 ### Reasoning effort normalization
 Persisted values are `none|low|medium|high|xhigh|max`; SDK accepts `low|medium|high|xhigh`. Normalize before session creation: `none -> low`, `max -> xhigh`, blank/unknown -> `medium`.
@@ -165,10 +166,10 @@ Probe known hard-coded paths for `gh`, `claude`, and `copilot` before falling ba
 Before running a review, both hosts check that the configured provider's CLI (`claude`/`copilot`) is resolvable — a hard-coded candidate path exists, or the binary is found on `PATH` — and, if not, push a `reviewError` with actionable `provider_not_installed` copy instead of attempting a doomed spawn. This surfaces in-context in the review pane (which already offers a "Try Again") rather than as the full-pane PR-list setup screen. The selected-PR no-draft state also receives a `providerReadiness` bridge payload so the review pane can show `Claude ready` / `Copilot ready` (or setup-needed) status before the user presses Generate. Availability checks: `ProcessUtil.isBinaryAvailable` + `ClaudeService.isBinaryAvailable()`/`CopilotService.isBinaryAvailable()` (JVM); `claudeBinaryAvailable()`/`copilotBinaryAvailable()` + shared `existsOnPath` (`claude.ts`/`copilot.ts`). The shared `provider_not_installed` template wording is kept in sync across `UserFacingErrors.java` and `userFacingError.ts`.
 
 ### Prompt-injection hardening
-When wrapping untrusted payloads in XML-like tags, escape matching closing tags inside payload to prevent tag breakout in tool-enabled model runs.
+When wrapping untrusted payloads in XML-like tags, escape matching closing tags inside payload to prevent tag breakout. Repository guidelines, PR metadata, descriptions, diffs, prior reviews, and user messages remain untrusted data even when tag escaping is applied; provider capability isolation is the primary security boundary.
 
 ### Diff acquisition model
-Review prompts do not embed full diff; model fetches diff on demand via `gh pr diff` instruction in prompt (`diff = ""` in request object).
+Hosts fetch and bound the GitHub diff before provider execution and embed it in `<pr_diff>`. Review providers run without repository tools by default, so they cannot fetch additional context during review. The separate full validation diff is retained host-side/webview-side for comment anchoring and is not sent to the provider.
 
 ### Worktree-based PR context
 When the PR's repo matches the open project/workspace and a git root is found, both hosts create a temporary git worktree checked out to the PR branch and reuse it for both review and chat. This gives the model accurate local file context (correct branch state) for type lookups and cross-file references across the full PR session. Cleanup runs when the active PR changes or the view is disposed. Falls back silently to the open project/workspace dir if worktree creation fails or the PR is from an unrelated repo. Fork PRs use `git fetch <clone_url> <branch>` + `FETCH_HEAD`.
@@ -183,7 +184,7 @@ When host-specific logic changes in IntelliJ or VS Code, update the paired imple
 Do not surface raw provider/HTTP exception strings directly to users in review/draft/chat flows. Both hosts map low-level errors to actionable guidance (`UserFacingErrors` in IntelliJ, `userFacingError.ts` in VS Code) to keep messaging consistent across providers. Message strings live in shared YAML templates (`vscode-extension/shared/user-facing-errors.yaml`) and support `{placeholder}` substitution.
 
 ### Bridge payload validation
-Both hosts validate inbound webview bridge messages before dispatching handlers (`WebviewPanel.isValidIncomingMessage` in IntelliJ, `bridgeValidation.ts` in VS Code). Unknown message types or malformed PR identities are rejected and logged instead of reaching business logic.
+Bridge messages carry protocol version `1`. Both hosts validate webview-to-host messages before dispatching handlers (`BridgeMessageValidator` in IntelliJ, `bridgeValidation.ts` in VS Code), including PR identity, enums, nested review/comment shapes, booleans, collection sizes, and text bounds. The webview validates every host-to-webview payload in `bridge/validation.ts` before fan-out. Unknown versions/types and malformed nested payloads are rejected instead of reaching business logic. Optional wire fields are omitted rather than serialized as `null`; IntelliJ serializes bridge comments through strict MapStruct DTO mapping and omits absent rich metadata rather than emitting invalid empty enum values.
 
 ### GitHub API resilience policy
 Both hosts apply a transient-failure policy on GitHub REST calls: 15s request/connect/socket timeout, retries on `429`/`5xx`, and retry of timeout-style transport errors. This keeps PR loading/review flows resilient to short-lived network or GitHub edge failures while preserving fast-fail behavior for permanent `4xx` errors.
@@ -202,6 +203,8 @@ Chat is available after PR selection, before and after review generation. Hosts 
 
 ### Webview bridge PR correlation
 PR-scoped lifecycle messages (`draftLoaded`, review generation/chunks/results/errors, draft save/submit/delete, and chat responses) carry a `prKey` of `owner/repo#number`. The React webview drops keyed messages that do not match the active PR so late async results from a previously selected PR cannot repaint or submit against the current PR. When adding a new PR-scoped host message, include the same `prKey` in both hosts. Host-driven selection changes that originate outside the list (for example, background notifications) use a separate `activatePR` message carrying the full PR DTO so the app can honor its unsaved-review confirmation flow before sending the normal `selectPR` request back to the host.
+
+Draft mutations are serialized per host view and bind the pending review ID to its full `prKey`. Selection revisions prevent late loads/saves/generation results from installing state after a PR switch; submit/delete reject IDs not owned by the active PR. Regeneration preserves the existing GitHub draft until a replacement is explicitly saved.
 
 ### Max-turns recovery for Claude
 If stream-json returns `error_max_turns` with `session_id`, auto-resume via `claude --resume <session_id> --max-turns 3` and nudge for final JSON.
@@ -227,7 +230,7 @@ Background PR notifications are available in both hosts and are off by default. 
 Client-side validation partitions comments: keep in-hunk, snap within +-3 lines, orphan otherwise. Orphans are excluded from inline POST and appended to review body section.
 
 ### Security constraints
-`githubBaseUrl` must start with `https://` (SSRF guard). No tokens are persisted to disk.
+`githubBaseUrl` and external links must use HTTPS. GitHub/provider tokens are not persisted by PR Pilot. Provider review input is adversarial: do not enable tools, MCP discovery, shell/write permissions, or broader environment capabilities by default. A detached worktree protects the active checkout but is not a machine sandbox, so explicit capability elevation must remain visible in settings.
 
 ### Repo detection and webview hosting
 Repo detection walks upward to `.git/config` and reads the `[remote "origin"]` URL specifically (not the first `url=` in the file) so multi-remote/fork setups resolve to origin consistently across hosts, handling SCP and `ssh://` remotes correctly. Webview assets are served via loopback `HttpServer` for proper same-origin module loading; path normalization blocks traversal.
@@ -236,6 +239,8 @@ Repo detection walks upward to `.git/config` and reads the `[remote "origin"]` U
 The VS Code host exposes PR Pilot as an editor-tab `WebviewPanel` opened by `pr-pilot.open`. The Activity Bar webview view (`pr-pilot.main`) is a thin launcher: on resolve it auto-opens/reveals the editor tab and renders only a single "Open PR Pilot" button (no intermediate panel), so it reads as a launch button rather than a competing surface. The full PR loading, review generation, chat, and worktree lifecycle run only in the editor-tab panel.
 
 For development, the extension loads UI assets from the sibling `webview/dist` folder. For packaged `.vsix` builds, the release/package flow stages that same output into `vscode-extension/webview-dist`, and the extension resolves the bundled copy first so installed releases do not depend on the source repo layout.
+
+All VS Code webview surfaces use restrictive Content Security Policy headers. The main Vite document rewrites only packaged local asset URIs and nonces scripts; the launcher and fallback error page nonce inline resources, and dynamic error text is HTML-escaped.
 
 ### IntelliJ webview surfaces
 The IntelliJ host mirrors VS Code's split: the `PR Pilot` tool window is a thin launcher whose content is a single centered "Open PR Pilot" button (no explanatory panel), and `createToolWindowContent` opens the center editor tab automatically — so the tool window is "effectively a button" rather than a second surface. The full interactive UI runs in a center editor tab backed by a singleton `PRPilotVirtualFile` per project. PR loading/review/chat behavior remains in `WebviewPanel`; `PRToolWindowFactory` and `PRPilotFileEditorProvider` both wire the same load pipeline so both surfaces behave consistently.
@@ -253,15 +258,11 @@ The `.vscode/launch.json` config `Run PR Pilot Extension Against Target Repo` pr
 - `notifyStarredRepos` (default `false`)
 - `notificationPollMinutes` (default `5`)
 - `githubUsername` (display cache)
-- `notificationsEnabled` (default `false`)
-- `notifyReviewRequested` (default `true`)
-- `notifyStarredRepos` (default `false`)
-- `notificationPollMinutes` (default `5`)
 - `reviewModel` (default `""`)
 - `reviewModelCopilot` (default `"claude-sonnet-4.6"`)
 - `reviewProvider` (default `"claude"`; values `claude|copilot`)
 - `reviewEffort` (default `"medium"`; values `none|low|medium|high|xhigh|max`)
-- `copilotInheritMcp` (default `true`) — when set, the Copilot review/chat session enables SDK config discovery so it inherits MCP servers from the Copilot CLI config (`~/.copilot/mcp-config.json`) and any repo-local `.mcp.json`. Copilot-only.
+- `copilotInheritMcp` (default `false`) — explicit capability elevation that enables Copilot SDK config discovery for MCP servers while retaining the MCP-only permission allowlist. Copilot-only.
 - `copilotConfigDir` (default `""`) — optional override of the Copilot config directory used to discover MCP servers; empty uses the CLI default (`~/.copilot`). Copilot-only.
 
 No API keys or tokens are written to disk.

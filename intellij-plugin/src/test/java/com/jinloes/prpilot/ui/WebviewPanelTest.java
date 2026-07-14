@@ -111,7 +111,7 @@ class WebviewPanelTest {
         void acceptsKnownMessageWithValidPrIdentity() throws Exception {
             var node =
                     MAPPER.readTree(
-                            "{\"type\":\"generateReview\",\"number\":7,\"owner\":\"acme\",\"repo\":\"platform\"}");
+                            "{\"protocolVersion\":1,\"type\":\"generateReview\",\"number\":7,\"owner\":\"acme\",\"repo\":\"platform\"}");
 
             assertThat(WebviewPanel.isValidIncomingMessage(node)).isTrue();
         }
@@ -120,23 +120,125 @@ class WebviewPanelTest {
         void rejectsPrMessageWithoutOwnerRepoOrNumber() throws Exception {
             var node =
                     MAPPER.readTree(
-                            "{\"type\":\"selectPR\",\"number\":0,\"owner\":\"\",\"repo\":\"\"}");
+                            "{\"protocolVersion\":1,\"type\":\"selectPR\",\"number\":0,\"owner\":\"\",\"repo\":\"\"}");
 
             assertThat(WebviewPanel.isValidIncomingMessage(node)).isFalse();
         }
 
         @Test
         void rejectsUnknownMessageType() throws Exception {
-            var node = MAPPER.readTree("{\"type\":\"surprise\"}");
+            var node = MAPPER.readTree("{\"protocolVersion\":1,\"type\":\"surprise\"}");
 
             assertThat(WebviewPanel.isValidIncomingMessage(node)).isFalse();
         }
 
         @Test
         void acceptsRunAuthLoginMessage() throws Exception {
-            var node = MAPPER.readTree("{\"type\":\"runAuthLogin\"}");
+            var node = MAPPER.readTree("{\"protocolVersion\":1,\"type\":\"runAuthLogin\"}");
 
             assertThat(WebviewPanel.isValidIncomingMessage(node)).isTrue();
+        }
+
+        @Test
+        void rejectsMalformedNestedReview() throws Exception {
+            var node =
+                    MAPPER.readTree(
+                            "{\"protocolVersion\":1,\"type\":\"saveDraft\",\"number\":7,"
+                                    + "\"owner\":\"acme\",\"repo\":\"platform\",\"result\":{"
+                                    + "\"summary\":\"s\",\"verdict\":\"INVALID\",\"lineComments\":[]}}");
+
+            assertThat(WebviewPanel.isValidIncomingMessage(node)).isFalse();
+        }
+
+        @Test
+        void validatesRefreshCompatibilityBooleans() throws Exception {
+            var valid =
+                    MAPPER.readTree(
+                            "{\"protocolVersion\":1,\"type\":\"refreshPRs\",\"assignedToMe\":true,\"reviewRequested\":false}");
+            var invalid =
+                    MAPPER.readTree(
+                            "{\"protocolVersion\":1,\"type\":\"refreshPRs\",\"assignedToMe\":\"yes\"}");
+
+            assertThat(WebviewPanel.isValidIncomingMessage(valid)).isTrue();
+            assertThat(WebviewPanel.isValidIncomingMessage(invalid)).isFalse();
+        }
+
+        @Test
+        void rejectsOversizedPrIdentity() {
+            var node =
+                    MAPPER.createObjectNode()
+                            .put("protocolVersion", 1)
+                            .put("type", "selectPR")
+                            .put("number", 7)
+                            .put("owner", "x".repeat(257))
+                            .put("repo", "platform");
+
+            assertThat(WebviewPanel.isValidIncomingMessage(node)).isFalse();
+        }
+
+        @Test
+        void rejectsInvalidRichCommentMetadata() throws Exception {
+            var node =
+                    MAPPER.readTree(
+                            "{\"protocolVersion\":1,\"type\":\"saveDraft\",\"number\":7,"
+                                    + "\"owner\":\"acme\",\"repo\":\"platform\",\"result\":{"
+                                    + "\"summary\":\"s\",\"verdict\":\"COMMENT\",\"lineComments\":[{"
+                                    + "\"file\":\"a.java\",\"line\":1,\"type\":\"note\",\"body\":\"b\","
+                                    + "\"severity\":\"urgent\"}]}}");
+
+            assertThat(WebviewPanel.isValidIncomingMessage(node)).isFalse();
+        }
+    }
+
+    @Nested
+    class DraftLoadedSerialization {
+
+        @Test
+        void omitsAbsentOptionalFieldsFromNoDraftMessage() {
+            var message =
+                    new WebviewPanel.DraftLoadedMsg(
+                            "draftLoaded",
+                            "acme/platform#42",
+                            "NO_DRAFT",
+                            null,
+                            null,
+                            null,
+                            "diff",
+                            false,
+                            false,
+                            "",
+                            new WebviewPanel.ProviderReadinessDto("claude", true, "Ready"));
+
+            var json = MAPPER.valueToTree(message);
+
+            assertThat(json.has("reviewId")).isFalse();
+            assertThat(json.has("result")).isFalse();
+            assertThat(json.has("diff")).isFalse();
+            assertThat(json.path("validationDiff").asText()).isEqualTo("diff");
+        }
+
+        @Test
+        void omitsAbsentOptionalFieldsFromMergedMessage() {
+            var message =
+                    new WebviewPanel.DraftLoadedMsg(
+                            "draftLoaded",
+                            "acme/platform#42",
+                            "MERGED",
+                            null,
+                            null,
+                            null,
+                            null,
+                            false,
+                            false,
+                            "PR is merged.",
+                            new WebviewPanel.ProviderReadinessDto("copilot", true, "Ready"));
+
+            var json = MAPPER.valueToTree(message);
+
+            assertThat(json.has("reviewId")).isFalse();
+            assertThat(json.has("result")).isFalse();
+            assertThat(json.has("diff")).isFalse();
+            assertThat(json.has("validationDiff")).isFalse();
         }
     }
 }

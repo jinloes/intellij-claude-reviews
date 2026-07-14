@@ -1,0 +1,152 @@
+import type { IncomingMessage, LineComment, PR, ReviewResult } from './types'
+
+export const BRIDGE_PROTOCOL_VERSION = 1 as const
+
+const MAX_TEXT = 100_000
+const MAX_DIFF = 1_000_000
+const MAX_COMMENTS = 1_000
+const MAX_PRS = 100
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isString(value: unknown, maxLength = MAX_TEXT): value is string {
+  return typeof value === 'string' && value.length <= maxLength
+}
+
+function isOptionalString(value: unknown, maxLength = MAX_TEXT): boolean {
+  return value === undefined || isString(value, maxLength)
+}
+
+function isPrKey(value: unknown): boolean {
+  return value === undefined || (isString(value, 512) && /^[^/\s]+\/[^#\s]+#[1-9]\d*$/.test(value))
+}
+
+function isLineComment(value: unknown): value is LineComment {
+  if (!isRecord(value)) return false
+  return isString(value.file, 4_096)
+    && Number.isInteger(value.line)
+    && (value.line as number) > 0
+    && ['issue', 'suggestion', 'note'].includes(value.type as string)
+    && isString(value.body)
+    && (value.severity === undefined || ['blocker', 'major', 'minor', 'nit'].includes(value.severity as string))
+    && (value.category === undefined || ['correctness', 'security', 'performance', 'tests', 'maintainability', 'style'].includes(value.category as string))
+    && (value.confidence === undefined || ['low', 'medium', 'high'].includes(value.confidence as string))
+    && isOptionalString(value.rationale)
+}
+
+function isReviewResult(value: unknown): value is ReviewResult {
+  if (!isRecord(value) || !Array.isArray(value.lineComments) || value.lineComments.length > MAX_COMMENTS) return false
+  return isString(value.summary)
+    && ['APPROVE', 'REQUEST_CHANGES', 'COMMENT'].includes(value.verdict as string)
+    && value.lineComments.every(isLineComment)
+}
+
+function isPR(value: unknown): value is PR {
+  if (!isRecord(value)) return false
+  return Number.isInteger(value.number)
+    && (value.number as number) > 0
+    && isString(value.title)
+    && isString(value.owner, 256)
+    && isString(value.repo, 256)
+    && isString(value.author, 256)
+    && isString(value.createdAt, 128)
+    && isString(value.htmlUrl, 4_096)
+    && typeof value.isDraft === 'boolean'
+    && typeof value.hasReviewDraft === 'boolean'
+}
+
+function isListStatus(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return ['currentRepo', 'authored', 'assigned', 'reviewRequested'].includes(value.searchScope as string)
+    && isOptionalString(value.currentRepo, 512)
+    && Number.isInteger(value.resultLimit)
+    && (value.resultLimit as number) > 0
+    && (value.resultLimit as number) <= MAX_PRS
+    && typeof value.limited === 'boolean'
+}
+
+function isProviderReadiness(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return ['claude', 'copilot'].includes(value.provider as string)
+    && typeof value.available === 'boolean'
+    && isString(value.detail)
+}
+
+function hasMessage(value: Record<string, unknown>): boolean {
+  return isString(value.message)
+}
+
+export function parseIncomingMessage(value: unknown): IncomingMessage | null {
+  if (!isRecord(value) || value.protocolVersion !== BRIDGE_PROTOCOL_VERSION || !isString(value.type, 64)) {
+    return null
+  }
+  if (!isPrKey(value.prKey)) return null
+
+  let valid = false
+  switch (value.type) {
+    case 'prLoading':
+    case 'draftLoading':
+    case 'reviewSubmitted':
+    case 'draftDeleted':
+      valid = true
+      break
+    case 'prListLoaded':
+      valid = Array.isArray(value.prs)
+        && value.prs.length <= MAX_PRS
+        && value.prs.every(isPR)
+        && isOptionalString(value.defaultRepo, 512)
+        && (value.listStatus === undefined || isListStatus(value.listStatus))
+      break
+    case 'draftLoaded':
+      valid = ['NO_DRAFT', 'DRAFT_PRESENT', 'MERGED'].includes(value.prState as string)
+        && isOptionalString(value.reviewId, 256)
+        && (value.result === undefined || isReviewResult(value.result))
+        && isOptionalString(value.diff, MAX_DIFF)
+        && isOptionalString(value.validationDiff, MAX_DIFF)
+        && (value.staleCommits === undefined || typeof value.staleCommits === 'boolean')
+        && (value.importedFromGitHub === undefined || typeof value.importedFromGitHub === 'boolean')
+        && isOptionalString(value.status)
+        && (value.providerReadiness === undefined || isProviderReadiness(value.providerReadiness))
+      break
+    case 'reviewGenerating':
+    case 'reviewError':
+    case 'draftSaveError':
+    case 'reviewSubmitError':
+    case 'draftDeleteError':
+    case 'chatError':
+      valid = hasMessage(value)
+      break
+    case 'reviewChunk':
+      valid = ['text', 'thinking'].includes(value.kind as string) && isString(value.chunk)
+      break
+    case 'reviewResult':
+      valid = isReviewResult(value.result)
+        && isString(value.diff, MAX_DIFF)
+        && isOptionalString(value.validationDiff, MAX_DIFF)
+      break
+    case 'draftSaved':
+      valid = isString(value.reviewId, 256) && typeof value.commentsDropped === 'boolean'
+      break
+    case 'prDraftStatusUpdated':
+      valid = Number.isInteger(value.number) && (value.number as number) > 0
+        && isString(value.owner, 256) && isString(value.repo, 256)
+        && typeof value.hasReviewDraft === 'boolean'
+      break
+    case 'activatePR':
+      valid = isPR(value.pr) && (value.source === undefined || value.source === 'notification')
+      break
+    case 'chatChunk':
+      valid = isString(value.chunk)
+      break
+    case 'chatResponse':
+      valid = isString(value.response)
+      break
+    case 'setupRequired':
+      valid = ['gh_not_installed', 'gh_not_authenticated', 'load_failed'].includes(value.reason as string)
+        && isString(value.detail)
+      break
+  }
+  return valid ? value as unknown as IncomingMessage : null
+}

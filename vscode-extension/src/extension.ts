@@ -9,10 +9,11 @@ import * as settings from './settings';
 import * as workspace from './workspace';
 import { hasStaleCommits } from './draftState';
 import { mergeBySource, notificationMessage, prNotificationKey } from './notifications';
-import { isValidBridgeRequest } from './bridgeValidation';
+import { BRIDGE_PROTOCOL_VERSION, isValidBridgeRequest } from './bridgeValidation';
 import { classifySetupAuthError } from './authError';
 import { toUserFacingError, providerNotInstalledMessage } from './userFacingError';
 import { resolveWebviewDistPath } from './webviewAssets';
+import { buildErrorHtml, buildLauncherHtml, buildMainWebviewHtml } from './webviewHtml';
 
 type Provider = 'claude' | 'copilot';
 
@@ -252,55 +253,18 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
     ): void {
         this.openPanel();
         webviewView.webview.options = {
-            enableCommandUris: true,
+            enableScripts: true,
         };
-        webviewView.webview.html = this.getLauncherHtml();
-    }
-
-    private getLauncherHtml(): string {
-        return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>PR Pilot</title>
-  <style>
-    body {
-      color: var(--vscode-foreground);
-      background: var(--vscode-sideBar-background);
-      font-family: var(--vscode-font-family);
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 8px;
-      padding: 16px;
-      text-align: center;
-    }
-    a.button {
-      color: var(--vscode-button-foreground);
-      background: var(--vscode-button-background);
-      border: 0;
-      border-radius: 2px;
-      cursor: pointer;
-      display: inline-block;
-      padding: 6px 12px;
-      text-decoration: none;
-    }
-    a.button:hover {
-      background: var(--vscode-button-hoverBackground);
-    }
-    p {
-      color: var(--vscode-descriptionForeground);
-      line-height: 1.4;
-      margin: 0;
-      font-size: 0.9em;
-    }
-  </style>
-</head>
-<body>
-  <a class="button" href="command:pr-pilot.open">Open PR Pilot</a>
-  <p>The PR Pilot workspace opens in an editor tab.</p>
-</body>
-</html>`;
+        webviewView.webview.html = buildLauncherHtml(webviewView.webview.cspSource);
+        webviewView.webview.onDidReceiveMessage((message: unknown) => {
+            if (
+                typeof message === 'object'
+                && message !== null
+                && (message as { type?: unknown }).type === 'open'
+            ) {
+                this.openPanel();
+            }
+        });
     }
 
     private initializeWebview(
@@ -321,6 +285,9 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
             activeValidationDiff: '',
             activeReviewResult: null,
             pendingReviewId: null,
+            pendingReviewKey: null,
+            selectionRevision: 0,
+            mutationQueue: Promise.resolve(),
             chatHistory: new Map(),
             worktreeDir: null,
             gitRoot: null,
@@ -358,14 +325,16 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
     private getHtmlContent(webview: vscode.Webview): string {
         const indexPath = path.join(this.distUri.fsPath, 'index.html');
         if (!fs.existsSync(indexPath)) {
-            return errorHtml('webview/dist/index.html not found. Run "npm run build" inside webview/.');
+            return buildErrorHtml(
+                'webview/dist/index.html not found. Run "npm run build" inside webview/.',
+            );
         }
-        let html = fs.readFileSync(indexPath, 'utf8');
-        html = html.replace(/(src|href)="\.\/([^"]+)"/g, (_m, attr, p) =>
-            `${attr}="${webview.asWebviewUri(vscode.Uri.joinPath(this.distUri, p)).toString()}"`);
-        html = html.replace(/(src|href)="\/([^"]+)"/g, (_m, attr, p) =>
-            `${attr}="${webview.asWebviewUri(vscode.Uri.joinPath(this.distUri, p)).toString()}"`);
-        return html;
+        const html = fs.readFileSync(indexPath, 'utf8');
+        return buildMainWebviewHtml(
+            html,
+            webview.cspSource,
+            (assetPath) => webview.asWebviewUri(vscode.Uri.joinPath(this.distUri, assetPath)).toString(),
+        );
     }
 
     private setupMessageBridge(state: ViewState): void {
@@ -388,13 +357,13 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
                     cancelActiveProvider();
                     break;
                 case 'saveDraft':
-                    await handleSaveDraft(state, msg);
+                    await enqueueMutation(state, () => handleSaveDraft(state, msg));
                     break;
                 case 'submitReview':
-                    await handleSubmitReview(state, msg);
+                    await enqueueMutation(state, () => handleSubmitReview(state, msg));
                     break;
                 case 'deleteDraft':
-                    await handleDeleteDraft(state, msg);
+                    await enqueueMutation(state, () => handleDeleteDraft(state, msg));
                     break;
                 case 'askClaude':
                     await handleAskClaude(state, msg);
@@ -440,6 +409,9 @@ interface ViewState {
     activeValidationDiff: string;
     activeReviewResult: github.ReviewResult | null;
     pendingReviewId: string | null;
+    pendingReviewKey: string | null;
+    selectionRevision: number;
+    mutationQueue: Promise<void>;
     chatHistory: Map<string, claude.ChatMessage[]>;
     // PR-branch worktree, lazily created on first review/chat for the active PR and reused until
     // the PR changes or the view is disposed. Mirrors WebviewPanel.java's activePr* fields.
@@ -552,7 +524,13 @@ async function resolveWorkingDir(
 }
 
 function push(state: ViewState, msg: object): void {
-    state.webview.postMessage(msg);
+    state.webview.postMessage({ protocolVersion: BRIDGE_PROTOCOL_VERSION, ...msg });
+}
+
+function enqueueMutation(state: ViewState, action: () => Promise<void>): Promise<void> {
+    const queued = state.mutationQueue.then(action, action);
+    state.mutationQueue = queued.catch(() => undefined);
+    return queued;
 }
 
 function config(): vscode.WorkspaceConfiguration {
@@ -574,7 +552,7 @@ function reviewEffort(): string {
 }
 
 function copilotInheritMcp(): boolean {
-    return config().get<boolean>('copilotInheritMcp', true);
+    return config().get<boolean>('copilotInheritMcp', false);
 }
 
 function copilotConfigDir(): string {
@@ -715,6 +693,7 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
     const repo = msg.repo as string;
     if (!number || !owner || !repo) return;
     const key = prKeyFromParts(number, owner, repo);
+    const selectionRevision = ++state.selectionRevision;
     const title = typeof msg.title === 'string' ? msg.title : '';
     const body = typeof msg.body === 'string' ? msg.body : '';
 
@@ -724,6 +703,7 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
     state.activeValidationDiff = '';
     state.activeReviewResult = null;
     state.pendingReviewId = null;
+    state.pendingReviewKey = null;
     push(state, { type: 'draftLoading', prKey: key });
     try {
         const token = await getToken(state);
@@ -738,7 +718,7 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
         ]);
         const validationDiff = validationDiffRaw || diff;
 
-        if (prKey(state.activePR) !== key) return;
+        if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
 
         state.activePR = {
             number,
@@ -751,6 +731,7 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
         state.activeValidationDiff = validationDiff;
         state.activeReviewResult = draft?.result ?? null;
         state.pendingReviewId = draft?.id ?? null;
+        state.pendingReviewKey = draft ? key : null;
 
         if (detail.merged) {
             push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasReviewDraft: false });
@@ -776,7 +757,7 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
         }
     } catch (err) {
         state.cachedToken = null;
-        if (prKey(state.activePR) !== key) return;
+        if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
         push(state, {
             type: 'draftLoaded',
             prKey: key,
@@ -793,6 +774,11 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
     const repo = msg.repo as string;
     if (!number || !owner || !repo) return;
     const key = prKeyFromParts(number, owner, repo);
+    if (prKey(state.activePR) !== key) {
+        push(state, { type: 'reviewError', prKey: key, message: 'The selected pull request changed. Try again.' });
+        return;
+    }
+    const selectionRevision = state.selectionRevision;
 
     // Provider preflight: fail fast with actionable guidance instead of a raw CLI spawn error
     // when the configured review provider's binary isn't installed/resolvable.
@@ -813,12 +799,14 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
 
         let diff = state.activeDiff;
         let validationDiff = state.activeValidationDiff;
-        if (!diff || state.activePR?.number !== number) {
+        if (!diff) {
             diff = await github.getPRDiff(token, base, owner, repo, number);
+            if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
             state.activeDiff = diff;
         }
-        if (!validationDiff || state.activePR?.number !== number) {
+        if (!validationDiff) {
             validationDiff = await github.getPRDiffFull(token, base, owner, repo, number).catch(() => diff);
+            if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
             state.activeValidationDiff = validationDiff;
         }
 
@@ -850,6 +838,7 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
 
         const prompt = claude.buildPrompt({
             pr,
+            diff,
             existingReviews,
             repoGuidelines: readRepoGuidelines(reviewDir),
             priorReview: formatPriorReview(state.activeReviewResult),
@@ -876,7 +865,7 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
                 onChunk: (kind, chunk) => push(state, { type: 'reviewChunk', prKey: key, kind, chunk }),
             });
 
-        if (prKey(state.activePR) !== key) return;
+        if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
         state.activeReviewResult = result;
         push(state, { type: 'reviewResult', prKey: key, result, diff, validationDiff });
     } catch (err) {
@@ -894,13 +883,20 @@ async function handleSaveDraft(state: ViewState, msg: Record<string, unknown>): 
     const review = resultFromMsg ?? state.activeReviewResult;
     if (!number || !owner || !repo || !review) return;
     const key = prKeyFromParts(number, owner, repo);
+    if (prKey(state.activePR) !== key) {
+        push(state, { type: 'draftSaveError', prKey: key, message: 'The selected pull request changed before the draft could be saved.' });
+        return;
+    }
+    const selectionRevision = state.selectionRevision;
 
     try {
         const token = await getToken(state);
         const { reviewId, commentsDropped } = await github.saveDraftReview(
             token, githubBaseUrl(), owner, repo, number, review, orphansFromMsg,
         );
+        if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
         state.pendingReviewId = reviewId;
+        state.pendingReviewKey = key;
         push(state, { type: 'draftSaved', prKey: key, reviewId, commentsDropped });
         push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasReviewDraft: true });
     } catch (err) {
@@ -921,14 +917,22 @@ async function handleSubmitReview(state: ViewState, msg: Record<string, unknown>
     const comment = msg.comment as string ?? '';
     if (!number || !owner || !repo || !verdict || !state.pendingReviewId) return;
     const key = prKeyFromParts(number, owner, repo);
+    if (prKey(state.activePR) !== key || state.pendingReviewKey !== key) {
+        push(state, { type: 'reviewSubmitError', prKey: key, message: 'The pending draft does not belong to the selected pull request.' });
+        return;
+    }
+    const reviewId = state.pendingReviewId;
 
     try {
         const token = await getToken(state);
         await github.submitReview(
             token, githubBaseUrl(), owner, repo, number,
-            state.pendingReviewId, verdict, comment,
+            reviewId, verdict, comment,
         );
-        state.pendingReviewId = null;
+        if (state.pendingReviewId === reviewId && state.pendingReviewKey === key) {
+            state.pendingReviewId = null;
+            state.pendingReviewKey = null;
+        }
         push(state, { type: 'reviewSubmitted', prKey: key });
         push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasReviewDraft: false });
     } catch (err) {
@@ -947,13 +951,21 @@ async function handleDeleteDraft(state: ViewState, msg: Record<string, unknown>)
     const repo = msg.repo as string;
     if (!number || !owner || !repo || !state.pendingReviewId) return;
     const key = prKeyFromParts(number, owner, repo);
+    if (prKey(state.activePR) !== key || state.pendingReviewKey !== key) {
+        push(state, { type: 'draftDeleteError', prKey: key, message: 'The pending draft does not belong to the selected pull request.' });
+        return;
+    }
+    const reviewId = state.pendingReviewId;
 
     try {
         const token = await getToken(state);
         await github.deleteDraftReview(
-            token, githubBaseUrl(), owner, repo, number, state.pendingReviewId,
+            token, githubBaseUrl(), owner, repo, number, reviewId,
         );
-        state.pendingReviewId = null;
+        if (state.pendingReviewId === reviewId && state.pendingReviewKey === key) {
+            state.pendingReviewId = null;
+            state.pendingReviewKey = null;
+        }
         push(state, { type: 'draftDeleted', prKey: key });
         push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasReviewDraft: false });
     } catch (err) {
@@ -1040,14 +1052,4 @@ function errorMessage(err: unknown): string {
 
 function isCancellationError(err: unknown): boolean {
     return errorMessage(err).toLowerCase().includes('cancel');
-}
-
-function errorHtml(message: string): string {
-    return `<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><title>PR Pilot</title></head>
-<body style="color:#e8a030;background:#0a0805;font-family:monospace;padding:16px;">
-  <p>${message}</p>
-</body>
-</html>`;
 }

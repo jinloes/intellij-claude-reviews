@@ -181,8 +181,8 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
       </div>
 
       <div class="field" id="mcpField">
-        <label><input type="checkbox" id="inheritMcp" style="width:auto;margin-right:6px;">Inherit MCP servers from the Copilot CLI config</label>
-        <div class="hint">Gives the reviewer the same MCP tools as the <code>copilot</code> CLI — discovered from <code>~/.copilot/mcp-config.json</code> and any repo-local <code>.mcp.json</code>.</div>
+        <label><input type="checkbox" id="inheritMcp" style="width:auto;margin-right:6px;">Allow MCP tools for untrusted PR content (advanced)</label>
+        <div class="hint">Capability elevation: MCP tools discovered from user and repository configuration may access external systems while Copilot processes pull-request content. Disabled by default.</div>
         <input type="text" id="copilotConfigDir" placeholder="Config dir override (empty = ~/.copilot)" style="margin-top:8px;">
         <div class="hint">Optional override of the Copilot config directory used to discover MCP servers.</div>
       </div>
@@ -297,7 +297,7 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
       $('claudeModel').value = state.reviewModel;
       $('effort').value = state.reviewEffort;
       $('baseUrl').value = state.githubBaseUrl;
-      $('inheritMcp').checked = state.copilotInheritMcp !== false;
+      $('inheritMcp').checked = state.copilotInheritMcp === true;
       $('copilotConfigDir').value = state.copilotConfigDir || '';
       $('focusAreas').value = state.reviewFocusAreas || '';
       $('customInstructions').value = state.reviewCustomInstructions || '';

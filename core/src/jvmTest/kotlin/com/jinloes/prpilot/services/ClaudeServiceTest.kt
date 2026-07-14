@@ -31,27 +31,28 @@ class ClaudeServiceTest : FunSpec({
 
     context("buildPrompt") {
 
-        test("contains persona and fetch instruction") {
+        test("contains persona and embedded diff") {
             val p = PullRequest("Fix the bug", "", "myorg", "myrepo", 99, "", "alice", "2024-01-01")
-            val prompt = ClaudeService.buildPrompt(PRReviewRequest(p, "", ""))
+            val prompt = ClaudeService.buildPrompt(PRReviewRequest(p, "diff --git a/a b/a", ""))
             prompt shouldContain "experienced engineer"
-            prompt shouldContain "gh pr diff 99 --repo myorg/myrepo"
+            prompt shouldContain "<pr_diff>\ndiff --git a/a b/a\n</pr_diff>"
         }
 
-        test("invites use of additional context tools / MCP servers") {
+        test("does not invite tool or MCP access") {
             val p = PullRequest("Fix the bug", "", "myorg", "myrepo", 99, "", "alice", "2024-01-01")
             val prompt = ClaudeService.buildPrompt(PRReviewRequest(p, "", ""))
-            prompt shouldContain "MCP servers"
-            prompt shouldContain "issue trackers"
+            prompt shouldContain "No tools are available"
+            prompt shouldNotContain "MCP servers"
+            prompt shouldNotContain "gh pr diff"
         }
 
-        test("fetch diff wrapped in fetch_diff tag — no inline diff tag") {
+        test("diff wrapped in pr_diff tag") {
             val p = PullRequest("Fix the bug", "", "myorg", "myrepo", 99, "", "alice", "2024-01-01")
-            val prompt = ClaudeService.buildPrompt(PRReviewRequest(p, "", ""))
-            prompt shouldContain "<fetch_diff>\n"
-            prompt shouldContain "gh pr diff 99 --repo myorg/myrepo"
-            prompt shouldContain "</fetch_diff>"
-            prompt shouldNotContain "<diff>"
+            val prompt = ClaudeService.buildPrompt(PRReviewRequest(p, "diff content", ""))
+            prompt shouldContain "<pr_diff>\n"
+            prompt shouldContain "diff content"
+            prompt shouldContain "</pr_diff>"
+            prompt shouldNotContain "<fetch_diff>"
         }
 
         test("pr_metadata wrapped in xml tags") {
@@ -64,12 +65,12 @@ class ClaudeServiceTest : FunSpec({
             prompt shouldContain "title: Fix the bug"
         }
 
-        test("pr_metadata appears before fetch_diff") {
+        test("pr_metadata appears before pr_diff") {
             val p = PullRequest("My PR", "", "org", "repo", 1, "", "alice", "2024-01-01")
-            val prompt = ClaudeService.buildPrompt(PRReviewRequest(p, "", ""))
+            val prompt = ClaudeService.buildPrompt(PRReviewRequest(p, "diff", ""))
             val metaIdx = prompt.indexOf("<pr_metadata>\nnumber:")
-            val fetchIdx = prompt.indexOf("<fetch_diff>\nRun:")
-            (metaIdx < fetchIdx) shouldBe true
+            val diffIdx = prompt.indexOf("<pr_diff>\ndiff")
+            (metaIdx < diffIdx) shouldBe true
         }
 
         test("blank knownPatterns — section absent") {
@@ -169,9 +170,9 @@ class ClaudeServiceTest : FunSpec({
             prompt shouldContain "at most 12 comments"
         }
 
-        test("tool-unavailable fallback is explicit") {
+        test("insufficient-context fallback is explicit") {
             val prompt = ClaudeService.buildPrompt(PRReviewRequest(pr(), "", ""))
-            prompt shouldContain "If required tools are unavailable or fail"
+            prompt shouldContain "If the provided context is insufficient"
             prompt shouldContain "verdict=\"COMMENT\""
             prompt shouldContain "lineComments=[]"
         }

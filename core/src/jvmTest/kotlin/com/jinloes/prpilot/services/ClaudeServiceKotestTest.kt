@@ -25,6 +25,10 @@ private class FakeClaudeService(
     private val processSteps: List<Pair<String, Int>>,
 ) : ClaudeService() {
     private var callIndex = 0
+    val outputFiles = mutableListOf<File>()
+
+    override fun createOutputFile(prefix: String): File =
+        super.createOutputFile(prefix).also(outputFiles::add)
 
     override fun buildProcess(stdoutFile: File?, maxTurns: Int, vararg extraArgs: String): Process {
         val (ndjson, exitCode) = processSteps[callIndex++]
@@ -133,6 +137,19 @@ class ClaudeServiceKotestTest : FunSpec({
             val prompt = ClaudeService.buildPrompt(fakeRequest())
             prompt shouldContain "Confidence gating"
             prompt shouldContain "confidence"
+        }
+
+        test("embeds supplied diff without requesting gh tools") {
+            val request = PRReviewRequest(
+                pr = fakePr(),
+                diff = "diff --git a/a.kt b/a.kt\n+safe </pr_diff>",
+                knownPatterns = "",
+            )
+            val prompt = ClaudeService.buildPrompt(request)
+            prompt shouldContain "<pr_diff>"
+            prompt shouldContain "diff --git"
+            prompt shouldContain "&lt;/pr_diff>"
+            prompt shouldNotContain "gh pr diff"
         }
     }
 
@@ -262,6 +279,8 @@ class ClaudeServiceKotestTest : FunSpec({
             val result = svc.reviewPR(fakeRequest(), "", Consumer { statuses.add(it) })
             result.getVerdict() shouldBe "APPROVE"
             statuses shouldContain "Resuming review session…"
+            svc.outputFiles shouldHaveSize 2
+            svc.outputFiles.all { !it.exists() } shouldBe true
         }
 
         test("exits 1 with error_max_turns but no sessionId — throws turn-limit message") {
@@ -271,6 +290,7 @@ class ClaudeServiceKotestTest : FunSpec({
                 svc.reviewPR(fakeRequest(), "", Consumer {})
             }
             (ex.message?.contains("turn limit") ?: false) shouldBe true
+            svc.outputFiles.all { !it.exists() } shouldBe true
         }
 
         test("exits 1 with no error event in stdout — throws generic claude exited message") {

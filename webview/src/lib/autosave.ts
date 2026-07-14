@@ -40,4 +40,3 @@ export function isReviewDirty(current: string | null, lastSaved: string | null):
 export function autosaveDelayMs(kind: SavableKind): number {
   return kind === 'reviewUnsaved' ? 0 : AUTOSAVE_DEBOUNCE_MS
 }
-

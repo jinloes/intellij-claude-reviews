@@ -23,12 +23,14 @@ import javax.swing.JButton;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.SwingConstants;
-import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-@Slf4j
 public class PRToolWindowFactory implements ToolWindowFactory {
+
+    private static final Logger log = LoggerFactory.getLogger(PRToolWindowFactory.class);
 
     static final String TOOL_WINDOW_ID = "PR Pilot";
 

@@ -1,3 +1,5 @@
+import { BRIDGE_PROTOCOL_VERSION, parseIncomingMessage } from './validation'
+
 /**
  * Messages sent FROM the IntelliJ plugin TO the webview via JCEF executeJavaScript.
  */
@@ -139,7 +141,7 @@ export interface SetupRequiredMessage {
   detail: string
 }
 
-export type IncomingMessage =
+export type IncomingMessage = { readonly protocolVersion: typeof BRIDGE_PROTOCOL_VERSION } & (
   | PRListLoadedMessage
   | PRLoadingMessage
   | DraftLoadingMessage
@@ -159,7 +161,7 @@ export type IncomingMessage =
   | ChatChunkMessage
   | ChatResponseMessage
   | ChatErrorMessage
-  | SetupRequiredMessage
+  | SetupRequiredMessage)
 
 export interface PR {
   number: number
@@ -326,12 +328,13 @@ const _vsCodeApi: VsCodeApi | null = _getVsCodeApi()
  * Sends a message to the host (IntelliJ via JCEF, VS Code, or dev console).
  */
 export function sendToHost(message: OutgoingMessage): void {
+  const versionedMessage = { protocolVersion: BRIDGE_PROTOCOL_VERSION, ...message }
   if (_vsCodeApi) {
-    _vsCodeApi.postMessage(message)
+    _vsCodeApi.postMessage(versionedMessage)
   } else {
     const w = window as unknown as { cefQuery?: (opts: { request: string }) => void }
     if (w.cefQuery) {
-      w.cefQuery({ request: JSON.stringify(message) })
+      w.cefQuery({ request: JSON.stringify(versionedMessage) })
     } else {
       console.debug('[bridge] sendToHost (no host):', message)
     }
@@ -351,7 +354,9 @@ function _ensureGlobalDispatcher() {
     // Register once; the listener is never removed because it must outlive any
     // individual component that calls onHostMessage.
     window.addEventListener('message', (event: MessageEvent) => {
-      _dispatch(event.data as IncomingMessage)
+      const message = parseIncomingMessage(event.data)
+      if (message) _dispatch(message)
+      else console.error('[bridge] rejected invalid host message')
     })
   } else {
     // JCEF: the plugin calls window.__handleMessage(payload). Payload is normally a parsed
@@ -364,13 +369,23 @@ function _ensureGlobalDispatcher() {
       let msg: IncomingMessage
       if (typeof payload === 'string') {
         try {
-          msg = JSON.parse(payload) as IncomingMessage
+          const parsed = parseIncomingMessage(JSON.parse(payload))
+          if (!parsed) {
+            console.error('[bridge] rejected invalid host message')
+            return
+          }
+          msg = parsed
         } catch (e) {
           console.error('[bridge] failed to parse host message:', payload, e)
           return
         }
       } else {
-        msg = payload
+        const parsed = parseIncomingMessage(payload)
+        if (!parsed) {
+          console.error('[bridge] rejected invalid host message')
+          return
+        }
+        msg = parsed
       }
       _dispatch(msg)
     }

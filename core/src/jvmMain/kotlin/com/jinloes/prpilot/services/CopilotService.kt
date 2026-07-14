@@ -10,6 +10,7 @@ import com.github.copilot.rpc.CopilotClientMode
 import com.github.copilot.rpc.CopilotClientOptions
 import com.github.copilot.rpc.MessageOptions
 import com.github.copilot.rpc.PermissionHandler
+import com.github.copilot.rpc.PermissionRequestResult
 import com.github.copilot.rpc.SessionConfig
 import com.jinloes.prpilot.model.ChatMessage
 import com.jinloes.prpilot.model.PRReviewRequest
@@ -21,6 +22,7 @@ import java.io.Closeable
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.ExecutionException
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -72,7 +74,7 @@ open class CopilotService @JvmOverloads constructor(
         effort: String,
         onStatus: Consumer<String>,
         onChunk: BiConsumer<String, String>? = null,
-        inheritMcp: Boolean = true,
+        inheritMcp: Boolean = false,
         configDir: String? = null,
     ): ReviewResult {
         val prompt = ClaudeService.buildPrompt(request)
@@ -103,11 +105,8 @@ open class CopilotService @JvmOverloads constructor(
         return try {
             ClaudeService.parseReview(raw)
         } catch (parseEx: Exception) {
-            log.warn(
-                "Failed to parse Copilot review JSON (first 500 chars): {}",
-                if (raw.length > 500) raw.substring(0, 500) else raw,
-            )
-            throw IOException("Failed to parse review JSON from copilot output: ${parseEx.message}", parseEx)
+            log.warn("Failed to parse Copilot review JSON (output chars: {})", raw.length)
+            throw IOException("Failed to parse review JSON from Copilot output.", parseEx)
         }
     }
 
@@ -119,7 +118,7 @@ open class CopilotService @JvmOverloads constructor(
         userMessage: String,
         effort: String,
         onChunk: Consumer<String>,
-        inheritMcp: Boolean = true,
+        inheritMcp: Boolean = false,
         configDir: String? = null,
     ): String {
         val prompt = ClaudeService.buildChatPrompt(prContext, history, userMessage)
@@ -319,8 +318,13 @@ open class CopilotService @JvmOverloads constructor(
         }
 
         override fun createSession(request: SessionRequest): RuntimeSession {
+            val permissionHandler = PermissionHandler { permissionRequest, _ ->
+                CompletableFuture.completedFuture(
+                    permissionDecision(permissionRequest.kind, request.enableConfigDiscovery),
+                )
+            }
             val config = SessionConfig()
-                .setOnPermissionRequest(PermissionHandler.APPROVE_ALL)
+                .setOnPermissionRequest(permissionHandler)
                 .setStreaming(true)
                 .setWorkingDirectory(request.workingDir.absolutePath)
                 .setReasoningEffort(request.effort)
@@ -413,6 +417,15 @@ open class CopilotService @JvmOverloads constructor(
     }
 
     companion object {
+                        internal fun permissionDecision(kind: String?, allowMcp: Boolean): PermissionRequestResult =
+                            if (allowMcp && kind == "mcp") {
+                                PermissionRequestResult.approveOnce()
+                            } else {
+                                PermissionRequestResult.reject(
+                                    "PR Pilot runs reviews with read-only embedded context; external tools are disabled.",
+                                )
+                            }
+
         private val log = LoggerFactory.getLogger(CopilotService::class.java)
 
         private const val STATUS_GENERATING = "Generating review…"

@@ -3,8 +3,9 @@ import * as os from 'os';
 import {
     CopilotClient,
     RuntimeConnection,
-    approveAll,
     type CopilotSession,
+    type PermissionHandler,
+    type PermissionRequestResult,
 } from '@github/copilot-sdk';
 import type { ReviewResult, LineComment } from './github';
 import type { ChatMessage, PR } from './claude';
@@ -23,6 +24,16 @@ export { buildPrompt, buildChatPrompt, buildFocusedChatPrompt };
 export const DEFAULT_REASONING_EFFORT = 'medium';
 export const SDK_BOOT_TIMEOUT_MS = 60 * 1000;
 const REQUEST_TIMEOUT_MS = 30 * 60 * 1000;
+
+export function permissionDecision(kind: string, allowMcp: boolean): PermissionRequestResult {
+    if (allowMcp && kind === 'mcp') {
+        return { kind: 'approve-once' };
+    }
+    return {
+        kind: 'reject',
+        feedback: 'PR Pilot runs reviews with read-only embedded context; external tools are disabled.',
+    };
+}
 
 // ── Binary resolution ──────────────────────────────────────────────────────────
 
@@ -222,15 +233,17 @@ async function runSession(options: {
 
     try {
         await withTimeout(client.start(), SDK_BOOT_TIMEOUT_MS, 'runtime startup');
+        const allowMcp = inheritMcp === true;
+        const permissionHandler: PermissionHandler = (request) => permissionDecision(request.kind, allowMcp);
         session = await withTimeout(client.createSession({
             model: model.trim() || undefined,
             reasoningEffort: normalizeReasoningEffort(effort),
-            onPermissionRequest: approveAll,
+            onPermissionRequest: permissionHandler,
             streaming: true,
             // When true, the SDK discovers MCP servers from the Copilot CLI config
             // (~/.copilot/mcp-config.json) and any repo-local .mcp.json, so the review/chat
             // session inherits the same tools (captain, workiq, github-mcp, …) as the CLI.
-            enableConfigDiscovery: inheritMcp ?? true,
+            enableConfigDiscovery: allowMcp,
             ...(configDir && configDir.trim() ? { configDir: configDir.trim() } : {}),
         }), SDK_BOOT_TIMEOUT_MS, 'session creation');
         run.session = session;

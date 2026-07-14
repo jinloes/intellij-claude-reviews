@@ -11,6 +11,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "lint": "eslint .",
+    "test": "npm run test:unit",
+    "test:unit": "tsx --test src/lib/*.test.ts src/bridge/*.test.ts",
     "a11y:install": "playwright install chromium",
     "test:a11y": "playwright test -c playwright.a11y.config.ts"
   },
@@ -38,9 +40,10 @@
     "tailwind-merge": "^3.5.0"
   },
   "devDependencies": {
-    "@axe-core/react": "^4.10.2",
     "@axe-core/playwright": "^4.10.2",
+    "@axe-core/react": "^4.10.2",
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.55.0",
     "@types/node": "^25.6.0",
     "@types/react": "^18.3.1",
     "@types/react-dom": "^18.3.1",
@@ -51,8 +54,8 @@
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.6.0",
     "postcss": "^8.5.14",
-    "@playwright/test": "^1.55.0",
     "tailwindcss": "^3.4.19",
+    "tsx": "^4.23.1",
     "typescript": "^5.5.3",
     "typescript-eslint": "^8.59.4",
     "vite": "^5.3.4"

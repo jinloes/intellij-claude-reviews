@@ -1,0 +1,148 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { BRIDGE_PROTOCOL_VERSION, parseIncomingMessage } from './validation'
+
+const version = { protocolVersion: BRIDGE_PROTOCOL_VERSION }
+
+const review = {
+  summary: 'Summary',
+  verdict: 'COMMENT',
+  lineComments: [{
+    file: 'src/a.ts',
+    line: 1,
+    type: 'note',
+    body: 'Body',
+    severity: 'minor',
+    category: 'maintainability',
+    confidence: 'high',
+    rationale: 'Evidence',
+  }],
+}
+
+void test('accepts complete rich review result messages', () => {
+  const parsed = parseIncomingMessage({
+    ...version,
+    type: 'reviewResult',
+    prKey: 'acme/platform#42',
+    result: review,
+    diff: 'diff',
+    validationDiff: 'diff',
+  })
+
+  assert.notEqual(parsed, null)
+})
+
+void test('rejects unversioned and unknown messages', () => {
+  assert.equal(parseIncomingMessage({ type: 'prLoading' }), null)
+  assert.equal(parseIncomingMessage({ ...version, type: 'surprise' }), null)
+})
+
+void test('rejects malformed nested review values', () => {
+  assert.equal(parseIncomingMessage({
+    ...version,
+    type: 'reviewResult',
+    result: { ...review, verdict: 'INVALID' },
+    diff: 'diff',
+  }), null)
+  assert.equal(parseIncomingMessage({
+    ...version,
+    type: 'reviewResult',
+    result: { ...review, lineComments: [{ ...review.lineComments[0], line: 0 }] },
+    diff: 'diff',
+  }), null)
+})
+
+void test('rejects malformed PR correlation keys', () => {
+  assert.equal(parseIncomingMessage({ ...version, type: 'draftLoading', prKey: '42' }), null)
+})
+
+void test('validates PR list metadata', () => {
+  const pr = {
+    number: 42,
+    title: 'Improve validation',
+    owner: 'acme',
+    repo: 'platform',
+    author: 'octocat',
+    createdAt: '2026-07-13T00:00:00Z',
+    htmlUrl: 'https://github.com/acme/platform/pull/42',
+    isDraft: false,
+    hasReviewDraft: true,
+  }
+  assert.notEqual(parseIncomingMessage({
+    ...version,
+    type: 'prListLoaded',
+    prs: [pr],
+    defaultRepo: 'acme/platform',
+    listStatus: { searchScope: 'currentRepo', currentRepo: 'acme/platform', resultLimit: 50, limited: false },
+  }), null)
+  assert.equal(parseIncomingMessage({
+    ...version,
+    type: 'prListLoaded',
+    prs: [pr],
+    listStatus: { searchScope: 'invalid', resultLimit: 50, limited: false },
+  }), null)
+})
+
+void test('validates all optional draft metadata', () => {
+  assert.notEqual(parseIncomingMessage({
+    ...version,
+    type: 'draftLoaded',
+    prKey: 'acme/platform#42',
+    prState: 'DRAFT_PRESENT',
+    reviewId: '123',
+    result: review,
+    diff: 'diff',
+    validationDiff: 'diff',
+    staleCommits: false,
+    importedFromGitHub: true,
+    status: 'Loaded',
+    providerReadiness: { provider: 'claude', available: true, detail: 'Ready' },
+  }), null)
+  assert.equal(parseIncomingMessage({
+    ...version,
+    type: 'draftLoaded',
+    prState: 'NO_DRAFT',
+    staleCommits: 'false',
+  }), null)
+  assert.equal(parseIncomingMessage({
+    ...version,
+    type: 'draftLoaded',
+    prState: 'NO_DRAFT',
+    providerReadiness: { provider: 'unknown', available: true, detail: 'Ready' },
+  }), null)
+})
+
+void test('accepts IntelliJ no-draft payloads with absent optional fields', () => {
+  assert.notEqual(parseIncomingMessage({
+    ...version,
+    type: 'draftLoaded',
+    prKey: 'acme/platform#42',
+    prState: 'NO_DRAFT',
+    validationDiff: 'diff',
+    staleCommits: false,
+    importedFromGitHub: false,
+    status: '',
+    providerReadiness: { provider: 'claude', available: true, detail: 'Ready' },
+  }), null)
+  assert.equal(parseIncomingMessage({
+    ...version,
+    type: 'draftLoaded',
+    prKey: 'acme/platform#42',
+    prState: 'NO_DRAFT',
+    reviewId: null,
+  }), null)
+})
+
+void test('rejects oversized message fields and comment collections', () => {
+  assert.equal(parseIncomingMessage({
+    ...version,
+    type: 'reviewResult',
+    result: { ...review, lineComments: Array.from({ length: 1_001 }, () => review.lineComments[0]) },
+    diff: 'diff',
+  }), null)
+  assert.equal(parseIncomingMessage({
+    ...version,
+    type: 'chatChunk',
+    chunk: 'x'.repeat(100_001),
+  }), null)
+})

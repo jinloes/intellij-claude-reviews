@@ -17,7 +17,8 @@ import java.util.List;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Background service that polls GitHub at a configurable interval and fires IDE balloon
@@ -31,9 +32,10 @@ import lombok.extern.slf4j.Slf4j;
  * <p>The first poll after startup silently seeds the seen-PR set so the user doesn't receive a
  * flood of notifications for existing PRs.
  */
-@Slf4j
 @Service
 public final class PRNotificationService implements Disposable {
+
+    private static final Logger log = LoggerFactory.getLogger(PRNotificationService.class);
 
     static final String NOTIFICATION_GROUP = "PR Pilot";
     static final String AUTH_MISSING_ERROR = "Not signed in — run 'gh auth login'.";

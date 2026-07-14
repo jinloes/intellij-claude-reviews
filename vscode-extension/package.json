@@ -139,8 +139,8 @@
         },
         "pr-pilot.copilotInheritMcp": {
           "type": "boolean",
-          "default": true,
-          "description": "When enabled, the Copilot review/chat session inherits MCP servers from the Copilot CLI config (`~/.copilot/mcp-config.json`) and any repo-local `.mcp.json`, giving the reviewer the same tools as the `copilot` CLI. Only applied when `pr-pilot.reviewProvider` is `copilot`."
+          "default": false,
+          "description": "Advanced capability elevation. When enabled, Copilot may call MCP tools discovered from the CLI and repository configuration while processing untrusted pull-request content. Disabled by default."
         },
         "pr-pilot.copilotConfigDir": {
           "type": "string",

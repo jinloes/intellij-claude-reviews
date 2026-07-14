@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildPrompt, escapeClosingTag } from '../src/claude';
+import { buildPrompt, escapeClosingTag, SAFE_CLAUDE_TOOL_ARGS } from '../src/claude';
 
 const pr = (over: Partial<{ number: number; title: string; owner: string; repo: string; body: string }> = {}) => ({
   number: 1,
@@ -18,10 +18,11 @@ test('buildPrompt wraps metadata in pr_metadata tags', () => {
   assert.match(prompt, /title: Add feature/);
 });
 
-test('buildPrompt invites use of additional context tools / MCP servers', () => {
-  const prompt = buildPrompt({ pr: pr() });
-  assert.match(prompt, /MCP servers/);
-  assert.match(prompt, /issue trackers/);
+test('buildPrompt embeds the supplied diff instead of requesting tools', () => {
+  const prompt = buildPrompt({ pr: pr(), diff: 'diff --git a/a.ts b/a.ts\n+safe' });
+  assert.match(prompt, /<pr_diff>[\s\S]*diff --git/);
+  assert.doesNotMatch(prompt, /gh pr diff/);
+  assert.match(prompt, /No tools are available/);
 });
 
 test('buildPrompt escapes closing tag injected via PR title', () => {
@@ -73,11 +74,22 @@ test('buildPrompt requires confidence-gated, evidence-backed findings', () => {
   assert.match(prompt, /Confidence gating/);
 });
 
-test('buildPrompt defines tool-unavailable fallback instead of guessing', () => {
+test('buildPrompt defines insufficient-context fallback instead of guessing', () => {
   const prompt = buildPrompt({ pr: pr() });
-  assert.match(prompt, /If required tools are unavailable or fail/);
+  assert.match(prompt, /If the provided context is insufficient/);
   assert.match(prompt, /verdict="COMMENT"/);
   assert.match(prompt, /lineComments=\[\]/);
+});
+
+test('Claude CLI safety arguments disable tools and external MCP configuration', () => {
+  assert.deepEqual(SAFE_CLAUDE_TOOL_ARGS, [
+    '--tools', '',
+    '--permission-mode', 'dontAsk',
+    '--strict-mcp-config',
+    '--mcp-config', '{"mcpServers":{}}',
+    '--setting-sources', 'user',
+  ]);
+  assert.equal(SAFE_CLAUDE_TOOL_ARGS.includes('--dangerously-skip-permissions'), false);
 });
 
 test('buildPrompt constrains key-change summary bullets to avoid overflow', () => {

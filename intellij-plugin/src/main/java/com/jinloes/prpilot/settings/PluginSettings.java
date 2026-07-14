@@ -56,7 +56,7 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
          * config ({@code ~/.copilot/mcp-config.json}) and any repo-local {@code .mcp.json} via the
          * SDK's config discovery. Only applied when {@code reviewProvider} is COPILOT.
          */
-        public boolean copilotInheritMcp = true;
+        public boolean copilotInheritMcp = false;
 
         /**
          * Optional override of the Copilot config directory used to discover MCP servers. Empty

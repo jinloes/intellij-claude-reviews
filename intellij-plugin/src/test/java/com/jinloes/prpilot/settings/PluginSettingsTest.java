@@ -98,9 +98,9 @@ class PluginSettingsTest {
     }
 
     @Test
-    void copilotInheritMcpDefaultsToTrue() {
+    void copilotInheritMcpDefaultsToFalse() {
         PluginSettings s = new PluginSettings();
-        assertThat(s.isCopilotInheritMcp()).isTrue();
+        assertThat(s.isCopilotInheritMcp()).isFalse();
     }
 
     @Test

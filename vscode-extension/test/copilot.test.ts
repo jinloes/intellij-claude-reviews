@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { DEFAULT_REASONING_EFFORT, filterModelIds, normalizeReasoningEffort, withTimeout } from '../src/copilot';
+import { DEFAULT_REASONING_EFFORT, filterModelIds, normalizeReasoningEffort, permissionDecision, withTimeout } from '../src/copilot';
 
 test('normalizeReasoningEffort keeps supported values', () => {
   assert.equal(normalizeReasoningEffort('low'), 'low');
@@ -28,6 +28,16 @@ test('normalizeReasoningEffort falls back to default on unknown values', () => {
 
 test('normalizeReasoningEffort falls back to default on blank input', () => {
   assert.equal(normalizeReasoningEffort('   '), DEFAULT_REASONING_EFFORT);
+});
+
+test('permissionDecision denies tools by default', () => {
+  assert.equal(permissionDecision('shell', false).kind, 'reject');
+  assert.equal(permissionDecision('mcp', false).kind, 'reject');
+});
+
+test('permissionDecision only approves MCP after explicit elevation', () => {
+  assert.equal(permissionDecision('mcp', true).kind, 'approve-once');
+  assert.equal(permissionDecision('write', true).kind, 'reject');
 });
 
 test('withTimeout returns resolved value before timeout', async () => {
