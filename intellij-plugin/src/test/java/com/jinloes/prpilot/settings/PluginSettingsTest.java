@@ -128,6 +128,42 @@ class PluginSettingsTest {
     }
 
     @Test
+    void reviewFocusAreasDefaultsToEmptyAndTrims() {
+        PluginSettings s = new PluginSettings();
+        assertThat(s.getReviewFocusAreas()).isEmpty();
+
+        s.setReviewFocusAreas("  security, performance  ");
+        assertThat(s.getReviewFocusAreas()).isEqualTo("security, performance");
+
+        s.setReviewFocusAreas(null);
+        assertThat(s.getReviewFocusAreas()).isEmpty();
+    }
+
+    @Test
+    void reviewCustomInstructionsDefaultsToEmptyAndTrims() {
+        PluginSettings s = new PluginSettings();
+        assertThat(s.getReviewCustomInstructions()).isEmpty();
+
+        s.setReviewCustomInstructions("  Prefer regression tests.  ");
+        assertThat(s.getReviewCustomInstructions()).isEqualTo("Prefer regression tests.");
+
+        s.setReviewCustomInstructions(null);
+        assertThat(s.getReviewCustomInstructions()).isEmpty();
+    }
+
+    @Test
+    void reviewPromptDefaultsHandleNullPersistedValues() {
+        PluginSettings s = new PluginSettings();
+        PluginSettings.State state = new PluginSettings.State();
+        state.reviewFocusAreas = null;
+        state.reviewCustomInstructions = null;
+        s.loadState(state);
+
+        assertThat(s.getReviewFocusAreas()).isEmpty();
+        assertThat(s.getReviewCustomInstructions()).isEmpty();
+    }
+
+    @Test
     void activeModelReflectsSelectedProvider() {
         PluginSettings s = new PluginSettings();
         s.setReviewModel("claude-opus-4-7");

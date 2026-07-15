@@ -115,12 +115,29 @@ export function apiBase(githubBaseUrl: string): string {
 }
 
 export function normalizeGithubBaseUrl(githubBaseUrl: string): string {
-    const url = (githubBaseUrl || 'https://github.com').trim().replace(/\/$/, '');
-    if (!url.startsWith('https://')) {
-        throw new Error('GitHub base URL must start with https://');
+    const candidate = (githubBaseUrl || '').trim().replace(/\/+$/, '');
+    if (candidate === '') return 'https://github.com';
+    try {
+        if (candidate.endsWith(':')) throw new Error(GITHUB_BASE_URL_ERROR);
+        const url = new URL(candidate);
+        if (
+            url.protocol !== 'https:'
+            || url.username !== ''
+            || url.password !== ''
+            || url.pathname !== '/'
+            || url.search !== ''
+            || url.hash !== ''
+        ) {
+            throw new Error(GITHUB_BASE_URL_ERROR);
+        }
+        return url.origin;
+    } catch {
+        throw new Error(GITHUB_BASE_URL_ERROR);
     }
-    return url;
 }
+
+const GITHUB_BASE_URL_ERROR =
+    'GitHub base URL must be an HTTPS origin without credentials, a path, query, or fragment.';
 
 function findGhBinary(): string {
     const candidates = [

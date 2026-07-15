@@ -48,11 +48,21 @@ test('buildPRSearchQuery supports authored scope', () => {
   );
 });
 
-test('apiBase rejects non-https base URLs', () => {
-  assert.throws(
-    () => apiBase('http://github.example.com'),
-    /must start with https:\/\//,
-  );
+test('apiBase rejects values that are not HTTPS origins', () => {
+  for (const value of [
+    'http://github.example.com',
+    'https://user:password@github.example.com',
+    'https://github.example.com/api/v3',
+    'https://github.example.com?tenant=acme',
+    'https://github.example.com#fragment',
+    'https://github.example.com:',
+  ]) {
+    assert.throws(
+      () => apiBase(value),
+      /must be an HTTPS origin without credentials, a path, query, or fragment/,
+      value,
+    );
+  }
 });
 
 test('isRetriableStatus retries on 429 and 5xx only', () => {
@@ -73,6 +83,7 @@ test('isRetriableNetworkError recognizes transient network failures', () => {
 test('normalizeGithubBaseUrl defaults to github.com and trims trailing slash', () => {
   assert.equal(normalizeGithubBaseUrl(''), 'https://github.com');
   assert.equal(normalizeGithubBaseUrl('https://github.example.com/'), 'https://github.example.com');
+  assert.equal(normalizeGithubBaseUrl('https://GITHUB.EXAMPLE.COM/'), 'https://github.example.com');
 });
 
 // ── detectCurrentRepo ───────────────────────────────────────────────────────

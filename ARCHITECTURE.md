@@ -280,6 +280,8 @@ The `.vscode/launch.json` config `Run PR Pilot Extension Against Target Repo` pr
 - `reviewEffort` (default `"medium"`; values `none|low|medium|high|xhigh|max`)
 - `copilotInheritMcp` (default `false`) — explicit capability elevation that enables Copilot SDK config discovery for MCP servers while retaining the MCP-only permission allowlist. Copilot-only.
 - `copilotConfigDir` (default `""`) — optional override of the Copilot config directory used to discover MCP servers; empty uses the CLI default (`~/.copilot`). Copilot-only.
+- `reviewFocusAreas` (default `""`) — default reviewer focus areas; a non-empty per-review override takes precedence.
+- `reviewCustomInstructions` (default `""`) — default extra review instructions; a non-empty per-review override takes precedence.
 
 No API keys or tokens are written to disk.
 
