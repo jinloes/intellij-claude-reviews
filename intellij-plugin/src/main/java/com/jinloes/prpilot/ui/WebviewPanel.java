@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.module.kotlin.KotlinModule;
 import com.intellij.ide.BrowserUtil;
+import com.intellij.ide.ui.LafManagerListener;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.options.ShowSettingsUtil;
 import com.intellij.openapi.project.Project;
@@ -18,6 +19,7 @@ import com.intellij.openapi.util.Disposer;
 import com.intellij.ui.jcef.JBCefBrowser;
 import com.intellij.ui.jcef.JBCefBrowserBase;
 import com.intellij.ui.jcef.JBCefJSQuery;
+import com.intellij.util.ui.UIUtil;
 import com.jinloes.prpilot.model.ChatMessage;
 import com.jinloes.prpilot.model.LineComment;
 import com.jinloes.prpilot.model.PRReviewRequest;
@@ -33,6 +35,7 @@ import com.jinloes.prpilot.services.IntellijGitHubService;
 import com.jinloes.prpilot.services.PendingReviewIndex;
 import com.jinloes.prpilot.services.UserFacingErrors;
 import com.jinloes.prpilot.settings.PluginSettings;
+import com.jinloes.prpilot.settings.PluginSettingsConfigurable;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.awt.Container;
@@ -53,6 +56,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import javax.swing.JComponent;
 import javax.swing.SwingUtilities;
+import javax.swing.UIManager;
 import org.apache.commons.lang3.StringUtils;
 import org.cef.browser.CefBrowser;
 import org.cef.browser.CefFrame;
@@ -106,6 +110,8 @@ public class WebviewPanel implements Disposable {
             @JsonProperty("listStatus") PrListStatus listStatus) {}
 
     private record DraftLoadingMsg(String type, @JsonProperty("prKey") String prKey) {}
+
+    private record ThemeChangedMsg(String type, String theme) {}
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
     record DraftLoadedMsg(
@@ -228,11 +234,19 @@ public class WebviewPanel implements Disposable {
                             @Override
                             public void onLoadEnd(
                                     CefBrowser cefBrowser, CefFrame frame, int httpStatusCode) {
-                                if (!frame.isMain()) {
+                                if (!frame.isMain() || disposed) {
                                     return;
                                 }
                                 injectBridge(cefBrowser);
-                                getApplication().invokeLater(onPageReady);
+                                getApplication()
+                                        .invokeLater(
+                                                () -> {
+                                                    if (disposed) {
+                                                        return;
+                                                    }
+                                                    pushCurrentTheme();
+                                                    onPageReady.run();
+                                                });
                             }
                         },
                         browser.getCefBrowser());
@@ -246,6 +260,10 @@ public class WebviewPanel implements Disposable {
         getApplication().executeOnPooledThread(this::startServerAndLoad);
 
         installPostSleepResizeFix();
+        getApplication()
+                .getMessageBus()
+                .connect(this)
+                .subscribe(LafManagerListener.TOPIC, source -> pushCurrentTheme());
     }
 
     private void startServerAndLoad() {
@@ -435,7 +453,8 @@ public class WebviewPanel implements Disposable {
                                         () ->
                                                 ShowSettingsUtil.getInstance()
                                                         .showSettingsDialog(
-                                                                project, "Claude PR Reviews"));
+                                                                project,
+                                                                PluginSettingsConfigurable.class));
                 case "runAuthLogin" ->
                         getApplication()
                                 .invokeLater(
@@ -1495,6 +1514,26 @@ public class WebviewPanel implements Disposable {
         }
     }
 
+    private void pushCurrentTheme() {
+        getApplication()
+                .invokeLater(
+                        () -> {
+                            if (disposed) {
+                                return;
+                            }
+                            String lafName =
+                                    StringUtils.defaultString(
+                                                    UIManager.getLookAndFeel() == null
+                                                            ? null
+                                                            : UIManager.getLookAndFeel().getName())
+                                            .toLowerCase(java.util.Locale.ROOT);
+                            boolean highContrast = lafName.contains("contrast");
+                            boolean dark = UIUtil.isUnderDarcula();
+                            String theme = HostThemeClassifier.classify(dark, highContrast);
+                            pushMessage(new ThemeChangedMsg("themeChanged", theme));
+                        });
+    }
+
     /** Pushes the PR list into the webview via the bridge. Call from the EDT. */
     public void loadPRs(
             List<PullRequest> prs,
@@ -1579,7 +1618,9 @@ public class WebviewPanel implements Disposable {
     }
 
     public void reload() {
-        browser.getCefBrowser().reloadIgnoreCache();
+        if (!disposed) {
+            browser.getCefBrowser().reloadIgnoreCache();
+        }
     }
 
     public JComponent getComponent() {
@@ -1587,7 +1628,10 @@ public class WebviewPanel implements Disposable {
     }
 
     @Override
-    public void dispose() {
+    public synchronized void dispose() {
+        if (disposed) {
+            return;
+        }
         disposed = true;
         clearActivePrWorktree();
         if (listenedWindow != null && focusListener != null) {

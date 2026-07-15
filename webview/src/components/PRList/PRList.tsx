@@ -13,6 +13,8 @@ import {
 } from '@/components/ui/select'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { cn } from '@/lib/utils'
+import { shouldFocusPrFilter } from '@/lib/keyboard'
+import { useI18n } from '@/i18n/I18nProvider'
 import { onHostMessage, sendToHost, type PR, type PRListStatus, type PRSearchScope } from '../../bridge/types'
 
 interface Props {
@@ -21,7 +23,7 @@ interface Props {
 }
 
 type StateFilter = 'open' | 'closed' | 'all'
-type SetupReason = 'gh_not_installed' | 'gh_not_authenticated' | 'load_failed'
+export type SetupReason = 'gh_not_installed' | 'gh_not_authenticated' | 'load_failed'
 const FIRST_SUCCESS_KEY = 'pr-pilot:first-success-coach-shown'
 
 function prKey(pr: Pick<PR, 'owner' | 'repo' | 'number'>): string {
@@ -43,6 +45,7 @@ function formatCreatedAt(createdAt?: string): string {
 }
 
 export function PRList({ onSelect, selectedPr }: Props) {
+  const t = useI18n()
   const [prs, setPRs] = useState<PR[]>([])
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
@@ -52,7 +55,6 @@ export function PRList({ onSelect, selectedPr }: Props) {
   const [stateFilter, setStateFilter] = useState<StateFilter>('open')
   const [searchScope, setSearchScope] = useState<PRSearchScope>('currentRepo')
   const [listStatus, setListStatus] = useState<PRListStatus | null>(null)
-  const [setupRequired, setSetupRequired] = useState<{ reason: SetupReason; detail: string } | null>(null)
   const [coachVisible, setCoachVisible] = useState(false)
   const [coachRecoveredSetup, setCoachRecoveredSetup] = useState(false)
   const [scopeHelpVisible, setScopeHelpVisible] = useState(false)
@@ -75,7 +77,6 @@ export function PRList({ onSelect, selectedPr }: Props) {
         }
         setLoading(false)
         setRefreshing(false)
-        setSetupRequired(null)
         const shouldCoach = sawSetupScreenRef.current || !localStorage.getItem(FIRST_SUCCESS_KEY)
         if (shouldCoach) {
           setCoachVisible(true)
@@ -86,7 +87,6 @@ export function PRList({ onSelect, selectedPr }: Props) {
       } else if (msg.type === 'prLoading') {
         setRefreshing(true)
       } else if (msg.type === 'setupRequired') {
-        setSetupRequired({ reason: msg.reason, detail: msg.detail })
         sawSetupScreenRef.current = true
         setLoading(false)
         setRefreshing(false)
@@ -178,11 +178,11 @@ export function PRList({ onSelect, selectedPr }: Props) {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key === '/' && document.activeElement !== searchRef.current) {
+      if (shouldFocusPrFilter(e) && document.activeElement !== searchRef.current) {
         e.preventDefault()
         searchRef.current?.focus()
       }
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && document.activeElement === searchRef.current) {
         setFilter('')
         searchRef.current?.blur()
       }
@@ -192,20 +192,7 @@ export function PRList({ onSelect, selectedPr }: Props) {
   }, [])
 
   return (
-    <div className="flex flex-col h-full bg-background border-r border-border">
-      {/* Setup-required onboarding screen — shown instead of the full list */}
-      {setupRequired && (
-        <SetupScreen
-          reason={setupRequired.reason}
-          detail={setupRequired.detail}
-          refreshing={refreshing}
-          onRefresh={() => fetchWithFilters()}
-        />
-      )}
-
-      {/* Normal list UI — hidden while setup screen is active */}
-      {!setupRequired && (
-        <>
+    <nav className="flex flex-col h-full bg-background border-r border-border" aria-label={t('app.prList')}>
       {coachVisible && (
         <div className="shrink-0 border-b border-border bg-status-approve/5 px-3 py-2">
           <div className="flex items-start gap-2">
@@ -252,9 +239,9 @@ export function PRList({ onSelect, selectedPr }: Props) {
       <div className="shrink-0 px-3 pt-3 pb-2 space-y-2 border-b border-border">
         {/* Title row */}
         <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold tracking-widest uppercase text-muted-foreground">
+          <h1 className="text-xs font-semibold tracking-widest uppercase text-muted-foreground">
             Pull Requests
-          </span>
+          </h1>
           <Badge
             variant="outline"
             className={cn(
@@ -300,6 +287,7 @@ export function PRList({ onSelect, selectedPr }: Props) {
               if (val) handleStateFilter(val)
             }}
             className="gap-1"
+            aria-label={t('filter.state')}
           >
             {(['open', 'closed', 'all'] as StateFilter[]).map((s) => (
               <ToggleGroupItem
@@ -315,7 +303,7 @@ export function PRList({ onSelect, selectedPr }: Props) {
           <Separator orientation="vertical" className="h-4" />
 
           <Select value={searchScope} onValueChange={handleSearchScope}>
-            <SelectTrigger className="h-7 min-w-40 flex-1 text-xs border-border bg-background">
+            <SelectTrigger className="h-7 min-w-40 flex-1 text-xs border-border bg-background" aria-label={t('filter.scope')}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -354,7 +342,7 @@ export function PRList({ onSelect, selectedPr }: Props) {
         {/* Repo filter */}
         {repos.length > 0 && (
           <Select value={repoFilter} onValueChange={setRepoFilter}>
-            <SelectTrigger className="h-7 text-xs border-border bg-background">
+            <SelectTrigger className="h-7 text-xs border-border bg-background" aria-label={t('filter.repository')}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -390,21 +378,10 @@ export function PRList({ onSelect, selectedPr }: Props) {
 
       {/* PR list */}
       <ScrollArea className="flex-1">
-        <div
-          onKeyDown={(e) => {
-            if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
-            e.preventDefault()
-            const buttons = Array.from(
-              (e.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>('.pr-item'),
-            )
-            const activeIdx = buttons.indexOf(document.activeElement as HTMLButtonElement)
-            const nextIdx =
-              e.key === 'ArrowDown'
-                ? Math.min(activeIdx + 1, buttons.length - 1)
-                : Math.max(activeIdx - 1, 0)
-            buttons[nextIdx]?.focus()
-          }}
-        >
+        <div>
+          <div aria-live="polite" aria-atomic="true" className="sr-only">
+            {loading ? 'Loading pull requests' : refreshing ? 'Refreshing pull requests' : `${filtered.length} pull requests shown`}
+          </div>
           {loading && (
             <div className="flex items-center gap-2 p-5 text-sm text-muted-foreground">
               <span className="font-mono animate-pulse text-primary">█</span>
@@ -490,20 +467,23 @@ export function PRList({ onSelect, selectedPr }: Props) {
             </div>
           )}
 
-          {filtered.map((pr) => (
-            <PRItem
-              key={prKey(pr)}
-              pr={pr}
-              selected={selected === prKey(pr)}
-              spotlighted={spotlightedKey === prKey(pr)}
-              onClick={() => handleSelect(pr)}
-            />
-          ))}
+          <ul
+            aria-label="Pull request results"
+          >
+            {filtered.map((pr) => (
+              <li key={prKey(pr)}>
+                <PRItem
+                  pr={pr}
+                  selected={selected === prKey(pr)}
+                  spotlighted={spotlightedKey === prKey(pr)}
+                  onClick={() => handleSelect(pr)}
+                />
+              </li>
+            ))}
+          </ul>
         </div>
       </ScrollArea>
-      </>
-      )}
-    </div>
+    </nav>
   )
 }
 
@@ -526,7 +506,7 @@ function PRItem({ pr, selected, spotlighted, onClick }: ItemProps) {
         selected && 'bg-accent/40 border-l-2 border-l-primary',
       )}
       onClick={onClick}
-      aria-pressed={selected}
+      aria-current={selected ? 'page' : undefined}
     >
       {/* Number gutter */}
       <div className="w-14 shrink-0 flex flex-col items-end justify-start px-3 py-2.5 border-r border-border gap-0.5">
@@ -567,7 +547,7 @@ function PRItem({ pr, selected, spotlighted, onClick }: ItemProps) {
         <div className="flex items-baseline gap-1.5 min-w-0">
           <span className="text-sm text-foreground truncate flex-1 leading-snug">{pr.title}</span>
         </div>
-        <span className="font-mono truncate text-[11px] text-muted-foreground/80">
+        <span className="font-mono truncate text-[11px] text-muted-foreground">
           {pr.owner}/{pr.repo}
         </span>
         <div className="flex items-center gap-1 text-[11px]">
@@ -575,7 +555,7 @@ function PRItem({ pr, selected, spotlighted, onClick }: ItemProps) {
           {date && (
             <>
               <span className="text-muted-foreground">·</span>
-              <span className="text-muted-foreground/70">{date}</span>
+              <span className="text-muted-foreground">{date}</span>
             </>
           )}
         </div>
@@ -617,7 +597,7 @@ interface SetupScreenProps {
   onRefresh: () => void
 }
 
-function SetupScreen({ reason, detail, refreshing, onRefresh }: SetupScreenProps) {
+export function SetupScreen({ reason, detail, refreshing, onRefresh }: SetupScreenProps) {
   const title = reason === 'load_failed' ? 'Could not load pull requests' : 'GitHub not connected'
   const host = typeof (window as { acquireVsCodeApi?: unknown }).acquireVsCodeApi === 'function'
     ? 'VS Code'
@@ -654,7 +634,7 @@ function SetupScreen({ reason, detail, refreshing, onRefresh }: SetupScreenProps
     <div className="flex flex-col h-full items-center justify-center gap-5 px-6 text-center">
       <TriangleAlert className="w-10 h-10 text-status-suggestion shrink-0" />
       <div className="flex flex-col gap-2">
-        <p className="text-sm font-semibold text-foreground">{title}</p>
+        <h1 className="text-sm font-semibold text-foreground">{title}</h1>
         <p className="text-xs text-muted-foreground leading-relaxed">{detail}</p>
         <p className="text-[11px] text-muted-foreground">Detected host: {host}</p>
       </div>
@@ -691,16 +671,6 @@ function SetupScreen({ reason, detail, refreshing, onRefresh }: SetupScreenProps
             {host === 'VS Code' ? <Terminal className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
             {host === 'VS Code' ? 'Run in terminal' : copyLabel === 'copied' ? 'Copied' : copyLabel === 'failed' ? 'Copy failed' : 'Copy command'}
           </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 px-2 text-[11px] gap-1.5"
-            onClick={checkStatus}
-            disabled={refreshing}
-          >
-            <RefreshCw className={cn('w-3 h-3', refreshing && 'animate-spin')} />
-            Check status
-          </Button>
         </div>
         {lastCheckedAt && (
           <p className="text-[11px] text-muted-foreground">
@@ -727,15 +697,9 @@ function SetupScreen({ reason, detail, refreshing, onRefresh }: SetupScreenProps
           <ExternalLink className="w-3.5 h-3.5" />
           Auth Guide
         </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          className="gap-1.5 text-xs"
-          onClick={checkStatus}
-          disabled={refreshing}
-        >
+        <Button variant="outline" size="sm" className="gap-1.5 text-xs" onClick={checkStatus} disabled={refreshing}>
           <RefreshCw className={cn('w-3 h-3', refreshing && 'animate-spin')} />
-          Refresh
+          {reason === 'load_failed' ? 'Retry' : 'Check status'}
         </Button>
       </div>
     </div>

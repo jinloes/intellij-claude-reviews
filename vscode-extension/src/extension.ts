@@ -14,6 +14,7 @@ import { classifySetupAuthError } from './authError';
 import { toUserFacingError, providerNotInstalledMessage } from './userFacingError';
 import { resolveWebviewDistPath } from './webviewAssets';
 import { buildErrorHtml, buildLauncherHtml, buildMainWebviewHtml } from './webviewHtml';
+import { classifyHostTheme, type HostTheme } from './hostTheme';
 
 type Provider = 'claude' | 'copilot';
 
@@ -251,7 +252,6 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
         _context: vscode.WebviewViewResolveContext,
         _token: vscode.CancellationToken,
     ): void {
-        this.openPanel();
         webviewView.webview.options = {
             enableScripts: true,
         };
@@ -263,6 +263,7 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
                 && (message as { type?: unknown }).type === 'open'
             ) {
                 this.openPanel();
+                void vscode.commands.executeCommand('workbench.action.closeSidebar');
             }
         });
     }
@@ -296,10 +297,15 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
         this.state = state;
 
         this.setupMessageBridge(state);
+        const themeSubscription = vscode.window.onDidChangeActiveColorTheme((theme) => {
+            push(state, { type: 'themeChanged', theme: mapHostThemeKind(theme.kind) });
+        });
+        push(state, { type: 'themeChanged', theme: mapHostThemeKind(vscode.window.activeColorTheme.kind) });
 
         // Tear down any PR-branch worktree when the view is disposed so we don't leak
         // temp directories or detached worktrees registered against the user's repo.
         onDidDispose(() => {
+            themeSubscription.dispose();
             clearWorktree(state);
             onDispose?.();
         });
@@ -308,7 +314,10 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
         // rather than an indefinite loading spinner.
         handleRefreshPRs(state, {})
             .catch(console.error)
-            .finally(() => this.flushPendingActivation());
+            .finally(() => {
+                push(state, { type: 'themeChanged', theme: mapHostThemeKind(vscode.window.activeColorTheme.kind) });
+                this.flushPendingActivation();
+            });
     }
 
     private flushPendingActivation(): void {
@@ -389,6 +398,14 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
             }
         });
     }
+}
+
+export function mapHostThemeKind(kind: vscode.ColorThemeKind): HostTheme {
+    const highContrast = kind === vscode.ColorThemeKind.HighContrast
+        || kind === vscode.ColorThemeKind.HighContrastLight;
+    const dark = kind !== vscode.ColorThemeKind.Light
+        && kind !== vscode.ColorThemeKind.HighContrastLight;
+    return classifyHostTheme(dark, highContrast);
 }
 
 function runAuthLoginInTerminal(): void {

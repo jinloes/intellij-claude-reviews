@@ -5,6 +5,7 @@ import {
   type PR,
   type ReviewResult,
   type LineComment,
+  type ProviderReadiness,
 } from '../../bridge/types'
 import { validateComments } from '@/lib/validateComments'
 import {
@@ -69,6 +70,9 @@ import { cn } from '@/lib/utils'
 import { ChatPane } from '../ChatPane'
 import { DiffViewer } from '../DiffViewer'
 import { ReviewDisplay } from '../ReviewDisplay'
+import { AccessibleResizer } from '../layout/AccessibleResizer'
+import { LiveStatus } from '../a11y/LiveStatus'
+import { useI18n } from '@/i18n/I18nProvider'
 
 const CHAT_HEIGHT_KEY = 'claude-reviews:chat-height'
 const MIN_CHAT_HEIGHT = 100
@@ -90,7 +94,7 @@ type Verdict = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT'
 type PaneState =
   | { kind: 'idle' }
   | { kind: 'draftLoading' }
-  | { kind: 'noDraft'; diff?: string; validationDiff?: string }
+  | { kind: 'noDraft'; diff?: string; validationDiff?: string; providerReadiness?: ProviderReadiness }
   | { kind: 'authError'; message: string; diff?: string; validationDiff?: string }
   | {
       kind: 'draftPresent'
@@ -303,7 +307,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   const [chatVisible, setChatVisible] = useState(false)
   const [selectedContext, setSelectedContext] = useState('')
   const [pendingChatMessage, setPendingChatMessage] = useState<{ q: string; ctx: string; id: number } | null>(null)
-  const [chunkedMode, setChunkedMode] = useState(false)
+  const [chunkedOverride, setChunkedOverride] = useState<boolean | null>(null)
   const [chunkedProgress, setChunkedProgress] = useState<ChunkedProgress | null>(null)
   const [qualityExpanded, setQualityExpanded] = useState(false)
   const [chatHeight, setChatHeight] = useState(loadChatHeight)
@@ -333,6 +337,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     setState({ kind: pr ? 'draftLoading' : 'idle' })
     setFocusAreasOverride('')
     setCustomInstructionsOverride('')
+    setChunkedOverride(null)
     pendingSubmit.current = null
     setSaving(false)
     setSubmitting(false)
@@ -394,7 +399,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
             setState(
               status
                 ? { kind: 'authError', message: status, diff, validationDiff }
-                : { kind: 'noDraft', diff, validationDiff },
+                : { kind: 'noDraft', diff, validationDiff, providerReadiness: msg.providerReadiness },
             )
           }
           break
@@ -676,7 +681,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     return () => document.removeEventListener('mouseup', handleMouseUp)
   }, [pr])
 
-  const handleChatResizeMove = useCallback((e: MouseEvent) => {
+  const handleChatResizeMove = useCallback((e: PointerEvent) => {
     if (!chatDragRef.current) return
     const delta = chatDragRef.current.startY - e.clientY
     const newHeight = Math.max(MIN_CHAT_HEIGHT, Math.min(MAX_CHAT_HEIGHT, chatDragRef.current.startHeight + delta))
@@ -689,8 +694,8 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     document.body.style.cursor = ''
     document.body.style.userSelect = ''
     localStorage.setItem(CHAT_HEIGHT_KEY, String(chatHeightRef.current))
-    document.removeEventListener('mousemove', handleChatResizeMove)
-    document.removeEventListener('mouseup', handleChatResizeUp)
+    document.removeEventListener('pointermove', handleChatResizeMove)
+    document.removeEventListener('pointerup', handleChatResizeUp)
   }
 
   // Hooks must run in the same order on every render — keep all hooks above the early return.
@@ -711,6 +716,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     () => chunkRecommendation(preflight, isDiffTruncated(validationDiff) || isDiffTruncated(diff)),
     [preflight, validationDiff, diff],
   )
+  const chunkedMode = chunkedOverride ?? recommendation.recommendChunked
 
   const savableResult: ReviewResult | null =
     state.kind === 'reviewUnsaved' || state.kind === 'draftPresent' ? state.result : null
@@ -989,13 +995,13 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     setPendingChatMessage({ q, ctx: '', id: Date.now() })
   }
 
-  function handleChatResizeDown(e: React.MouseEvent) {
+  function handleChatResizeDown(e: React.PointerEvent) {
     e.preventDefault()
     chatDragRef.current = { startY: e.clientY, startHeight: chatHeight }
     document.body.style.cursor = 'ns-resize'
     document.body.style.userSelect = 'none'
-    document.addEventListener('mousemove', handleChatResizeMove)
-    document.addEventListener('mouseup', handleChatResizeUp)
+    document.addEventListener('pointermove', handleChatResizeMove)
+    document.addEventListener('pointerup', handleChatResizeUp)
   }
 
   const inlineComments = partition.adjusted
@@ -1006,6 +1012,17 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   const hasReview = state.kind === 'draftPresent' || state.kind === 'reviewUnsaved'
   const contextSummary = chatContextSummary(pr, diff, result, selectedContext)
   const showReviewOverrides = state.kind !== 'draftLoading' && state.kind !== 'generating' && state.kind !== 'merged'
+  const statusMessage = state.kind === 'draftLoading'
+    ? 'Checking for a saved review draft'
+    : state.kind === 'generating'
+      ? (state.messages[state.messages.length - 1] ?? 'Generating review')
+      : state.kind === 'submitted'
+        ? 'Review submitted'
+        : saving
+          ? 'Saving review draft'
+          : submitting
+            ? 'Submitting review'
+            : ''
 
   // DiffViewer indexes comments by position in the array we pass it (`inlineComments`),
   // but our mutators operate on positions in the canonical `result.lineComments`. The
@@ -1066,6 +1083,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   return (
     <TooltipProvider delayDuration={400}>
       <div className="flex flex-col h-full bg-background">
+        <LiveStatus message={statusMessage} />
         {/* Header */}
         <div className="shrink-0 px-4 py-2.5 border-b border-border bg-card">
           <div className="flex items-center gap-2 min-w-0">
@@ -1170,7 +1188,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
                 )}
               </>
             ) : (
-              <span className="font-mono text-muted-foreground/70">{pr.owner}/{pr.repo}</span>
+              <span className="font-mono text-muted-foreground">{pr.owner}/{pr.repo}</span>
             )}
           </div>
         </div>
@@ -1188,7 +1206,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
                   recommendation={recommendation}
                   onFocusAreasChange={setFocusAreasOverride}
                   onCustomInstructionsChange={setCustomInstructionsOverride}
-                  onChunkedModeChange={setChunkedMode}
+                  onChunkedModeChange={setChunkedOverride}
                 />
               )}
               {result && qualityReport && qualityRiskCount > 0 && !qualityExpanded && (
@@ -1271,13 +1289,27 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
             className="shrink-0 border-t border-border overflow-hidden transition-[height]"
             style={{ height: chatVisible ? chatHeight : 0 }}
           >
+            {chatVisible && (
+              <AccessibleResizer
+                label="Resize chat panel"
+                orientation="horizontal"
+                value={chatHeight}
+                min={MIN_CHAT_HEIGHT}
+                max={MAX_CHAT_HEIGHT}
+                onChange={(height) => {
+                  chatHeightRef.current = height
+                  setChatHeight(height)
+                }}
+                onCommit={(height) => localStorage.setItem(CHAT_HEIGHT_KEY, String(height))}
+                onPointerDown={handleChatResizeDown}
+              />
+            )}
             <ChatPane
               pr={currentPr}
               selectedContext={selectedContext}
               onContextUsed={() => setSelectedContext('')}
               pendingMessage={pendingChatMessage ?? undefined}
               onPendingMessageSent={() => setPendingChatMessage(null)}
-              onResizeStart={handleChatResizeDown}
               contextSummary={contextSummary}
             />
           </div>
@@ -1299,6 +1331,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
           inlineCommentCount={commentCount}
           orphanCommentCount={orphanCount}
           summary={result?.summary ?? ''}
+          qualityReport={qualityReport}
         />
       </div>
     </TooltipProvider>
@@ -1327,6 +1360,7 @@ function ReviewOverrides({
   onChunkedModeChange,
 }: ReviewOverridesProps) {
   const hasOverrides = focusAreas.trim().length > 0 || customInstructions.trim().length > 0
+  const t = useI18n()
   return (
     <div className="px-4 pt-3">
       <div className="rounded border border-border bg-muted/20 px-3 py-2.5">
@@ -1349,13 +1383,19 @@ function ReviewOverrides({
         <p className="mt-1 text-[11px] text-muted-foreground">
           Leave blank to use defaults from Settings.
         </p>
+        <label htmlFor="review-focus-areas" className="mt-2 block text-xs font-medium text-foreground">{t('review.focusAreas')}</label>
         <input
+          id="review-focus-areas"
           className="mt-2 w-full rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-ring"
           placeholder="Focus areas (e.g. security, performance, tests)"
           value={focusAreas}
           onChange={(e) => onFocusAreasChange(e.target.value)}
         />
+        <details className="mt-2 rounded border border-border/70 p-2">
+          <summary className="cursor-pointer text-xs font-medium text-foreground">{t('review.advanced')}</summary>
+        <label htmlFor="review-custom-instructions" className="mt-2 block text-xs font-medium text-foreground">{t('review.customInstructions')}</label>
         <textarea
+          id="review-custom-instructions"
           className="mt-2 w-full rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-ring resize-y"
           rows={2}
           placeholder="Custom instructions for this review only"
@@ -1385,6 +1425,7 @@ function ReviewOverrides({
           Best for large or high-risk PRs (many files, truncated diff context). Leave off for smaller PRs when you
           want the fastest single-pass review.
         </p>
+        </details>
       </div>
     </div>
   )
@@ -1484,7 +1525,7 @@ function ChunkedProgressCard({ progress }: { progress: ChunkedProgress }) {
             <li key={item.label} className="text-[11px] text-muted-foreground">
               {item.label} · confidence {(item.confidence * 100).toFixed(0)}% · {item.comments} comments
               {item.fileConfidence.length > 0 && (
-                <ul className="mt-1 space-y-0.5 text-[10px] text-muted-foreground/80">
+                <ul className="mt-1 space-y-0.5 text-[10px] text-muted-foreground">
                   {item.fileConfidence.map((file) => (
                     <li key={file.file} className="flex items-center gap-1.5" title={file.file}>
                       <span className="truncate max-w-[36rem]">{file.file}</span>
@@ -1601,7 +1642,7 @@ function ReviewAndDiff({
       {staleCommits && (
         <Alert className="mx-4 mt-3 mb-0 border-status-suggestion/40 bg-status-suggestion/5">
           <AlertTriangle className="h-3.5 w-3.5 text-status-suggestion" />
-          <AlertDescription className="text-xs text-status-suggestion/90">
+          <AlertDescription className="text-xs text-status-suggestion">
             Draft generated against an older commit — new commits may have been pushed.
           </AlertDescription>
         </Alert>
@@ -1609,7 +1650,7 @@ function ReviewAndDiff({
       {importedFromGitHub && (
         <Alert className="mx-4 mt-3 mb-0 border-status-suggestion/40 bg-status-suggestion/5">
           <AlertTriangle className="h-3.5 w-3.5 text-status-suggestion" />
-          <AlertDescription className="text-xs text-status-suggestion/90">
+          <AlertDescription className="text-xs text-status-suggestion">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span>
                 Draft was reconstructed from GitHub comments — hidden PR Pilot metadata was missing, so review details
@@ -1633,7 +1674,7 @@ function ReviewAndDiff({
       {isDiffTruncated(diff) && (
         <Alert className="mx-4 mt-3 mb-0 border-status-suggestion/40 bg-status-suggestion/5">
           <AlertTriangle className="h-3.5 w-3.5 text-status-suggestion" />
-          <AlertDescription className="text-xs text-status-suggestion/90">
+          <AlertDescription className="text-xs text-status-suggestion">
             Diff display and chat context are truncated at 80 KB. Use smaller focused questions for large PRs.
           </AlertDescription>
         </Alert>
@@ -1754,9 +1795,22 @@ function PaneContent({
       return (
         <div className="flex flex-col items-center justify-center gap-4 p-8">
           <p className="text-sm text-muted-foreground">No pending draft for this PR.</p>
-          <Button onClick={onGenerate} className="gap-2">
+          {state.providerReadiness && (
+            <p
+              className={cn('text-xs font-medium', state.providerReadiness.available ? 'text-status-approve' : 'text-status-issue')}
+              role="status"
+            >
+              {state.providerReadiness.available
+                ? `${state.providerReadiness.provider === 'claude' ? 'Claude' : 'Copilot'} ready`
+                : state.providerReadiness.detail}
+            </p>
+          )}
+          <Button onClick={onGenerate} className="gap-2" disabled={state.providerReadiness?.available === false}>
             Generate Review
           </Button>
+          {state.providerReadiness?.available === false && (
+            <Button variant="outline" size="sm" onClick={onOpenSettings}>Open Settings</Button>
+          )}
         </div>
       )
 
@@ -1815,7 +1869,7 @@ function PaneContent({
           )}
 
           {latestChunks.length > 0 && (
-            <p className="text-xs text-muted-foreground/60 font-mono break-words line-clamp-3 leading-relaxed">
+            <p className="text-xs text-muted-foreground font-mono break-words line-clamp-3 leading-relaxed">
               {latestChunks.map((c) => c.content).join('')}
             </p>
           )}
@@ -1863,7 +1917,7 @@ function PaneContent({
     case 'merged':
       return (
         <div className="flex flex-col items-center justify-center gap-2 p-8">
-          <GitMerge className="w-9 h-9 text-muted-foreground/50" />
+          <GitMerge className="w-9 h-9 text-muted-foreground" />
           <p className="text-sm text-muted-foreground">This pull request has been merged.</p>
           {state.status && <p className="text-xs text-muted-foreground">{state.status}</p>}
         </div>
@@ -1945,6 +1999,7 @@ interface FooterProps {
   inlineCommentCount: number
   orphanCommentCount: number
   summary: string
+  qualityReport: ReviewQualityReport | null
 }
 
 function ReviewFooter({
@@ -1962,10 +2017,11 @@ function ReviewFooter({
   inlineCommentCount,
   orphanCommentCount,
   summary,
+  qualityReport,
 }: FooterProps) {
   if (state.kind === 'generating') {
     return (
-      <div className="shrink-0 flex items-center gap-2 px-4 py-2.5 border-t border-border bg-card">
+      <div className="shrink-0 flex flex-wrap items-center gap-2 px-4 py-2.5 border-t border-border bg-card">
         <Button variant="destructive" size="sm" onClick={onCancel} className="gap-1.5">
           <X className="w-3.5 h-3.5" />
           Cancel
@@ -1984,7 +2040,7 @@ function ReviewFooter({
             <AlertDialogTrigger asChild>
               <Button variant="ghost" size="sm" disabled={busy} className="gap-1.5 text-xs">
                 <RotateCcw className="w-3.5 h-3.5" />
-                Regen
+                Regenerate
               </Button>
             </AlertDialogTrigger>
             <AlertDialogContent>
@@ -2003,7 +2059,7 @@ function ReviewFooter({
         ) : (
           <Button variant="ghost" size="sm" disabled={busy} className="gap-1.5 text-xs" onClick={onRegenerate}>
             <RotateCcw className="w-3.5 h-3.5" />
-            Regen
+            Regenerate
           </Button>
         )}
 
@@ -2088,6 +2144,7 @@ function ReviewFooter({
           inlineCommentCount={inlineCommentCount}
           orphanCommentCount={orphanCommentCount}
           summary={summary}
+          qualityReport={qualityReport}
         />
       </div>
     )
@@ -2108,6 +2165,7 @@ function ReviewFooter({
           inlineCommentCount={inlineCommentCount}
           orphanCommentCount={orphanCommentCount}
           summary={summary}
+          qualityReport={qualityReport}
         />
       </div>
     )
@@ -2124,6 +2182,7 @@ function ReviewFooter({
           inlineCommentCount={inlineCommentCount}
           orphanCommentCount={orphanCommentCount}
           summary={summary}
+          qualityReport={qualityReport}
         />
       </div>
     )
@@ -2142,6 +2201,7 @@ function SubmitSplitButton({
   inlineCommentCount,
   orphanCommentCount,
   summary,
+  qualityReport,
 }: {
   verdict: Verdict
   onSubmit: (v: Verdict, comment?: string) => void
@@ -2150,9 +2210,16 @@ function SubmitSplitButton({
   inlineCommentCount: number
   orphanCommentCount: number
   summary: string
+  qualityReport: ReviewQualityReport | null
 }) {
   const [confirming, setConfirming] = useState<Verdict | null>(null)
   const [comment, setComment] = useState('')
+  const [risksAcknowledged, setRisksAcknowledged] = useState(false)
+  const t = useI18n()
+  const riskCount = qualityReport?.issues.reduce((count, issue) => count + issue.count, 0) ?? 0
+  const riskKey = qualityReport?.issues.map((issue) => `${issue.id}:${issue.count}`).join('|') ?? ''
+
+  useEffect(() => setRisksAcknowledged(false), [riskKey, confirming])
   const ICON: Record<Verdict, React.ReactNode> = {
     APPROVE: <Check className="w-3.5 h-3.5" />,
     REQUEST_CHANGES: <XCircle className="w-3.5 h-3.5" />,
@@ -2232,7 +2299,23 @@ function SubmitSplitButton({
               {summary}
             </div>
           )}
+          {riskCount > 0 && (
+            <div className="rounded border border-status-issue/50 bg-status-issue/10 p-3 text-xs">
+              <p className="font-semibold">{riskCount} unresolved trust {riskCount === 1 ? 'risk' : 'risks'}</p>
+              <ul className="mt-2 list-disc space-y-1 pl-5">
+                {qualityReport?.issues.map((issue) => (
+                  <li key={issue.id}>{issue.title}: {issue.count}. {issue.description}</li>
+                ))}
+              </ul>
+              <label className="mt-3 flex items-start gap-2">
+                <input type="checkbox" checked={risksAcknowledged} onChange={(event) => setRisksAcknowledged(event.target.checked)} />
+                <span>{t('quality.acknowledge')}</span>
+              </label>
+            </div>
+          )}
+          <label htmlFor="final-review-body" className="text-sm font-medium">{t('review.finalBody')}</label>
           <textarea
+            id="final-review-body"
             className="min-h-[72px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring"
             placeholder="Optional final review body…"
             value={comment}
@@ -2241,6 +2324,7 @@ function SubmitSplitButton({
           <AlertDialogFooter>
             <AlertDialogCancel onClick={() => setComment('')}>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              disabled={riskCount > 0 && !risksAcknowledged}
               onClick={() => {
                 if (confirming) onSubmit(confirming, comment.trim())
                 setComment('')
@@ -2387,6 +2471,7 @@ function OrphanRow({
             className="diff-comment__textarea"
             value={draft}
             rows={2}
+            aria-label={`Edit unanchored comment on ${orphan.file}, line ${orphan.line}`}
             onChange={(e) => {
               setDraft(e.target.value)
               e.target.style.height = 'auto'

@@ -1,6 +1,7 @@
 package com.jinloes.prpilot.settings;
 
 import com.intellij.openapi.options.Configurable;
+import com.intellij.openapi.options.ConfigurationException;
 import com.jinloes.prpilot.services.PRNotificationService;
 import javax.swing.*;
 import org.jetbrains.annotations.Nls;
@@ -41,9 +42,13 @@ public class PluginSettingsConfigurable implements Configurable {
     }
 
     @Override
-    public void apply() {
+    public void apply() throws ConfigurationException {
         PluginSettings s = PluginSettings.getInstance();
-        s.setGithubBaseUrl(component.getGithubBaseUrl());
+        try {
+            s.setGithubBaseUrl(GithubBaseUrlValidator.normalize(component.getGithubBaseUrl()));
+        } catch (IllegalArgumentException e) {
+            throw new ConfigurationException(e.getMessage(), "Invalid GitHub base URL");
+        }
         s.setNotificationsEnabled(component.isNotificationsEnabled());
         s.setNotifyReviewRequested(component.isNotifyReviewRequested());
         s.setNotifyStarredRepos(component.isNotifyStarredRepos());

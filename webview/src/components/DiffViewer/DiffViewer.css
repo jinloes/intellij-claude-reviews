@@ -100,7 +100,7 @@
 
 .diff-hunk-label {
   padding: 3px 10px;
-  color: hsl(var(--muted-foreground) / 0.7);
+  color: hsl(var(--muted-foreground));
   font-size: 11px;
   white-space: pre;
 }
@@ -123,6 +123,23 @@
 .diff-gutter--clickable {
   cursor: pointer;
   position: relative;
+}
+
+.diff-gutter__button {
+  width: 100%;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0 0.35rem;
+  text-align: right;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.diff-gutter__button:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: -2px;
 }
 
 .diff-gutter--clickable::after {
@@ -173,7 +190,7 @@
 .diff-code__scroll {
   padding: 1px 10px 1px 4px;
   white-space: pre;
-  color: hsl(var(--foreground) / 0.85);
+  color: hsl(var(--foreground));
 }
 
 /* ── Line types ──────────────────────────────────────── */
@@ -262,7 +279,7 @@
 .diff-comment__body {
   margin: 0;
   font-size: 12px;
-  color: hsl(var(--foreground) / 0.85);
+  color: hsl(var(--foreground));
   line-height: 1.6;
   white-space: normal;
   overflow-wrap: break-word;
@@ -397,97 +414,37 @@
   outline-offset: -1px;
 }
 
-/* ── Light mode overrides ────────────────────────────── */
-
-@media (prefers-color-scheme: light) {
-  .diff-hunk-header {
-    background: hsl(210 40% 94%);
-  }
-
-  .diff-line--insert {
-    background: hsl(142 52% 48% / 0.12);
-  }
-
-  .diff-line--insert .diff-gutter {
-    background: hsl(142 52% 40% / 0.22);
-    color: hsl(142 50% 35%);
-  }
-
-  .diff-line--delete {
-    background: hsl(0 65% 50% / 0.10);
-  }
-
-  .diff-line--delete .diff-gutter {
-    background: hsl(0 65% 45% / 0.20);
-    color: hsl(0 55% 42%);
-  }
-
-  .diff-comment-row {
-    background: hsl(var(--card));
-  }
-}
-
 /* ── Syntax highlighting tokens (slate/sky dark theme) ───── */
 
 .hljs-keyword,
 .hljs-operator,
-.hljs-selector-tag       { color: #7dd3fc; }          /* sky-300 */
+.hljs-selector-tag       { color: hsl(var(--syntax-keyword)); }
 
 .hljs-string,
 .hljs-attr-value,
-.hljs-template-string    { color: #86efac; }           /* green-300 */
+.hljs-template-string    { color: hsl(var(--syntax-string)); }
 
 .hljs-comment,
-.hljs-quote              { color: #64748b; font-style: italic; } /* slate-500 */
+.hljs-quote              { color: hsl(var(--syntax-comment)); font-style: italic; }
 
 .hljs-number,
-.hljs-literal            { color: #fb923c; }           /* orange-400 */
+.hljs-literal            { color: hsl(var(--syntax-number)); }
 
 .hljs-title.function_,
-.hljs-function .hljs-title { color: #a5f3fc; }         /* cyan-200 */
+.hljs-function .hljs-title { color: hsl(var(--syntax-function)); }
 
 .hljs-type,
 .hljs-title.class_,
-.hljs-class .hljs-title  { color: #c4b5fd; }           /* violet-300 */
+.hljs-class .hljs-title  { color: hsl(var(--syntax-type)); }
 
-.hljs-built_in           { color: #f9a8d4; }           /* pink-300 */
+.hljs-built_in           { color: hsl(var(--syntax-builtin)); }
 
 .hljs-attr,
 .hljs-attribute,
-.hljs-property           { color: #fcd34d; }           /* amber-300 */
+.hljs-property           { color: hsl(var(--syntax-property)); }
 
-.hljs-tag                { color: #f87171; }           /* red-400 */
+.hljs-tag                { color: hsl(var(--syntax-tag)); }
 
-.hljs-meta               { color: #94a3b8; }           /* slate-400 */
+.hljs-meta               { color: hsl(var(--syntax-meta)); }
 
-.hljs-regexp             { color: #fb923c; }           /* orange-400 */
-
-/* Light mode overrides */
-@media (prefers-color-scheme: light) {
-  .hljs-keyword,
-  .hljs-operator,
-  .hljs-selector-tag   { color: #0369a1; }   /* sky-700 */
-
-  .hljs-string,
-  .hljs-attr-value     { color: #15803d; }   /* green-700 */
-
-  .hljs-comment        { color: #94a3b8; font-style: italic; }
-
-  .hljs-number,
-  .hljs-literal        { color: #c2410c; }   /* orange-700 */
-
-  .hljs-title.function_ { color: #0e7490; }  /* cyan-700 */
-
-  .hljs-type,
-  .hljs-title.class_   { color: #7c3aed; }   /* violet-600 */
-
-  .hljs-built_in       { color: #be185d; }   /* pink-700 */
-
-  .hljs-attr,
-  .hljs-attribute,
-  .hljs-property       { color: #b45309; }   /* amber-700 */
-
-  .hljs-tag            { color: #dc2626; }   /* red-600 */
-
-  .hljs-meta           { color: #64748b; }   /* slate-500 */
-}
+.hljs-regexp             { color: hsl(var(--syntax-number)); }

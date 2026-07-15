@@ -1,0 +1,20 @@
+export const englishMessages = {
+  'app.prList': 'Pull requests',
+  'app.review': 'Review',
+  'app.showPrList': 'Show pull requests',
+  'app.showReview': 'Show review',
+  'filter.scope': 'Pull request search scope',
+  'filter.repository': 'Repository filter',
+  'filter.state': 'Pull request state',
+  'review.focusAreas': 'Focus areas',
+  'review.customInstructions': 'Custom instructions for this review',
+  'review.advanced': 'Advanced review options',
+  'review.finalBody': 'Final review body (optional)',
+  'chat.input': 'Ask about this pull request',
+  'diff.search': 'Find in diff',
+  'diff.commentType': 'Comment type',
+  'diff.newComment': 'Comment text',
+  'quality.acknowledge': 'I reviewed these unresolved trust risks and still want to publish.',
+} as const
+
+export type MessageId = keyof typeof englishMessages

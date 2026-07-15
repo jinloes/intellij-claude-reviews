@@ -146,3 +146,8 @@ void test('rejects oversized message fields and comment collections', () => {
     chunk: 'x'.repeat(100_001),
   }), null)
 })
+
+void test('validates host theme messages', () => {
+  assert.equal(parseIncomingMessage({ ...version, type: 'themeChanged', theme: 'highContrastDark' })?.type, 'themeChanged')
+  assert.equal(parseIncomingMessage({ ...version, type: 'themeChanged', theme: 'sepia' }), null)
+})

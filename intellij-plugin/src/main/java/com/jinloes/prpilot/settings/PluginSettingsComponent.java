@@ -419,7 +419,14 @@ public class PluginSettingsComponent {
         checkButton.setEnabled(false);
         statusLabel.setText("Checking…");
 
-        String baseUrl = baseUrlField.getText().trim().replaceAll("/$", "");
+        String baseUrl;
+        try {
+            baseUrl = GithubBaseUrlValidator.normalize(baseUrlField.getText());
+        } catch (IllegalArgumentException e) {
+            statusLabel.setText("<html><font color='red'>" + e.getMessage() + "</font></html>");
+            checkButton.setEnabled(true);
+            return;
+        }
         String apiUrl =
                 baseUrl.equals("https://github.com")
                         ? "https://api.github.com"

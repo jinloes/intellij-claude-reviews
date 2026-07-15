@@ -12,9 +12,14 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "test": "npm run test:unit",
-    "test:unit": "tsx --test src/lib/*.test.ts src/bridge/*.test.ts",
+    "test:logic": "tsx --test src/lib/*.test.ts src/bridge/*.test.ts",
+    "test:component": "vitest run",
+    "test:unit": "npm run test:logic && npm run test:component",
+    "test:coverage": "vitest run --coverage",
     "a11y:install": "playwright install chromium",
-    "test:a11y": "playwright test -c playwright.a11y.config.ts"
+    "test:a11y": "playwright test -c playwright.a11y.config.ts",
+    "test:visual": "playwright test -c playwright.visual.config.ts",
+    "test:i18n": "vitest run src/i18n"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.1.15",
@@ -42,24 +47,32 @@
   "devDependencies": {
     "@axe-core/playwright": "^4.10.2",
     "@axe-core/react": "^4.10.2",
-    "@eslint/js": "^10.0.1",
+    "@eslint/js": "^9.39.5",
     "@playwright/test": "^1.55.0",
     "@tailwindcss/postcss": "^4.3.2",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
+    "@vitest/coverage-v8": "^4.1.10",
     "autoprefixer": "^10.5.0",
-    "eslint": "^10.4.0",
+    "eslint": "^9.39.5",
+    "eslint-plugin-jsx-a11y": "^6.10.2",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.6.0",
+    "jsdom": "^26.1.0",
     "postcss": "^8.5.14",
     "tailwindcss": "^4.3.2",
     "tsx": "^4.23.1",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.59.4",
-    "vite": "^8.1.4"
+    "vite": "^8.1.4",
+    "vitest": "^4.1.10"
   },
   "volta": {
     "node": "20.20.2"

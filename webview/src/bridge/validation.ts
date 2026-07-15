@@ -147,6 +147,9 @@ export function parseIncomingMessage(value: unknown): IncomingMessage | null {
       valid = ['gh_not_installed', 'gh_not_authenticated', 'load_failed'].includes(value.reason as string)
         && isString(value.detail)
       break
+    case 'themeChanged':
+      valid = ['light', 'dark', 'highContrastLight', 'highContrastDark'].includes(value.theme as string)
+      break
   }
   return valid ? value as unknown as IncomingMessage : null
 }

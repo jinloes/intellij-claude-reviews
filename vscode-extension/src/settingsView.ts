@@ -31,6 +31,8 @@ export const COPILOT_MODEL_SUGGESTIONS: string[] = [
 /** Reasoning-effort levels accepted by `copilot --reasoning-effort`. Mirrors COPILOT_EFFORTS. */
 export const COPILOT_EFFORTS: string[] = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
 
+export const GITHUB_BASE_URL_ERROR = 'GitHub base URL must be an HTTPS origin without credentials, a path, query, or fragment.';
+
 export interface SettingsState {
     provider: Provider;
     reviewModel: string;
@@ -41,10 +43,36 @@ export interface SettingsState {
     copilotConfigDir: string;
     reviewFocusAreas: string;
     reviewCustomInstructions: string;
+    notificationsEnabled: boolean;
+    notifyReviewRequested: boolean;
+    notifyStarredRepos: boolean;
+    notificationPollMinutes: number;
 }
 
 export function normalizeProvider(value: unknown): Provider {
     return value === 'copilot' ? 'copilot' : 'claude';
+}
+
+export function normalizeGithubBaseUrl(value: string): string {
+    const candidate = value.trim().replace(/\/+$/, '');
+    if (candidate === '') return 'https://github.com';
+    try {
+        if (candidate.endsWith(':')) throw new Error(GITHUB_BASE_URL_ERROR);
+        const url = new URL(candidate);
+        if (
+            url.protocol !== 'https:'
+            || url.username !== ''
+            || url.password !== ''
+            || url.pathname !== '/'
+            || url.search !== ''
+            || url.hash !== ''
+        ) {
+            throw new Error(GITHUB_BASE_URL_ERROR);
+        }
+        return url.origin;
+    } catch {
+        throw new Error(GITHUB_BASE_URL_ERROR);
+    }
 }
 
 /**
@@ -183,8 +211,9 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
       <div class="field" id="mcpField">
         <label><input type="checkbox" id="inheritMcp" style="width:auto;margin-right:6px;">Allow MCP tools for untrusted PR content (advanced)</label>
         <div class="hint">Capability elevation: MCP tools discovered from user and repository configuration may access external systems while Copilot processes pull-request content. Disabled by default.</div>
-        <input type="text" id="copilotConfigDir" placeholder="Config dir override (empty = ~/.copilot)" style="margin-top:8px;">
-        <div class="hint">Optional override of the Copilot config directory used to discover MCP servers.</div>
+        <label for="copilotConfigDir" style="margin-top:8px;">Copilot config directory override</label>
+        <input type="text" id="copilotConfigDir" aria-describedby="copilotConfigDirHint" placeholder="Empty uses ~/.copilot">
+        <div class="hint" id="copilotConfigDirHint">Optional override of the Copilot config directory used to discover MCP servers.</div>
       </div>
     </div>
   </details>
@@ -196,6 +225,15 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
       <button id="testConnection" class="secondary" title="Verify gh authentication for this host">Test</button>
     </div>
     <div class="hint">Change for GitHub Enterprise (e.g. https://github.mycompany.com).</div>
+  </div>
+
+  <div class="field">
+    <label><input type="checkbox" id="notificationsEnabled" style="width:auto;margin-right:6px;">Enable background PR notifications</label>
+    <label><input type="checkbox" id="notifyReviewRequested" style="width:auto;margin-right:6px;">Notify when a review is requested from me</label>
+    <label><input type="checkbox" id="notifyStarredRepos" style="width:auto;margin-right:6px;">Notify for new PRs in starred repositories</label>
+    <label for="notificationPollMinutes">Notification polling interval (minutes)</label>
+    <input type="number" id="notificationPollMinutes" min="1" max="60" step="1">
+    <div class="hint">Notification changes apply to the next polling cycle.</div>
   </div>
 
   <div class="field">
@@ -252,9 +290,18 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
   }
 
   function save(key, value) {
-    if (key === 'githubBaseUrl' && value && !value.startsWith('https://')) {
-      setStatus('GitHub base URL must start with https://', 'error');
-      return;
+    if (key === 'githubBaseUrl') {
+      try {
+        let candidate = String(value || '').trim();
+        while (candidate.endsWith('/')) candidate = candidate.slice(0, -1);
+        if (candidate.endsWith(':')) throw new Error();
+        const url = candidate ? new URL(candidate) : new URL('https://github.com');
+        if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error();
+        value = url.origin;
+      } catch {
+        setStatus('${GITHUB_BASE_URL_ERROR}', 'error');
+        return;
+      }
     }
     setStatus('Saving…');
     vscode.postMessage({ type: 'update', key, value });
@@ -273,6 +320,10 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
   $('baseUrl').addEventListener('change', () => save('githubBaseUrl', $('baseUrl').value.trim()));
   $('focusAreas').addEventListener('change', () => save('reviewFocusAreas', $('focusAreas').value.trim()));
   $('customInstructions').addEventListener('change', () => save('reviewCustomInstructions', $('customInstructions').value.trim()));
+  $('notificationsEnabled').addEventListener('change', () => save('notificationsEnabled', $('notificationsEnabled').checked));
+  $('notifyReviewRequested').addEventListener('change', () => save('notifyReviewRequested', $('notifyReviewRequested').checked));
+  $('notifyStarredRepos').addEventListener('change', () => save('notifyStarredRepos', $('notifyStarredRepos').checked));
+  $('notificationPollMinutes').addEventListener('change', () => save('notificationPollMinutes', Number($('notificationPollMinutes').value)));
   $('refreshModels').addEventListener('click', () => {
     $('refreshModels').textContent = 'Refreshing…';
     setStatus('Refreshing model list…');
@@ -280,13 +331,21 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
   });
   $('testConnection').addEventListener('click', () => {
     const value = $('baseUrl').value.trim();
-    if (value && !value.startsWith('https://')) {
-      setStatus('GitHub base URL must start with https://', 'error');
+    let normalized;
+    try {
+      let candidate = value;
+      while (candidate.endsWith('/')) candidate = candidate.slice(0, -1);
+      if (candidate.endsWith(':')) throw new Error();
+      const url = candidate ? new URL(candidate) : new URL('https://github.com');
+      if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error();
+      normalized = url.origin;
+    } catch {
+      setStatus('${GITHUB_BASE_URL_ERROR}', 'error');
       return;
     }
     $('testConnection').textContent = 'Testing…';
     setStatus('Checking gh authentication…');
-    vscode.postMessage({ type: 'testConnection', githubBaseUrl: value });
+    vscode.postMessage({ type: 'testConnection', githubBaseUrl: normalized });
   });
 
   window.addEventListener('message', (event) => {
@@ -301,6 +360,10 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
       $('copilotConfigDir').value = state.copilotConfigDir || '';
       $('focusAreas').value = state.reviewFocusAreas || '';
       $('customInstructions').value = state.reviewCustomInstructions || '';
+      $('notificationsEnabled').checked = state.notificationsEnabled === true;
+      $('notifyReviewRequested').checked = state.notifyReviewRequested === true;
+      $('notifyStarredRepos').checked = state.notifyStarredRepos === true;
+      $('notificationPollMinutes').value = String(state.notificationPollMinutes || 5);
       renderCopilotModels(msg.copilotModels || [], state.reviewModelCopilot);
       applyProviderVisibility(state.provider);
     } else if (msg.type === 'models') {

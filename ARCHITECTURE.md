@@ -62,6 +62,7 @@ intellij-plugin/                       – IntelliJ plugin host; depends on :cor
       PluginSettings.java
       PluginSettingsComponent.java
       PluginSettingsConfigurable.java
+      GithubBaseUrlValidator.java      – Normalizes settings input to an HTTPS GitHub origin
     ui/
       PRToolWindowFactory.java
       PRPilotFileEditorProvider.java      – Registers PR Pilot as a center editor-tab file editor
@@ -69,16 +70,28 @@ intellij-plugin/                       – IntelliJ plugin host; depends on :cor
       PRPilotEditorOpener.java            – Opens/reveals singleton editor-tab virtual file per project
       PRPilotVirtualFile.java             – Marker LightVirtualFile for PR Pilot editor tab
       WebviewPanel.java
+      HostThemeClassifier.java       – Pure light/dark/high-contrast theme classification
       ReviewMapper.java              – MapStruct mapper (core model -> webview DTOs)
       WebviewDtos.java               – package-private DTO records serialized to webview bridge
       RepoDetector.java
 
 webview/                               – Vite + React + TypeScript webview
   a11y/
-    app.a11y.spec.ts                 – Playwright + axe smoke check for serious/critical accessibility violations
+    app.a11y.spec.ts                 – Full-page Playwright + axe checks for setup, discovery, review, and submit states
+    hostFixture.ts                   – Deterministic host bridge fixture shared by browser-level tests
+  visual/
+    app.visual.spec.ts               – Deterministic visual scenarios, including narrow pseudo-localized layout
   playwright.a11y.config.ts          – Dedicated Playwright config for webview accessibility gate
+  playwright.visual.config.ts        – Dedicated Chromium visual-regression configuration
   src/
     bridge/types.ts
+    components/a11y/LiveStatus.tsx   – Reusable screen-reader status announcements
+    components/layout/AccessibleResizer.tsx – Pointer and keyboard-accessible pane separator
+    i18n/                            – Typed English catalog plus test-only pseudo-localization
+    theme/hostTheme.ts               – Applies host light/dark/high-contrast state to the document
+    lib/keyboard.ts                  – Editable-safe global keyboard shortcut helpers
+    lib/layout.ts                    – Responsive pane-size bounds
+    lib/motion.ts                    – Reduced-motion-aware scrolling behavior
     lib/validateComments.ts
     lib/reviewQuality.ts            – Review Quality Check heuristics, repair helpers, and diff chunk planning
     lib/autosave.ts                 – Pure draft-autosave decisions (dirty check, snapshot, debounce delay)
@@ -96,6 +109,7 @@ vscode-extension/                      – VS Code extension host
     worktree.ts                        – Creates/removes temporary git worktrees for PR branch reviews (mirrors GitWorktreeService.kt)
     settings.ts                        – Settings webview controller (panel lifecycle + config read/write); mirrors PluginSettingsConfigurable
     settingsView.ts                    – Pure settings-webview view logic (HTML, model-merge, escaping); no vscode import, unit-tested
+    hostTheme.ts                       – Pure light/dark/high-contrast theme classification
     notifications.ts                   – Pure background-notification helpers (source labeling, dedupe/merge with review-requested precedence); no vscode import, unit-tested
     userFacingError.ts                 – Maps host/provider errors to user-actionable copy
     workspace.ts                       – Resolves the VS Code workspace dir, including dev-host target repo override
@@ -113,12 +127,14 @@ vscode-extension/                      – VS Code extension host
 Only decisions that encode active constraints future code must respect and are not obvious from source.
 
 ### Webview styling
-All webview UI uses shadcn/ui + Tailwind CSS v3. Avoid ad-hoc CSS modules/inline layout styles. `DiffViewer.css` is the only hand-crafted CSS exception for diff-table specifics. Use semantic status tokens (`text-status-*`, `bg-status-*/10`, `border-status-*/50`) rather than hardcoded palette classes.
+All webview UI uses shadcn/ui + Tailwind CSS. Avoid ad-hoc CSS modules/inline layout styles. `DiffViewer.css` is the only hand-crafted CSS exception for diff-table specifics. Use semantic status tokens (`text-status-*`, `bg-status-*/10`, `border-status-*/50`) rather than hardcoded palette classes. Theme colors are semantic CSS variables selected by host-provided `light`, `dark`, `highContrastLight`, or `highContrastDark` bridge state; do not infer the IDE theme from browser media queries alone.
+
+The shared webview switches from split panes to explicit list/review navigation below 640px. Pane separators must remain operable by pointer and keyboard, keep ARIA values within viewport-derived bounds, and honor reduced-motion preferences.
 
 ### Webview accessibility tooling
-Webview development runs dev-only runtime accessibility scans via `@axe-core/react` in `main.tsx` so missing labels/roles and semantic issues surface early in local runs.
+Webview development runs dev-only runtime accessibility scans via `@axe-core/react` in `main.tsx` so missing labels/roles and semantic issues surface early in local runs. ESLint also applies `eslint-plugin-jsx-a11y` rules.
 
-As a temporary CI gate until `eslint-plugin-jsx-a11y` supports ESLint 10, the webview also runs a Playwright + axe smoke test (`npm run test:a11y`) using `playwright.a11y.config.ts`. The gate currently audits the review-pane shell (`data-testid="review-pane-shell"`) and fails on serious/critical axe violations.
+CI runs full-page Playwright + axe scenarios (`npm run test:a11y`) using `playwright.a11y.config.ts` and fails on any reported violation. Deterministic screenshot scenarios use `playwright.visual.config.ts`; pseudo-localization is test-only and enabled with `?locale=pseudo` to expose narrow-layout overflow. Visual snapshots are platform-sensitive and remain a manual verification suite unless CI and canonical baselines are updated together.
 
 ### Module boundaries
 `core` is KMP and has zero IntelliJ dependencies. `intellij-plugin` depends on JVM variant of `core`. Keep Java sources in `core/src/main/java` and `core/src/test/java` (do not move to `src/jvmMain/java`).
@@ -236,14 +252,14 @@ Client-side validation partitions comments: keep in-hunk, snap within +-3 lines,
 Repo detection walks upward to `.git/config` and reads the `[remote "origin"]` URL specifically (not the first `url=` in the file) so multi-remote/fork setups resolve to origin consistently across hosts, handling SCP and `ssh://` remotes correctly. Webview assets are served via loopback `HttpServer` for proper same-origin module loading; path normalization blocks traversal.
 
 ### VS Code webview surfaces
-The VS Code host exposes PR Pilot as an editor-tab `WebviewPanel` opened by `pr-pilot.open`. The Activity Bar webview view (`pr-pilot.main`) is a thin launcher: on resolve it auto-opens/reveals the editor tab and renders only a single "Open PR Pilot" button (no intermediate panel), so it reads as a launch button rather than a competing surface. The full PR loading, review generation, chat, and worktree lifecycle run only in the editor-tab panel.
+The VS Code host exposes PR Pilot as an editor-tab `WebviewPanel` opened by `pr-pilot.open`. The Activity Bar webview view (`pr-pilot.main`) is a thin launcher that renders only a single "Open PR Pilot" button. Resolving the launcher does not open the editor automatically; an explicit button click opens or reveals the editor and closes the sidebar so the two surfaces do not compete for workspace width. The full PR loading, review generation, chat, and worktree lifecycle run only in the editor-tab panel.
 
 For development, the extension loads UI assets from the sibling `webview/dist` folder. For packaged `.vsix` builds, the release/package flow stages that same output into `vscode-extension/webview-dist`, and the extension resolves the bundled copy first so installed releases do not depend on the source repo layout.
 
 All VS Code webview surfaces use restrictive Content Security Policy headers. The main Vite document rewrites only packaged local asset URIs and nonces scripts; the launcher and fallback error page nonce inline resources, and dynamic error text is HTML-escaped.
 
 ### IntelliJ webview surfaces
-The IntelliJ host mirrors VS Code's split: the `PR Pilot` tool window is a thin launcher whose content is a single centered "Open PR Pilot" button (no explanatory panel), and `createToolWindowContent` opens the center editor tab automatically — so the tool window is "effectively a button" rather than a second surface. The full interactive UI runs in a center editor tab backed by a singleton `PRPilotVirtualFile` per project. PR loading/review/chat behavior remains in `WebviewPanel`; `PRToolWindowFactory` and `PRPilotFileEditorProvider` both wire the same load pipeline so both surfaces behave consistently.
+The IntelliJ `PR Pilot` tool window is the sole primary interactive surface. It owns one full `WebviewPanel` directly, so selecting the tool-window stripe always shows the real review UI without an editor-tab handoff, launcher, or duplicate webview lifecycle. Hiding the tool window preserves the session; removing its content or closing the project disposes the panel and its JCEF/loopback/worktree resources. This intentionally differs from VS Code's editor-panel container because IntelliJ tool windows can directly and reliably host the persistent JCEF Swing component; it is a container difference, not a feature difference.
 
 ### VS Code extension development target repo
 The `.vscode/launch.json` config `Run PR Pilot Extension Against Target Repo` prompts for an absolute repository path and passes it as `PR_PILOT_TARGET_REPO` to the Extension Development Host. Use it when the PR Pilot source repo is open in the main VS Code window but PR Pilot should inspect PRs for a different local checkout; `workspace.ts` makes repo detection, worktree creation, and CLI working directories resolve against the target repo instead of whichever folder VS Code opened in the dev host.

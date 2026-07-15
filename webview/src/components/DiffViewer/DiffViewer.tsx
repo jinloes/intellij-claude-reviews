@@ -19,6 +19,8 @@ import hljsSql from 'highlight.js/lib/languages/sql'
 import hljsTs from 'highlight.js/lib/languages/typescript'
 import hljsXml from 'highlight.js/lib/languages/xml'
 import hljsYaml from 'highlight.js/lib/languages/yaml'
+import { scrollBehavior } from '@/lib/motion'
+import { useI18n } from '@/i18n/I18nProvider'
 
 hljs.registerLanguage('bash', hljsBash)
 hljs.registerLanguage('css', hljsCss)
@@ -154,6 +156,7 @@ export function DiffViewer({
   onAddComment,
   onVerifyComment,
 }: Props) {
+  const t = useI18n()
   const [pendingNew, setPendingNew] = useState<PendingNew | null>(null)
   const [showAll, setShowAll] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -202,7 +205,7 @@ export function DiffViewer({
     )
     const idx = Math.min(searchCursor, matches.length - 1)
     matches.forEach((el, i) => el.classList.toggle('diff-line--search-match--current', i === idx))
-    matches[idx]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    matches[idx]?.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest' })
   }, [searchCursor, searchQuery, matchCount])
 
   const files = useMemo<FileData[]>(() => {
@@ -250,7 +253,7 @@ export function DiffViewer({
       startTransition(() => setShowAll(true))
       return
     }
-    target?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    target?.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest' })
   }, [focusedCommentIdx, truncating])
 
   if (files.length === 0) return null
@@ -258,6 +261,13 @@ export function DiffViewer({
   return (
     <TooltipProvider delayDuration={400}>
       <div ref={containerRef} className="diff-viewer" tabIndex={-1}>
+        {!searchOpen && (
+          <div className="flex justify-end border-b border-border p-1">
+            <Button variant="ghost" size="sm" onClick={openSearch} aria-label="Find in diff" className="gap-1.5">
+              <Search className="h-3.5 w-3.5" /> Find
+            </Button>
+          </div>
+        )}
         {searchOpen && (
           <div className="diff-search-bar">
             <Search className="w-3 h-3 text-muted-foreground shrink-0" />
@@ -266,6 +276,7 @@ export function DiffViewer({
               type="text"
               className="diff-search-input"
               placeholder="Find in diff…"
+              aria-label={t('diff.search')}
               value={searchQuery}
               onChange={(e) => {
                 setSearchQuery(e.target.value)
@@ -282,9 +293,9 @@ export function DiffViewer({
             <span className="diff-search-count">
               {searchQuery ? (matchCount === 0 ? 'No results' : `${Math.min(searchCursor + 1, matchCount)} / ${matchCount}`) : ''}
             </span>
-            <Button variant="ghost" size="sm" className="h-5 w-5 p-0 text-muted-foreground" onClick={() => matchCount > 0 && setSearchCursor((c) => (c - 1 + matchCount) % matchCount)} disabled={matchCount === 0} aria-label="Previous match"><ChevronUp className="w-3 h-3" /></Button>
-            <Button variant="ghost" size="sm" className="h-5 w-5 p-0 text-muted-foreground" onClick={() => matchCount > 0 && setSearchCursor((c) => (c + 1) % matchCount)} disabled={matchCount === 0} aria-label="Next match"><ChevronDown className="w-3 h-3" /></Button>
-            <Button variant="ghost" size="sm" className="h-5 w-5 p-0 text-muted-foreground" onClick={closeSearch} aria-label="Close search"><X className="w-3 h-3" /></Button>
+            <Button variant="ghost" size="sm" className="h-6 w-6 p-0 text-muted-foreground" onClick={() => matchCount > 0 && setSearchCursor((c) => (c - 1 + matchCount) % matchCount)} disabled={matchCount === 0} aria-label="Previous match"><ChevronUp className="w-3 h-3" /></Button>
+            <Button variant="ghost" size="sm" className="h-6 w-6 p-0 text-muted-foreground" onClick={() => matchCount > 0 && setSearchCursor((c) => (c + 1) % matchCount)} disabled={matchCount === 0} aria-label="Next match"><ChevronDown className="w-3 h-3" /></Button>
+            <Button variant="ghost" size="sm" className="h-6 w-6 p-0 text-muted-foreground" onClick={closeSearch} aria-label="Close search"><X className="w-3 h-3" /></Button>
           </div>
         )}
         {visibleFiles.map((file) => {
@@ -360,14 +371,16 @@ function FileView({
   onVerifyComment,
 }: FileViewProps) {
   return (
-    <div className="diff-file">
+    <section className="diff-file" aria-labelledby={`diff-file-${CSS.escape(displayPath)}`}>
       <div className="diff-file__header">
-        <span className="diff-file__path">{displayPath}</span>
+        <h3 id={`diff-file-${CSS.escape(displayPath)}`} className="diff-file__path">{displayPath}</h3>
         {file.type !== 'modify' && (
           <span className={`diff-file__badge diff-file__badge--${file.type}`}>{file.type}</span>
         )}
       </div>
       <table className="diff-table">
+        <caption className="sr-only">Changes in {displayPath}</caption>
+        <thead className="sr-only"><tr><th scope="col">Old line</th><th scope="col">New line</th><th scope="col">Code</th></tr></thead>
         <tbody>
           {file.hunks.map((hunk) => (
             <HunkRows
@@ -388,7 +401,7 @@ function FileView({
           ))}
         </tbody>
       </table>
-    </div>
+    </section>
   )
 }
 
@@ -445,35 +458,26 @@ function HunkRows({
         const handleAddComment = () => {
           if (onLineClick && clickableLine !== undefined) onLineClick({ line: clickableLine, rowId })
         }
-        const handleAddCommentKeyDown = (e: React.KeyboardEvent<HTMLTableCellElement>) => {
-          if (e.key !== 'Enter' && e.key !== ' ') return
-          e.preventDefault()
-          handleAddComment()
-        }
         return (
           <Fragment key={i}>
             <tr className={cn(`diff-line diff-line--${change.type}`, searchQuery && change.content.toLowerCase().includes(searchQuery.toLowerCase()) && 'diff-line--search-match')}>
               <td
                 className={cn('diff-gutter', canAddOldLineComment && 'diff-gutter--clickable')}
-                onClick={canAddOldLineComment ? handleAddComment : undefined}
-                onKeyDown={canAddOldLineComment ? handleAddCommentKeyDown : undefined}
-                title={onLineClick && clickableLine ? `Add comment at line ${clickableLine}` : undefined}
-                role={canAddOldLineComment ? 'button' : undefined}
-                tabIndex={canAddOldLineComment ? 0 : undefined}
-                aria-label={canAddOldLineComment ? `Add comment at line ${oldLine}` : undefined}
               >
-                {oldLineOf(change) ?? ''}
+                {canAddOldLineComment ? (
+                  <button type="button" className="diff-gutter__button" onClick={handleAddComment} aria-label={`Add comment on ${filePath}, old line ${oldLine}`}>
+                    {oldLine}
+                  </button>
+                ) : (oldLine ?? '')}
               </td>
               <td
                 className={cn('diff-gutter', canAddNewLineComment && 'diff-gutter--clickable')}
-                onClick={canAddNewLineComment ? handleAddComment : undefined}
-                onKeyDown={canAddNewLineComment ? handleAddCommentKeyDown : undefined}
-                title={onLineClick && clickableLine ? `Add comment at line ${clickableLine}` : undefined}
-                role={canAddNewLineComment ? 'button' : undefined}
-                tabIndex={canAddNewLineComment ? 0 : undefined}
-                aria-label={canAddNewLineComment ? `Add comment at line ${newLine}` : undefined}
               >
-                {newLine ?? ''}
+                {canAddNewLineComment ? (
+                  <button type="button" className="diff-gutter__button" onClick={handleAddComment} aria-label={`Add comment on ${filePath}, new line ${newLine}`}>
+                    {newLine}
+                  </button>
+                ) : (newLine ?? '')}
               </td>
               <td className="diff-code">
                 <div className="diff-code__scroll">
@@ -498,7 +502,7 @@ function HunkRows({
             ))}
 
             {pendingNew?.rowId === rowId && (
-              <NewCommentRow onSave={onPendingSave} onCancel={onPendingCancel} />
+              <NewCommentRow file={filePath} line={pendingNew.line} onSave={onPendingSave} onCancel={onPendingCancel} />
             )}
           </Fragment>
         )
@@ -684,6 +688,7 @@ function InlineCommentRow({ comment, globalIdx, focused, onEdit, onDelete, onVer
                 className="diff-comment__textarea"
                 value={draft}
                 rows={2}
+                aria-label={`Edit comment on ${comment.file}, line ${comment.line}`}
                 onChange={(e) => {
                   setDraft(e.target.value)
                   e.target.style.height = 'auto'
@@ -713,9 +718,13 @@ function InlineCommentRow({ comment, globalIdx, focused, onEdit, onDelete, onVer
 // ── New comment form ──────────────────────────────────────────────────────────
 
 function NewCommentRow({
+  file,
+  line,
   onSave,
   onCancel,
 }: {
+  file: string
+  line: number
   onSave: (type: LineComment['type'], body: string) => void
   onCancel: () => void
 }) {
@@ -736,7 +745,7 @@ function NewCommentRow({
         <div className="diff-comment">
           <div className="flex items-center gap-2 mb-1.5">
             <Select value={type} onValueChange={(v) => setType(v as LineComment['type'])}>
-              <SelectTrigger className="h-6 w-28 text-xs border-border bg-background">
+              <SelectTrigger className="h-7 w-28 text-xs border-border bg-background" aria-label={`Comment type for ${file}, line ${line}`}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -752,6 +761,7 @@ function NewCommentRow({
             placeholder="Leave a comment…"
             value={body}
             rows={2}
+            aria-label={`Comment on ${file}, line ${line}`}
             onChange={(e) => {
               setBody(e.target.value)
               e.target.style.height = 'auto'

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Loader2, Send, X } from 'lucide-react'
@@ -6,6 +6,9 @@ import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
 import { onHostMessage, sendToHost, type PR } from '../../bridge/types'
+import { LiveStatus } from '../a11y/LiveStatus'
+import { scrollBehavior } from '@/lib/motion'
+import { useI18n } from '@/i18n/I18nProvider'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -19,7 +22,6 @@ interface Props {
   onContextUsed?: () => void
   pendingMessage?: { q: string; ctx: string; id: number }
   onPendingMessageSent?: () => void
-  onResizeStart?: (e: React.MouseEvent) => void
   contextSummary?: string[]
 }
 
@@ -33,9 +35,9 @@ export function ChatPane({
   onContextUsed,
   pendingMessage,
   onPendingMessageSent,
-  onResizeStart,
   contextSummary = [],
 }: Props) {
+  const t = useI18n()
   const [messages, setMessages] = useState<Message[]>([])
   const [streaming, setStreaming] = useState('')
   const [input, setInput] = useState('')
@@ -86,7 +88,7 @@ export function ChatPane({
   }, [pendingMessage?.id, busy]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    messagesEndRef.current?.scrollIntoView({ behavior: scrollBehavior() })
   }, [messages.length, busy])
 
   function handleClear() {
@@ -117,19 +119,12 @@ export function ChatPane({
   const hasContent = messages.length > 0 || !!streaming || busy
 
   return (
-    <div className="flex flex-col h-full border-t border-border bg-card">
-      {/* Resize handle + header */}
-      <div
-        className={cn(
-          'flex items-center justify-between px-3 py-1.5 border-b border-border shrink-0',
-          onResizeStart && 'cursor-ns-resize select-none',
-        )}
-        onMouseDown={onResizeStart}
-        title={onResizeStart ? 'Drag to resize' : undefined}
-      >
-        <span className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+    <section className="flex flex-col h-full border-t border-border bg-card" aria-labelledby="chat-heading">
+      <LiveStatus message={busy ? 'AI response in progress' : streaming ? 'AI response started' : ''} />
+      <div className="flex items-center justify-between px-3 py-1.5 border-b border-border shrink-0">
+        <h2 id="chat-heading" className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
           Chat
-        </span>
+        </h2>
         {contextSummary.length > 0 && (
           <span className="min-w-0 flex-1 truncate px-2 text-[11px] text-muted-foreground">
             Context: {contextSummary.join(', ')}
@@ -214,7 +209,7 @@ export function ChatPane({
             variant="ghost"
             size="sm"
             onClick={onContextUsed}
-            className="h-5 w-5 p-0 shrink-0"
+            className="h-6 w-6 p-0 shrink-0"
             aria-label="Clear selected context"
           >
             <X className="w-3 h-3" />
@@ -224,7 +219,9 @@ export function ChatPane({
 
       {/* Input */}
       <div className="flex gap-2 p-3 pt-2 shrink-0">
+        <label htmlFor="pr-chat-input" className="sr-only">{t('chat.input')}</label>
         <Textarea
+          id="pr-chat-input"
           className="min-h-[60px] resize-none text-sm bg-background border-input focus-visible:ring-ring"
           placeholder="Ask about this PR…"
           title="Enter to send · Shift+Enter for newline"
@@ -245,9 +242,9 @@ export function ChatPane({
           {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
         </Button>
       </div>
-      <p className="px-3 pb-2 text-[11px] text-muted-foreground/60">
+      <p className="px-3 pb-2 text-[11px] text-muted-foreground">
         Uses the active PR context shown above · right-click selected text to ask about it
       </p>
-    </div>
+    </section>
   )
 }

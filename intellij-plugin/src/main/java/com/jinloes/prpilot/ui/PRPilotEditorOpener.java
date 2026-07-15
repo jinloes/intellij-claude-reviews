@@ -22,14 +22,22 @@ public final class PRPilotEditorOpener {
     private PRPilotEditorOpener() {}
 
     public static void openInEditor(Project project) {
+        openInEditor(project, () -> {});
+    }
+
+    static void openInEditor(Project project, Runnable onOpened) {
         ApplicationManager.getApplication()
                 .invokeLater(
                         () -> {
                             if (project.isDisposed()) {
                                 return;
                             }
-                            FileEditorManager.getInstance(project)
-                                    .openFile(getOrCreateVirtualFile(project), true, true);
+                            if (FileEditorManager.getInstance(project)
+                                            .openFile(getOrCreateVirtualFile(project), true, true)
+                                            .length
+                                    > 0) {
+                                onOpened.run();
+                            }
                         });
     }
 

@@ -15,13 +15,11 @@ import com.jinloes.prpilot.model.PullRequest;
 import com.jinloes.prpilot.services.IntellijGitHubService;
 import com.jinloes.prpilot.services.UserFacingErrors;
 import com.jinloes.prpilot.settings.PluginSettings;
-import java.awt.GridBagLayout;
+import com.jinloes.prpilot.settings.PluginSettingsConfigurable;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import javax.swing.JButton;
 import javax.swing.JLabel;
-import javax.swing.JPanel;
 import javax.swing.SwingConstants;
 import org.apache.commons.lang3.StringUtils;
 import org.jetbrains.annotations.NotNull;
@@ -41,49 +39,39 @@ public class PRToolWindowFactory implements ToolWindowFactory {
         if (!JBCefApp.isSupported()) {
             JLabel label =
                     new JLabel(
-                            "<html><center>Claude PR Reviews requires JCEF.<br>"
+                            "<html><center>PR Pilot requires JCEF.<br>"
                                     + "This IDE variant does not support embedded browsers.</center></html>",
                             SwingConstants.CENTER);
             toolWindow
                     .getContentManager()
-                    .addContent(factory.createContent(label, "Claude PR Reviews", false));
+                    .addContent(factory.createContent(label, "PR Pilot", false));
             return;
         }
 
-        Content launcherContent =
-                factory.createContent(createLauncherPanel(project), "Launcher", false);
-        toolWindow.getContentManager().addContent(launcherContent);
-        PRPilotEditorOpener.openInEditor(project);
+        WebviewPanel webviewPanel = new WebviewPanel(project);
+        wireWebviewLoading(project, webviewPanel);
+        Content content = factory.createContent(webviewPanel.getComponent(), "PR Pilot", false);
+        content.setDisposer(webviewPanel);
+        toolWindow.getContentManager().addContent(content);
 
         List<AnAction> titleActions = new ArrayList<>();
-        titleActions.add(new OpenInEditorAction(project));
+        titleActions.add(new ReloadAction(webviewPanel));
         titleActions.add(new PopOutAction(toolWindow));
         titleActions.add(new SettingsAction(project));
         toolWindow.setTitleActions(titleActions);
     }
 
-    // The tool window is a thin launcher: the full PR Pilot UI lives in a center editor tab, which
-    // is opened automatically in createToolWindowContent. This keeps the tool window "effectively a
-    // button" rather than a second, competing surface.
-    private JPanel createLauncherPanel(Project project) {
-        JPanel panel = new JPanel(new GridBagLayout());
-        JButton openButton = new JButton("Open PR Pilot");
-        openButton.addActionListener(event -> PRPilotEditorOpener.openInEditor(project));
-        panel.add(openButton);
-        return panel;
-    }
+    private static final class ReloadAction extends AnAction {
+        private final WebviewPanel webviewPanel;
 
-    private static final class OpenInEditorAction extends AnAction {
-        private final Project project;
-
-        OpenInEditorAction(Project project) {
-            super("Back to Editor", "Focus the PR Pilot editor tab", AllIcons.Actions.Back);
-            this.project = project;
+        ReloadAction(WebviewPanel webviewPanel) {
+            super("Reload", "Reload PR Pilot", AllIcons.Actions.Refresh);
+            this.webviewPanel = webviewPanel;
         }
 
         @Override
         public void actionPerformed(@NotNull AnActionEvent e) {
-            PRPilotEditorOpener.openInEditor(project);
+            webviewPanel.reload();
         }
     }
 
@@ -115,14 +103,14 @@ public class PRToolWindowFactory implements ToolWindowFactory {
         private final Project project;
 
         SettingsAction(Project project) {
-            super("Settings", "Open Claude PR Reviews settings", AllIcons.General.Settings);
+            super("Settings", "Open PR Pilot settings", AllIcons.General.Settings);
             this.project = project;
         }
 
         @Override
         public void actionPerformed(@NotNull AnActionEvent e) {
             com.intellij.openapi.options.ShowSettingsUtil.getInstance()
-                    .showSettingsDialog(project, "Claude PR Reviews");
+                    .showSettingsDialog(project, PluginSettingsConfigurable.class);
         }
     }
 

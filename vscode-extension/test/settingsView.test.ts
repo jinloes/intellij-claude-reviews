@@ -6,6 +6,7 @@ import {
     buildSettingsHtml,
     escapeHtml,
     mergeCopilotModelOptions,
+    normalizeGithubBaseUrl,
     normalizeProvider,
 } from '../src/settingsView';
 
@@ -17,6 +18,27 @@ test('normalizeProvider returns copilot only for the exact value', () => {
     assert.equal(normalizeProvider('anything-else'), 'claude');
     assert.equal(normalizeProvider(undefined), 'claude');
     assert.equal(normalizeProvider(42), 'claude');
+});
+
+test('normalizeGithubBaseUrl defaults blanks and canonicalizes HTTPS origins', () => {
+    assert.equal(normalizeGithubBaseUrl(' '), 'https://github.com');
+    assert.equal(normalizeGithubBaseUrl(' https://GITHUB.EXAMPLE.COM/// '), 'https://github.example.com');
+    assert.equal(normalizeGithubBaseUrl('https://github.example.com:8443'), 'https://github.example.com:8443');
+});
+
+test('normalizeGithubBaseUrl rejects non-origin and unsafe values', () => {
+    for (const value of [
+        'http://github.example.com',
+        'https://user@github.example.com',
+        'https://github.example.com/path',
+        'https://github.example.com?query=1',
+        'https://github.example.com#fragment',
+        'https://github.example.com:',
+        'https://github.example.com:65536',
+        'not a url',
+    ]) {
+        assert.throws(() => normalizeGithubBaseUrl(value), /must be an HTTPS origin/);
+    }
 });
 
 // ── mergeCopilotModelOptions ──────────────────────────────────────────────────
@@ -95,6 +117,6 @@ test('buildSettingsHtml lists the Claude model presets and effort levels', () =>
 
 test('buildSettingsHtml validates GitHub base URLs before posting updates', () => {
     const html = buildSettingsHtml('csp', 'n');
-    assert.match(html, /GitHub base URL must start with https:\/\//);
+    assert.match(html, /GitHub base URL must be an HTTPS origin/);
     assert.match(html, /type: 'testConnection'/);
 });

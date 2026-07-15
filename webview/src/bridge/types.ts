@@ -141,6 +141,13 @@ export interface SetupRequiredMessage {
   detail: string
 }
 
+export type HostTheme = 'light' | 'dark' | 'highContrastLight' | 'highContrastDark'
+
+export interface ThemeChangedMessage {
+  type: 'themeChanged'
+  theme: HostTheme
+}
+
 export type IncomingMessage = { readonly protocolVersion: typeof BRIDGE_PROTOCOL_VERSION } & (
   | PRListLoadedMessage
   | PRLoadingMessage
@@ -161,7 +168,8 @@ export type IncomingMessage = { readonly protocolVersion: typeof BRIDGE_PROTOCOL
   | ChatChunkMessage
   | ChatResponseMessage
   | ChatErrorMessage
-  | SetupRequiredMessage)
+  | SetupRequiredMessage
+  | ThemeChangedMessage)
 
 export interface PR {
   number: number
