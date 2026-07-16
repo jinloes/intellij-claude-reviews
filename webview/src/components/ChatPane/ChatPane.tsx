@@ -5,9 +5,8 @@ import { Loader2, Send, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
-import { onHostMessage, sendToHost, type PR } from '../../bridge/types'
+import { onHostMessage, sendToHost, type PR } from '@/bridge/types'
 import { LiveStatus } from '../a11y/LiveStatus'
-import { scrollBehavior } from '@/lib/motion'
 import { useI18n } from '@/i18n/I18nProvider'
 
 interface Message {
@@ -42,7 +41,8 @@ export function ChatPane({
   const [streaming, setStreaming] = useState('')
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
-  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const messagesRef = useRef<HTMLDivElement>(null)
+  const sentPendingMessageIdRef = useRef<number | null>(null)
 
   useEffect(() => {
     setMessages([])
@@ -79,16 +79,20 @@ export function ChatPane({
   }, [pr])
 
   useEffect(() => {
-    if (!pendingMessage || busy) return
-    const { q, ctx } = pendingMessage
+    if (!pendingMessage || busy || sentPendingMessageIdRef.current === pendingMessage.id) return
+    const { q, ctx, id } = pendingMessage
+    sentPendingMessageIdRef.current = id
     setMessages((prev) => [...prev, { role: 'user', content: q }])
     setBusy(true)
     onPendingMessageSent?.()
     sendToHost({ type: 'askClaude', context: ctx, question: q })
-  }, [pendingMessage?.id, busy]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pendingMessage, busy, onPendingMessageSent])
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: scrollBehavior() })
+    const messagesElement = messagesRef.current
+    if (messagesElement) {
+      messagesElement.scrollTop = messagesElement.scrollHeight
+    }
   }, [messages.length, busy])
 
   function handleClear() {
@@ -119,7 +123,7 @@ export function ChatPane({
   const hasContent = messages.length > 0 || !!streaming || busy
 
   return (
-    <section className="flex flex-col h-full border-t border-border bg-card" aria-labelledby="chat-heading">
+    <section className="flex flex-1 min-h-0 flex-col border-t border-border bg-card" aria-labelledby="chat-heading">
       <LiveStatus message={busy ? 'AI response in progress' : streaming ? 'AI response started' : ''} />
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-border shrink-0">
         <h2 id="chat-heading" className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
@@ -137,9 +141,10 @@ export function ChatPane({
         )}
       </div>
 
-      {/* Messages */}
-      {hasContent && (
-        <div className="flex-1 overflow-y-auto p-3 space-y-3 min-h-0">
+      {/* Keep this flexible region mounted so an empty chat anchors its composer to the panel bottom. */}
+      <div ref={messagesRef} data-testid="chat-messages" className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
+        {hasContent && (
+          <>
           {messages.map((m, i) => (
             <div key={i} className={cn('flex flex-col gap-1', m.role === 'user' ? 'items-end' : 'items-start')}>
               <span className="text-[10px] font-medium tracking-widest uppercase text-muted-foreground px-1">
@@ -197,9 +202,9 @@ export function ChatPane({
               </div>
             </div>
           )}
-          <div ref={messagesEndRef} />
-        </div>
-      )}
+          </>
+        )}
+      </div>
 
       {/* Selected context badge */}
       {selectedContext && (

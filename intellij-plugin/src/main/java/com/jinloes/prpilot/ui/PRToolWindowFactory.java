@@ -205,11 +205,6 @@ public class PRToolWindowFactory implements ToolWindowFactory {
                                         webviewPanel.getSearchScope(),
                                         currentRepo,
                                         finalLimited);
-                                PRPilotEditorOpener.PendingActivation pending =
-                                        PRPilotEditorOpener.consumePendingActivation(project);
-                                if (pending != null) {
-                                    webviewPanel.activatePr(pending.pr(), pending.source());
-                                }
                             });
         } catch (Exception e) {
             log.warn("Failed to load PR list for webview: {}", e.getMessage());

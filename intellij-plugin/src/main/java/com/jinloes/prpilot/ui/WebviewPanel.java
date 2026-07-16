@@ -19,6 +19,7 @@ import com.intellij.openapi.util.Disposer;
 import com.intellij.ui.jcef.JBCefBrowser;
 import com.intellij.ui.jcef.JBCefBrowserBase;
 import com.intellij.ui.jcef.JBCefJSQuery;
+import com.intellij.util.Alarm;
 import com.intellij.util.ui.UIUtil;
 import com.jinloes.prpilot.model.ChatMessage;
 import com.jinloes.prpilot.model.LineComment;
@@ -38,12 +39,7 @@ import com.jinloes.prpilot.settings.PluginSettings;
 import com.jinloes.prpilot.settings.PluginSettingsConfigurable;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
-import java.awt.Container;
-import java.awt.Window;
-import java.awt.event.HierarchyEvent;
-import java.awt.event.WindowAdapter;
-import java.awt.event.WindowEvent;
-import java.awt.event.WindowFocusListener;
+import java.awt.BorderLayout;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
@@ -55,7 +51,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import javax.swing.JComponent;
-import javax.swing.SwingUtilities;
+import javax.swing.JPanel;
 import javax.swing.UIManager;
 import org.apache.commons.lang3.StringUtils;
 import org.cef.browser.CefBrowser;
@@ -84,6 +80,8 @@ public class WebviewPanel implements Disposable {
 
     /** Maximum PRs shown in the list. The search over-fetches by one to detect truncation. */
     static final int PR_SEARCH_LIMIT = 50;
+
+    private static final int LAYOUT_REPAINT_DELAY_MS = 50;
 
     // --- Outbound DTO records (Java → JS) ---
     // ReviewResultDto and LineCommentDto live in WebviewDtos.java (package-private);
@@ -173,7 +171,9 @@ public class WebviewPanel implements Disposable {
     private volatile HttpServer httpServer;
     private volatile boolean disposed;
     private final JBCefBrowser browser;
+    private final JPanel browserPanel;
     private final JBCefJSQuery bridgeQuery;
+    private final Alarm layoutRepaintAlarm = new Alarm(Alarm.ThreadToUse.SWING_THREAD, this);
     private final ObjectMapper mapper =
             new ObjectMapper()
                     .registerModule(new KotlinModule.Builder().build())
@@ -212,14 +212,12 @@ public class WebviewPanel implements Disposable {
     private Consumer<PullRequest> onPRSelected = pr -> {};
     private Runnable onPageReady = () -> {};
 
-    private volatile Window listenedWindow;
-    private volatile WindowFocusListener focusListener;
-
     public WebviewPanel(Project project) {
         this.project = project;
         this.claudeService = new IntellijClaudeService(project.getBasePath());
         this.activeReviewService = this.claudeService;
-        browser = new JBCefBrowser();
+        browser = JBCefBrowser.createBuilder().setOffScreenRendering(true).build();
+        browserPanel = createBrowserHostPanel(browser.getComponent());
         bridgeQuery = JBCefJSQuery.create((JBCefBrowserBase) browser);
 
         bridgeQuery.addHandler(
@@ -259,7 +257,6 @@ public class WebviewPanel implements Disposable {
 
         getApplication().executeOnPooledThread(this::startServerAndLoad);
 
-        installPostSleepResizeFix();
         getApplication()
                 .getMessageBus()
                 .connect(this)
@@ -278,68 +275,33 @@ public class WebviewPanel implements Disposable {
         if (server == null) {
             getApplication()
                     .invokeLater(
-                            () ->
+                            () -> {
+                                if (!disposed) {
                                     browser.loadHTML(
                                             "<html><body style='color:#e8a030;"
                                                     + "background:#0a0805;"
                                                     + "font-family:monospace'>"
                                                     + "<p>Could not start webview server</p>"
-                                                    + "</body></html>"));
+                                                    + "</body></html>");
+                                }
+                            });
             return;
         }
         String url = "http://127.0.0.1:" + server.getAddress().getPort() + "/";
         log.info("Loading webview from {}", url);
-        getApplication().invokeLater(() -> browser.loadURL(url));
+        getApplication()
+                .invokeLater(
+                        () -> {
+                            if (!disposed) {
+                                browser.loadURL(url);
+                            }
+                        });
     }
 
-    /**
-     * After a macOS wake-from-sleep, the heavyweight JCEF native surface can keep its pre-sleep
-     * bounds while the Swing parent has already resized — leaving the browser visibly clipped or
-     * letterboxed inside the tool window. Re-syncing the layout whenever the host IDE window
-     * regains focus reliably catches the wake case (focus is restored when the user interacts after
-     * the screen comes back).
-     */
-    private void installPostSleepResizeFix() {
-        JComponent comp = (JComponent) browser.getComponent();
-        comp.addHierarchyListener(
-                e -> {
-                    if ((e.getChangeFlags() & HierarchyEvent.SHOWING_CHANGED) != 0) {
-                        attachFocusListener(comp);
-                    }
-                });
-    }
-
-    private void attachFocusListener(JComponent comp) {
-        Window window = SwingUtilities.getWindowAncestor(comp);
-        if (window == listenedWindow) {
-            return;
-        }
-        if (listenedWindow != null && focusListener != null) {
-            listenedWindow.removeWindowFocusListener(focusListener);
-        }
-        listenedWindow = window;
-        if (window == null) {
-            focusListener = null;
-            return;
-        }
-        focusListener =
-                new WindowAdapter() {
-                    @Override
-                    public void windowGainedFocus(WindowEvent e) {
-                        SwingUtilities.invokeLater(() -> resyncBrowserBounds(comp));
-                    }
-                };
-        window.addWindowFocusListener(focusListener);
-    }
-
-    static void resyncBrowserBounds(JComponent comp) {
-        Container parent = comp.getParent();
-        if (parent != null) {
-            parent.doLayout();
-        }
-        comp.invalidate();
-        comp.revalidate();
-        comp.repaint();
+    static JPanel createBrowserHostPanel(JComponent browserComponent) {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.add(browserComponent, BorderLayout.CENTER);
+        return panel;
     }
 
     private HttpServer tryStartServer() {
@@ -414,6 +376,29 @@ public class WebviewPanel implements Disposable {
         cefBrowser.executeJavaScript(js, cefBrowser.getURL(), 0);
     }
 
+    private void scheduleWebviewLayoutRepaint() {
+        getApplication()
+                .invokeLater(
+                        () -> {
+                            if (disposed) {
+                                return;
+                            }
+                            layoutRepaintAlarm.cancelAllRequests();
+                            layoutRepaintAlarm.addRequest(
+                                    () -> {
+                                        if (disposed) {
+                                            return;
+                                        }
+                                        browser.getCefBrowser().invalidate();
+                                        browser.getComponent().revalidate();
+                                        browser.getComponent().repaint();
+                                        browserPanel.revalidate();
+                                        browserPanel.repaint();
+                                    },
+                                    LAYOUT_REPAINT_DELAY_MS);
+                        });
+    }
+
     private void handleIncoming(String json) {
         try {
             var node = mapper.readTree(json);
@@ -461,6 +446,7 @@ public class WebviewPanel implements Disposable {
                                         () ->
                                                 BrowserUtil.browse(
                                                         "https://cli.github.com/manual/gh_auth_login"));
+                case "webviewLayoutChanged" -> scheduleWebviewLayoutRepaint();
                 case "generateReview" ->
                         handleGenerateReview(
                                 number,
@@ -867,10 +853,14 @@ public class WebviewPanel implements Disposable {
         // Dispatch all blocking work to a pooled thread so the JCEF bridge returns immediately
         // and status messages can flow during the network-fetch phase.
         final PullRequest finalPr = pr;
+        final long reviewRevision = selectionRevision;
         final String finalToken = token;
         getApplication()
                 .executeOnPooledThread(
                         () -> {
+                            if (!isCurrentSession(finalPr, reviewRevision)) {
+                                return;
+                            }
                             // Atomically snapshot prefetched data to prevent check-then-act
                             // races with a concurrent handleSelectPR on the JCEF bridge thread.
                             String snapshotDiff;
@@ -888,13 +878,17 @@ public class WebviewPanel implements Disposable {
                             if (StringUtils.isNotBlank(snapshotDiff)) {
                                 diff = snapshotDiff;
                             } else {
-                                pushMessage(
+                                publishIfCurrent(
+                                        finalPr,
+                                        reviewRevision,
                                         new ReviewGeneratingMsg(
                                                 "reviewGenerating", key, "Fetching diff…"));
                                 try {
                                     diff = ghSvc.getPRDiff(finalToken, owner, repo, number);
                                 } catch (Exception e) {
-                                    pushMessage(
+                                    publishIfCurrent(
+                                            finalPr,
+                                            reviewRevision,
                                             new ErrorMsg(
                                                     "reviewError",
                                                     key,
@@ -948,25 +942,34 @@ public class WebviewPanel implements Disposable {
                                 reviewService = claudeService;
                             }
 
-                            activeReviewService = reviewService;
-
                             final IntellijClaudeService finalReviewService = reviewService;
 
                             // Kick off the review — callbacks fired on EDT
-                            pushMessage(
-                                    new ReviewGeneratingMsg(
-                                            "reviewGenerating", key, "Sending review request…"));
                             final String finalDiff = diff;
                             final String finalValidationDiff = validationDiff;
                             final String finalExisting = existingReviews;
-                            java.io.File guidelinesDir =
-                                    activePrWorktreeDir != null
-                                            ? activePrWorktreeDir
-                                            : (project.getBasePath() != null
-                                                    ? new java.io.File(project.getBasePath())
-                                                    : null);
+                            java.io.File guidelinesDir;
+                            ReviewResult priorResult;
+                            synchronized (this) {
+                                if (!isCurrentSession(finalPr, reviewRevision)) {
+                                    return;
+                                }
+                                activeReviewService = finalReviewService;
+                                guidelinesDir =
+                                        activePrWorktreeDir != null
+                                                ? activePrWorktreeDir
+                                                : (project.getBasePath() != null
+                                                        ? new java.io.File(project.getBasePath())
+                                                        : null);
+                                priorResult = lastResult;
+                            }
+                            publishIfCurrent(
+                                    finalPr,
+                                    reviewRevision,
+                                    new ReviewGeneratingMsg(
+                                            "reviewGenerating", key, "Sending review request…"));
                             final String finalGuidelines = readRepoGuidelines(guidelinesDir);
-                            final String finalPriorReview = formatPriorReview(lastResult);
+                            final String finalPriorReview = formatPriorReview(priorResult);
                             final String finalFocusAreas =
                                     StringUtils.isNotBlank(overrideFocusAreas)
                                             ? overrideFocusAreas
@@ -987,14 +990,21 @@ public class WebviewPanel implements Disposable {
                                             finalFocusAreas,
                                             finalCustomInstructions),
                                     statusMsg ->
-                                            pushMessage(
+                                            publishIfCurrent(
+                                                    finalPr,
+                                                    reviewRevision,
                                                     new ReviewGeneratingMsg(
                                                             "reviewGenerating", key, statusMsg)),
                                     (kind, chunk) ->
-                                            pushMessage(
+                                            publishIfCurrent(
+                                                    finalPr,
+                                                    reviewRevision,
                                                     new ReviewChunkMsg(
                                                             "reviewChunk", key, kind, chunk)),
                                     result -> {
+                                        if (!isCurrentSession(finalPr, reviewRevision)) {
+                                            return;
+                                        }
                                         activeReviewService = claudeService;
                                         lastResult = result;
                                         pendingReviewId = null;
@@ -1007,6 +1017,9 @@ public class WebviewPanel implements Disposable {
                                                         finalValidationDiff));
                                     },
                                     err -> {
+                                        if (!isCurrentSession(finalPr, reviewRevision)) {
+                                            return;
+                                        }
                                         activeReviewService = claudeService;
                                         // Cancellations are user-initiated — don't surface as
                                         // errors.
@@ -1221,6 +1234,7 @@ public class WebviewPanel implements Disposable {
             return;
         }
         String key = bridgePrKey(pr.getNumber(), pr.getOwner(), pr.getRepo());
+        long chatRevision = selectionRevision;
 
         String prContext = buildPrContext(pr);
         List<ChatMessage> history = chatHistory;
@@ -1241,23 +1255,32 @@ public class WebviewPanel implements Disposable {
                 prContext,
                 history,
                 fullQuestion,
-                chunk -> pushMessage(new ChatChunkMsg("chatChunk", key, chunk)),
+                chunk ->
+                        publishIfCurrent(
+                                pr, chatRevision, new ChatChunkMsg("chatChunk", key, chunk)),
                 response -> {
+                    if (!isCurrentSession(pr, chatRevision)) {
+                        return;
+                    }
                     List<ChatMessage> updated = new ArrayList<>(history);
                     updated.add(new ChatMessage(ChatMessage.Role.USER, fullQuestion));
                     updated.add(new ChatMessage(ChatMessage.Role.ASSISTANT, response));
                     chatHistory = updated;
                     pushMessage(new ChatResponseMsg("chatResponse", key, response));
                 },
-                err ->
-                        pushMessage(
-                                new ErrorMsg(
-                                        "chatError",
-                                        key,
-                                        UserFacingErrors.forProvider(
-                                                PluginSettings.getInstance().getReviewProvider(),
-                                                new Exception(err),
-                                                "answer chat question"))));
+                err -> {
+                    if (!isCurrentSession(pr, chatRevision)) {
+                        return;
+                    }
+                    pushMessage(
+                            new ErrorMsg(
+                                    "chatError",
+                                    key,
+                                    UserFacingErrors.forProvider(
+                                            PluginSettings.getInstance().getReviewProvider(),
+                                            new Exception(err),
+                                            "answer chat question")));
+                });
     }
 
     static String worktreeKey(int number, String owner, String repo) {
@@ -1286,6 +1309,26 @@ public class WebviewPanel implements Disposable {
         return left.getNumber() == right.getNumber()
                 && StringUtils.equalsIgnoreCase(left.getOwner(), right.getOwner())
                 && StringUtils.equalsIgnoreCase(left.getRepo(), right.getRepo());
+    }
+
+    static boolean isCurrentSession(
+            PullRequest currentPr,
+            long currentRevision,
+            PullRequest expectedPr,
+            long expectedRevision) {
+        return currentPr == expectedPr && currentRevision == expectedRevision;
+    }
+
+    private boolean isCurrentSession(PullRequest expectedPr, long expectedRevision) {
+        synchronized (this) {
+            return isCurrentSession(activePR, selectionRevision, expectedPr, expectedRevision);
+        }
+    }
+
+    private void publishIfCurrent(PullRequest expectedPr, long expectedRevision, Object message) {
+        if (isCurrentSession(expectedPr, expectedRevision)) {
+            pushMessage(message);
+        }
     }
 
     private boolean isActivePrKey(String key) {
@@ -1624,7 +1667,7 @@ public class WebviewPanel implements Disposable {
     }
 
     public JComponent getComponent() {
-        return browser.getComponent();
+        return browserPanel;
     }
 
     @Override
@@ -1634,11 +1677,6 @@ public class WebviewPanel implements Disposable {
         }
         disposed = true;
         clearActivePrWorktree();
-        if (listenedWindow != null && focusListener != null) {
-            listenedWindow.removeWindowFocusListener(focusListener);
-            listenedWindow = null;
-            focusListener = null;
-        }
         HttpServer server = httpServer;
         if (server != null) {
             try {

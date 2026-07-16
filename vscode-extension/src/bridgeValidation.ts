@@ -17,6 +17,7 @@ const MESSAGE_TYPES = new Set([
   'openUrl',
   'openSettings',
   'runAuthLogin',
+  'webviewLayoutChanged',
 ]);
 
 function hasValidPrIdentity(msg: AnyMessage): boolean {
@@ -81,6 +82,8 @@ export function isValidBridgeRequest(msg: AnyMessage | null | undefined): msg is
       return true;
     case 'openUrl':
       return isBoundedString(msg.url, 4_096);
+    case 'webviewLayoutChanged':
+      return isBoundedString(msg.reason, 4_096);
     case 'askClaude':
       return isBoundedString(msg.question)
         && (msg.context === undefined || isBoundedString(msg.context));

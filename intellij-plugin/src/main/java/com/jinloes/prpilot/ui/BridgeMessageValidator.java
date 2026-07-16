@@ -22,7 +22,8 @@ final class BridgeMessageValidator {
                     "clearChat",
                     "openUrl",
                     "openSettings",
-                    "runAuthLogin");
+                    "runAuthLogin",
+                    "webviewLayoutChanged");
 
     private BridgeMessageValidator() {}
 
@@ -51,6 +52,7 @@ final class BridgeMessageValidator {
                             && optionalBoolean(node.get("reviewRequested"));
             case "cancelReview", "openSettings", "clearChat", "runAuthLogin" -> true;
             case "openUrl" -> boundedText(node.get("url"), 4_096);
+            case "webviewLayoutChanged" -> boundedText(node.get("reason"), 4_096);
             case "askClaude" ->
                     boundedText(node.get("question"), MAX_TEXT)
                             && optionalText(node.get("context"), MAX_TEXT);

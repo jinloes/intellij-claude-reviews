@@ -65,11 +65,7 @@ intellij-plugin/                       – IntelliJ plugin host; depends on :cor
       GithubBaseUrlValidator.java      – Normalizes settings input to an HTTPS GitHub origin
     ui/
       PRToolWindowFactory.java
-      PRPilotFileEditorProvider.java      – Registers PR Pilot as a center editor-tab file editor
-      PRPilotFileEditor.java              – FileEditor wrapper hosting WebviewPanel in editor tab
-      PRPilotEditorOpener.java            – Opens/reveals singleton editor-tab virtual file per project
-      PRPilotVirtualFile.java             – Marker LightVirtualFile for PR Pilot editor tab
-      WebviewPanel.java
+      WebviewPanel.java               – Hosts the OSR JCEF browser and Java↔webview bridge in the tool window
       HostThemeClassifier.java       – Pure light/dark/high-contrast theme classification
       ReviewMapper.java              – MapStruct mapper (core model -> webview DTOs)
       WebviewDtos.java               – package-private DTO records serialized to webview bridge
@@ -87,6 +83,7 @@ webview/                               – Vite + React + TypeScript webview
     bridge/types.ts
     components/a11y/LiveStatus.tsx   – Reusable screen-reader status announcements
     components/layout/AccessibleResizer.tsx – Pointer and keyboard-accessible pane separator
+    components/ReviewPane/chatHeight.ts – Validates persisted chat-panel heights against its usable layout range
     i18n/                            – Typed English catalog plus test-only pseudo-localization
     theme/hostTheme.ts               – Applies host light/dark/high-contrast state to the document
     lib/keyboard.ts                  – Editable-safe global keyboard shortcut helpers
@@ -129,7 +126,9 @@ Only decisions that encode active constraints future code must respect and are n
 ### Webview styling
 All webview UI uses shadcn/ui + Tailwind CSS. Avoid ad-hoc CSS modules/inline layout styles. `DiffViewer.css` is the only hand-crafted CSS exception for diff-table specifics. Use semantic status tokens (`text-status-*`, `bg-status-*/10`, `border-status-*/50`) rather than hardcoded palette classes. Theme colors are semantic CSS variables selected by host-provided `light`, `dark`, `highContrastLight`, or `highContrastDark` bridge state; do not infer the IDE theme from browser media queries alone.
 
-The shared webview switches from split panes to explicit list/review navigation below 640px. Pane separators must remain operable by pointer and keyboard, keep ARIA values within viewport-derived bounds, and honor reduced-motion preferences.
+The shared webview switches from split panes to explicit list/review navigation below 640px. Pane separators must remain operable by pointer and keyboard, keep ARIA values within viewport-derived bounds, and honor reduced-motion preferences. The application shell is pinned to the browser viewport with `overflow: clip`, and pane contents grow with `flex: 1` plus `min-height: 0`; do not replace this with a nested `height: 100%` chain because IntelliJ's JCEF Chromium can resolve a flex-stretched parent's percentage-height child to content height. Descendant auto-scroll must update its local scroll container directly rather than call `scrollIntoView`, because `overflow: hidden` ancestors remain programmatically scrollable and JCEF can translate the fixed shell off-screen.
+
+The IntelliJ host uses JCEF off-screen rendering (OSR) and attaches its layout-managed component directly to the tool-window content. Do not replace this with heavyweight native rendering or call `CefBrowser.wasResized` during ordinary Swing layout: on macOS, the native child window can retain an intermediate height and clip the webview. JCEF OSR can also retain stale pixels after DOM elements move without changing the browser viewport; dynamic webview geometry changes must send `webviewLayoutChanged` so IntelliJ can debounce a targeted `CefBrowser.invalidate` after React commits the layout. VS Code validates and consumes the same parity message but needs no host repaint.
 
 ### Webview accessibility tooling
 Webview development runs dev-only runtime accessibility scans via `@axe-core/react` in `main.tsx` so missing labels/roles and semantic issues surface early in local runs. ESLint also applies `eslint-plugin-jsx-a11y` rules.

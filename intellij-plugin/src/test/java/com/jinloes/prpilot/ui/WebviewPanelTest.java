@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jinloes.prpilot.model.PullRequest;
+import java.awt.BorderLayout;
+import java.awt.Rectangle;
+import javax.swing.JPanel;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
@@ -54,6 +57,26 @@ class WebviewPanelTest {
 
             assertThat(WebviewPanel.isSamePr(pr, null)).isFalse();
             assertThat(WebviewPanel.isSamePr(null, pr)).isFalse();
+        }
+    }
+
+    @Nested
+    class IsCurrentSession {
+
+        @Test
+        void acceptsTheActivePrAtTheSameRevision() {
+            PullRequest pr = new PullRequest("t", "", "owner", "repo", 7, "", "a", "");
+
+            assertThat(WebviewPanel.isCurrentSession(pr, 3, pr, 3)).isTrue();
+        }
+
+        @Test
+        void rejectsAnOlderRevisionOrDifferentPr() {
+            PullRequest active = new PullRequest("t", "", "owner", "repo", 7, "", "a", "");
+            PullRequest previous = new PullRequest("t", "", "owner", "repo", 7, "", "a", "");
+
+            assertThat(WebviewPanel.isCurrentSession(active, 4, active, 3)).isFalse();
+            assertThat(WebviewPanel.isCurrentSession(active, 4, previous, 4)).isFalse();
         }
     }
 
@@ -137,6 +160,28 @@ class WebviewPanelTest {
             var node = MAPPER.readTree("{\"protocolVersion\":1,\"type\":\"runAuthLogin\"}");
 
             assertThat(WebviewPanel.isValidIncomingMessage(node)).isTrue();
+        }
+
+        @Test
+        void validatesWebviewLayoutChangedReason() throws Exception {
+            var valid =
+                    MAPPER.readTree(
+                            "{\"protocolVersion\":1,\"type\":\"webviewLayoutChanged\",\"reason\":\"chat-panel\"}");
+            var missing =
+                    MAPPER.readTree("{\"protocolVersion\":1,\"type\":\"webviewLayoutChanged\"}");
+            var nonText =
+                    MAPPER.readTree(
+                            "{\"protocolVersion\":1,\"type\":\"webviewLayoutChanged\",\"reason\":42}");
+            var oversized =
+                    MAPPER.createObjectNode()
+                            .put("protocolVersion", 1)
+                            .put("type", "webviewLayoutChanged")
+                            .put("reason", "x".repeat(4_097));
+
+            assertThat(WebviewPanel.isValidIncomingMessage(valid)).isTrue();
+            assertThat(WebviewPanel.isValidIncomingMessage(missing)).isFalse();
+            assertThat(WebviewPanel.isValidIncomingMessage(nonText)).isFalse();
+            assertThat(WebviewPanel.isValidIncomingMessage(oversized)).isFalse();
         }
 
         @Test
@@ -239,6 +284,32 @@ class WebviewPanelTest {
             assertThat(json.has("result")).isFalse();
             assertThat(json.has("diff")).isFalse();
             assertThat(json.has("validationDiff")).isFalse();
+        }
+    }
+
+    @Nested
+    class BrowserHostLayout {
+
+        @Test
+        void browserTracksSuccessiveToolWindowSizes() {
+            JPanel parent = new JPanel(new BorderLayout());
+            JPanel browser = new JPanel();
+            JPanel host = WebviewPanel.createBrowserHostPanel(browser);
+            parent.add(host, BorderLayout.CENTER);
+
+            layoutAt(parent, host, 640, 160);
+            assertThat(host.getBounds()).isEqualTo(new Rectangle(0, 0, 640, 160));
+            assertThat(browser.getBounds()).isEqualTo(new Rectangle(0, 0, 640, 160));
+
+            layoutAt(parent, host, 640, 800);
+            assertThat(host.getBounds()).isEqualTo(new Rectangle(0, 0, 640, 800));
+            assertThat(browser.getBounds()).isEqualTo(new Rectangle(0, 0, 640, 800));
+        }
+
+        private static void layoutAt(JPanel parent, JPanel host, int width, int height) {
+            parent.setSize(width, height);
+            parent.doLayout();
+            host.doLayout();
         }
     }
 }

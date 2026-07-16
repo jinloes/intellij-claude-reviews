@@ -217,7 +217,7 @@ export default function App() {
     <>
     <Toaster theme="system" position="bottom-right" richColors />
     {setup ? (
-      <main className="h-full bg-background" aria-label="PR Pilot setup">
+      <main className="fixed inset-0 min-h-0 overflow-clip bg-background" aria-label="PR Pilot setup">
         <SetupScreen
           reason={setup.reason}
           detail={setup.detail}
@@ -229,7 +229,7 @@ export default function App() {
         />
       </main>
     ) : (
-    <main className="flex h-full overflow-hidden" data-layout={narrow ? 'narrow' : 'wide'}>
+    <main className="fixed inset-0 flex min-h-0 overflow-clip" data-layout={narrow ? 'narrow' : 'wide'}>
       {narrow && (
         <div className="fixed left-2 top-2 z-40 flex rounded-md border border-border bg-card p-1 shadow">
           <Button size="sm" variant={activePane === 'list' ? 'default' : 'ghost'} onClick={() => setActivePane('list')}>
@@ -245,7 +245,7 @@ export default function App() {
         data-testid="pr-list-shell"
         aria-label={t('app.prList')}
         style={narrow ? undefined : { width: leftWidth, maxWidth: '45vw' }}
-        className={`${narrow ? (activePane === 'list' ? 'flex w-full pt-12' : 'hidden') : 'flex'} shrink-0 flex-col overflow-hidden`}
+        className={`${narrow ? (activePane === 'list' ? 'flex w-full pt-12' : 'hidden') : 'flex'} min-h-0 shrink-0 flex-col overflow-hidden`}
       >
         <PRList
           selectedPr={selectedPR}
@@ -277,7 +277,7 @@ export default function App() {
       <section
         data-testid="review-pane-shell"
         aria-label={t('app.review')}
-        className={`${narrow ? (activePane === 'review' ? 'flex w-full pt-12' : 'hidden') : 'flex'} min-w-0 flex-1 flex-col overflow-hidden`}
+        className={`${narrow ? (activePane === 'review' ? 'flex w-full pt-12' : 'hidden') : 'flex'} min-h-0 min-w-0 flex-1 flex-col overflow-hidden`}
       >
         <ReviewPane pr={selectedPR} onDirtyStateChange={setHasUnsavedReview} />
       </section>

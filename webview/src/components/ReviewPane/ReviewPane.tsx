@@ -73,16 +73,12 @@ import { ReviewDisplay } from '../ReviewDisplay'
 import { AccessibleResizer } from '../layout/AccessibleResizer'
 import { LiveStatus } from '../a11y/LiveStatus'
 import { useI18n } from '@/i18n/I18nProvider'
-
-const CHAT_HEIGHT_KEY = 'claude-reviews:chat-height'
-const MIN_CHAT_HEIGHT = 100
-const MAX_CHAT_HEIGHT = 600
-const DEFAULT_CHAT_HEIGHT = 240
-
-function loadChatHeight(): number {
-  const saved = Number(localStorage.getItem(CHAT_HEIGHT_KEY))
-  return saved >= MIN_CHAT_HEIGHT && saved <= MAX_CHAT_HEIGHT ? saved : DEFAULT_CHAT_HEIGHT
-}
+import {
+  CHAT_HEIGHT_KEY,
+  MAX_CHAT_HEIGHT,
+  MIN_CHAT_HEIGHT,
+  loadChatHeight,
+} from './chatHeight'
 
 interface Props {
   pr: PR | null
@@ -345,6 +341,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     setFocusedCommentIdx(0)
     setChatVisible(false)
     setSelectedContext('')
+    setPendingChatMessage(null)
     setQualityExpanded(false)
     setChunkedProgress(null)
     chunkSessionRef.current = null
@@ -666,6 +663,12 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   const showChat = Boolean(pr)
 
   useEffect(() => {
+    if (showChat) {
+      sendToHost({ type: 'webviewLayoutChanged', reason: 'chat-panel' })
+    }
+  }, [showChat, chatVisible, chatHeight])
+
+  useEffect(() => {
     if (!pr) {
       setSelectedContext('')
       return
@@ -853,7 +856,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
 
   if (!pr) {
     return (
-      <div className="flex h-full items-center justify-center bg-background">
+      <div className="flex min-h-0 flex-1 items-center justify-center bg-background">
         <span className="text-sm text-muted-foreground italic">← select a pull request</span>
       </div>
     )
@@ -1082,7 +1085,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
 
   return (
     <TooltipProvider delayDuration={400}>
-      <div className="flex flex-col h-full bg-background">
+      <div data-testid="review-pane-content" className="flex min-h-0 flex-1 flex-col bg-background">
         <LiveStatus message={statusMessage} />
         {/* Header */}
         <div className="shrink-0 px-4 py-2.5 border-b border-border bg-card">
@@ -1196,7 +1199,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
         {/* Body */}
         <ContextMenu>
           <ContextMenuTrigger asChild>
-            <div className="flex-1 overflow-y-auto min-h-0">
+            <div data-testid="review-scroll-body" className="flex-1 overflow-y-auto min-h-0">
               {showReviewOverrides && (
                 <ReviewOverrides
                   focusAreas={focusAreasOverride}
@@ -1286,7 +1289,8 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
         {/* Chat panel */}
         {showChat && (
           <div
-            className="shrink-0 border-t border-border overflow-hidden transition-[height]"
+            data-testid="chat-panel"
+            className="flex min-h-0 flex-col border-t border-border overflow-hidden"
             style={{ height: chatVisible ? chatHeight : 0 }}
           >
             {chatVisible && (

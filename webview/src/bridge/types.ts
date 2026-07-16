@@ -298,6 +298,11 @@ export interface ClearChatRequest {
   type: 'clearChat'
 }
 
+export interface WebviewLayoutChangedRequest {
+  type: 'webviewLayoutChanged'
+  reason: string
+}
+
 export type OutgoingMessage =
   | SelectPRRequest
   | RefreshPRsRequest
@@ -311,6 +316,7 @@ export type OutgoingMessage =
   | OpenSettingsRequest
   | RunAuthLoginRequest
   | ClearChatRequest
+  | WebviewLayoutChangedRequest
 
 // VS Code injects acquireVsCodeApi() into the webview's global scope.
 // It can only be called once per session — store the result as a singleton.

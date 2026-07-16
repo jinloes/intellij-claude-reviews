@@ -152,6 +152,9 @@
   font-size: 10px;
   font-weight: 700;
   line-height: 1;
+  /* Purely decorative overlay — must not swallow clicks meant for the
+     underlying add-comment button. */
+  pointer-events: none;
 }
 
 .diff-gutter--clickable:hover {

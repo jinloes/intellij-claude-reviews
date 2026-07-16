@@ -393,6 +393,8 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
                 case 'runAuthLogin':
                     runAuthLoginInTerminal();
                     break;
+                case 'webviewLayoutChanged':
+                    break;
                 default:
                     console.warn('[pr-pilot] unknown message type:', msg.type);
             }

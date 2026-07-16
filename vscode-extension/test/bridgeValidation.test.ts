@@ -32,6 +32,16 @@ test('accepts setup runAuthLogin action', () => {
   assert.equal(isValidBridgeRequest({ ...version, type: 'runAuthLogin' }), true);
 });
 
+test('validates webview layout change reasons', () => {
+  assert.equal(isValidBridgeRequest({ ...version, type: 'webviewLayoutChanged', reason: 'chat-panel' }), true);
+  assert.equal(isValidBridgeRequest({ ...version, type: 'webviewLayoutChanged' }), false);
+  assert.equal(isValidBridgeRequest({ ...version, type: 'webviewLayoutChanged', reason: 42 }), false);
+  assert.equal(
+    isValidBridgeRequest({ ...version, type: 'webviewLayoutChanged', reason: 'x'.repeat(4_097) }),
+    false,
+  );
+});
+
 test('rejects unversioned messages', () => {
   assert.equal(isValidBridgeRequest({ type: 'runAuthLogin' }), false);
 });
