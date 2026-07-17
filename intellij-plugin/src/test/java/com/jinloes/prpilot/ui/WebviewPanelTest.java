@@ -81,6 +81,27 @@ class WebviewPanelTest {
     }
 
     @Nested
+    class MatchesPrRequest {
+
+        @Test
+        void matchesByIdentityFieldsIgnoringCase() {
+            PullRequest pr = new PullRequest("t", "", "OwNeR", "RePo", 7, "", "a", "");
+
+            assertThat(WebviewPanel.matchesPrRequest(pr, 7, "owner", "repo")).isTrue();
+        }
+
+        @Test
+        void rejectsNullAndFieldMismatches() {
+            PullRequest pr = new PullRequest("t", "", "owner", "repo", 7, "", "a", "");
+
+            assertThat(WebviewPanel.matchesPrRequest(null, 7, "owner", "repo")).isFalse();
+            assertThat(WebviewPanel.matchesPrRequest(pr, 8, "owner", "repo")).isFalse();
+            assertThat(WebviewPanel.matchesPrRequest(pr, 7, "other", "repo")).isFalse();
+            assertThat(WebviewPanel.matchesPrRequest(pr, 7, "owner", "other")).isFalse();
+        }
+    }
+
+    @Nested
     class ResolveResourcePath {
 
         @Test

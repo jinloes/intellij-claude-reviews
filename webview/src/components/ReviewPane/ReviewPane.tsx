@@ -661,9 +661,12 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   }, [])
 
   const showChat = Boolean(pr)
+  const handlePendingMessageSent = useCallback(() => {
+    setPendingChatMessage(null)
+  }, [])
 
   useEffect(() => {
-    if (showChat) {
+    if (showChat && chatVisible) {
       sendToHost({ type: 'webviewLayoutChanged', reason: 'chat-panel' })
     }
   }, [showChat, chatVisible, chatHeight])
@@ -1313,7 +1316,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
               selectedContext={selectedContext}
               onContextUsed={() => setSelectedContext('')}
               pendingMessage={pendingChatMessage ?? undefined}
-              onPendingMessageSent={() => setPendingChatMessage(null)}
+              onPendingMessageSent={handlePendingMessageSent}
               contextSummary={contextSummary}
             />
           </div>
@@ -1592,7 +1595,7 @@ function formatGenerationSummary(elapsedSec?: number): string | null {
 }
 
 function isDiffTruncated(diff?: string): boolean {
-  return Boolean(diff?.includes('[... diff truncated at 80 KB ...]'))
+  return Boolean(diff?.includes('[... diff truncated at 250 KB ...]'))
 }
 
 function chatContextSummary(
@@ -1679,7 +1682,7 @@ function ReviewAndDiff({
         <Alert className="mx-4 mt-3 mb-0 border-status-suggestion/40 bg-status-suggestion/5">
           <AlertTriangle className="h-3.5 w-3.5 text-status-suggestion" />
           <AlertDescription className="text-xs text-status-suggestion">
-            Diff display and chat context are truncated at 80 KB. Use smaller focused questions for large PRs.
+            Diff display and chat context are truncated at 250 KB. Use smaller focused questions for large PRs.
           </AlertDescription>
         </Alert>
       )}

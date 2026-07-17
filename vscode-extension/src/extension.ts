@@ -157,6 +157,7 @@ class PRNotificationPoller implements vscode.Disposable {
             if (!this.seeded) {
                 for (const { pr } of merged) this.seen.add(prNotificationKey(pr));
                 this.seeded = true;
+                trimSeenSet(this.seen, MAX_SEEN_NOTIFICATION_PRS);
                 await this.persist();
                 return;
             }
@@ -889,6 +890,7 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
         push(state, { type: 'reviewResult', prKey: key, result, diff, validationDiff });
     } catch (err) {
         if (isCancellationError(err)) return;
+        state.cachedToken = null;
         push(state, { type: 'reviewError', prKey: key, message: toUserFacingError(err, 'generate review') });
     }
 }
@@ -1037,8 +1039,8 @@ async function handleAskClaude(state: ViewState, msg: Record<string, unknown>): 
         history.push({ role: 'ASSISTANT', content: response });
         push(state, { type: 'chatResponse', prKey: key ?? undefined, response });
     } catch (err) {
+        history.pop(); // always undo the pre-push so cancelled/failed turns don't orphan in history
         if (isCancellationError(err)) return;
-        history.pop(); // remove the user turn we added on error
         push(state, { type: 'chatError', prKey: key ?? undefined, message: toUserFacingError(err, 'answer chat question') });
     }
 }
@@ -1058,7 +1060,7 @@ function buildPrContext(state: ViewState): string {
         if (r.summary) lines.push(`Summary: ${r.summary}`);
     }
     if (state.activeDiff) {
-        // Pass the full diff (already capped at 80 KB by getPRDiff) for parity with the IntelliJ
+        // Pass the full diff (already capped at 250 KB by getPRDiff) for parity with the IntelliJ
         // host, which also sends the complete diff as chat context.
         lines.push('', 'Diff:', state.activeDiff);
     }

@@ -128,6 +128,23 @@ open class CopilotService @JvmOverloads constructor(
     }
 
     /**
+     * Sends a pre-built prompt directly to Copilot without wrapping it in [ClaudeService.buildChatPrompt].
+     * Use this when the caller has already assembled the full prompt (e.g. via
+     * [ClaudeService.buildFocusedChatPrompt]) and does not want any additional wrapping.
+     */
+    @JvmOverloads
+    @Throws(IOException::class, InterruptedException::class)
+    fun chatWithPrompt(
+        rawPrompt: String,
+        effort: String,
+        onChunk: Consumer<String>,
+        inheritMcp: Boolean = false,
+        configDir: String? = null,
+    ): String = runSession(rawPrompt, "", effort, inheritMcp, configDir, { /* ignore status during chat */ }) { _, chunk ->
+        onChunk.accept(chunk)
+    }
+
+    /**
      * Starts a fresh Copilot SDK client + session, forwards text deltas to [onChunk] (as `"text"`
      * chunks, matching ClaudeService's protocol) and tool names to [onStatus], then returns the
      * final assistant message content. If the SDK never delivers a consolidated assistant message,

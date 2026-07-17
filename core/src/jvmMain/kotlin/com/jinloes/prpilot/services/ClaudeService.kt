@@ -349,6 +349,15 @@ open class ClaudeService @JvmOverloads constructor(projectDir: String? = null) {
         return runChat(prompt, onChunk)
     }
 
+    /**
+     * Sends a pre-built prompt directly to Claude without wrapping it in [buildChatPrompt].
+     * Use this when the caller has already assembled the full prompt (e.g. via
+     * [buildFocusedChatPrompt]) and does not want any additional wrapping.
+     */
+    @Throws(IOException::class, InterruptedException::class)
+    fun chatWithPrompt(rawPrompt: String, onChunk: Consumer<String>): String =
+        runChat(rawPrompt, onChunk)
+
     private fun runChat(prompt: String, onChunk: Consumer<String>): String {
         var process: Process? = null
         try {
@@ -501,8 +510,8 @@ open class ClaudeService @JvmOverloads constructor(projectDir: String? = null) {
             "based on evidence you actually read (the diff plus any source you looked up). Do NOT guess high.\n" +
             "- \"rationale\": ≤200 chars. The concrete evidence behind the finding — the file/symbol you checked, the schema you " +
             "read, or the call site you traced. Omit only for pure \"note\" observations.\n" +
-            "- \"lineComments\": at most 12 comments. Drop every finding below \"medium\" confidence rather than padding the list. " +
-            "If more than 12 remain, keep the highest-priority ones, ranked by severity (blocker > major > minor > nit) then confidence.\n\n" +
+            "- \"lineComments\": at most 20 comments. Drop every finding below \"medium\" confidence rather than padding the list. " +
+            "If more than 20 remain, keep the highest-priority ones, ranked by severity (blocker > major > minor > nit) then confidence.\n\n" +
             "Confidence gating: each finding must be backed by evidence you can point to. If you could not verify it — because it " +
             "needs runtime behavior, library internals, or code you did not read — either look it up with the tools available or " +
             "mark it \"note\" with \"confidence\": \"low\". Never report a low-confidence \"issue\". When in doubt, leave it out.\n\n" +

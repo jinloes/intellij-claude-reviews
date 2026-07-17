@@ -60,7 +60,7 @@ class GitHubService(
     constructor(apiBase: String) : this(apiBase, HTTP_CLIENT)
 
     companion object {
-        private const val MAX_DIFF_BYTES = 80_000
+        private const val MAX_DIFF_BYTES = 250_000
         private const val REQUEST_TIMEOUT_MILLIS = 15_000L
 
         const val VERDICT_TAG = "<!-- claude-verdict: "
@@ -522,12 +522,12 @@ class GitHubService(
 
     // --- PR diff ---
 
-    /** Returns the unified diff for the given PR, truncated at 80 KB. Blocking. */
+    /** Returns the unified diff for the given PR, truncated at 250 KB. Blocking. */
     fun getPRDiff(token: String, owner: String, repo: String, prNumber: Int): String =
         runBlockingCompat {
             val diff = getPRDiffRaw(token, owner, repo, prNumber)
             if (diff.length > MAX_DIFF_BYTES) {
-                diff.substring(0, MAX_DIFF_BYTES) + "\n\n[... diff truncated at 80 KB ...]"
+                diff.substring(0, MAX_DIFF_BYTES) + "\n\n[... diff truncated at 250 KB ...]"
             } else {
                 diff
             }

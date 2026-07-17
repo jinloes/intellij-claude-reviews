@@ -167,7 +167,7 @@ class ClaudeServiceTest : FunSpec({
 
         test("line comments cap present") {
             val prompt = ClaudeService.buildPrompt(PRReviewRequest(pr(), "", ""))
-            prompt shouldContain "at most 12 comments"
+            prompt shouldContain "at most 20 comments"
         }
 
         test("insufficient-context fallback is explicit") {

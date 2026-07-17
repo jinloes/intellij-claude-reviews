@@ -132,6 +132,48 @@ public class IntellijClaudeService {
                         });
     }
 
+    /**
+     * Sends a focused question about a specific code snippet. Builds the prompt with
+     * {@link ClaudeService#buildFocusedChatPrompt} so the model receives only the code context and
+     * question — no PR metadata or conversation history — matching VS Code's focused-chat path.
+     */
+    public void chatFocused(
+            String focusedContext,
+            String question,
+            Consumer<String> onChunk,
+            Consumer<String> onDone,
+            Consumer<String> onError) {
+        PluginSettings settings = PluginSettings.getInstance();
+        ReviewProvider provider = settings.getReviewProvider();
+        String effort = settings.getReviewEffort();
+        boolean inheritMcp = settings.isCopilotInheritMcp();
+        String configDir = settings.getCopilotConfigDir();
+        String rawPrompt = ClaudeService.buildFocusedChatPrompt(focusedContext, question);
+        ApplicationManager.getApplication()
+                .executeOnPooledThread(
+                        () -> {
+                            try {
+                                Consumer<String> wrappedChunk =
+                                        chunk -> invokeLater(() -> onChunk.accept(chunk));
+                                String result =
+                                        provider == ReviewProvider.COPILOT
+                                                ? copilot.chatWithPrompt(
+                                                        rawPrompt,
+                                                        effort,
+                                                        wrappedChunk,
+                                                        inheritMcp,
+                                                        configDir)
+                                                : claude.chatWithPrompt(rawPrompt, wrappedChunk);
+                                invokeLater(() -> onDone.accept(result));
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                invokeLater(() -> onError.accept("Chat interrupted."));
+                            } catch (Exception e) {
+                                invokeLater(() -> onError.accept(friendlyMessage(provider, e)));
+                            }
+                        });
+    }
+
     /** Cancels the currently running request on either backend. */
     public void cancelCurrentRequest() {
         // Cancel both — only one has an active process at any time, but reading the provider

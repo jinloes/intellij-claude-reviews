@@ -165,20 +165,20 @@ class GitHubServiceNetworkTest : FunSpec({
             diff shouldContain "Foo.java"
         }
 
-        test("truncates diff at 80KB") {
-            val bigDiff = "x".repeat(90_000)
+        test("truncates diff at 250KB") {
+            val bigDiff = "x".repeat(260_000)
             val svc = mockServiceResponses(bigDiff)
             val diff = svc.getPRDiff("token", "owner", "repo", 1)
-            diff shouldContain "[... diff truncated at 80 KB ...]"
-            (diff.length < 90_000).shouldBeTrue()
+            diff shouldContain "[... diff truncated at 250 KB ...]"
+            (diff.length < 260_000).shouldBeTrue()
         }
 
         test("returns the full diff for validation") {
-            val bigDiff = "x".repeat(90_000)
+            val bigDiff = "x".repeat(260_000)
             val svc = mockServiceResponses(bigDiff)
             val diff = svc.getPRDiffFull("token", "owner", "repo", 1)
-            diff.length shouldBe 90_000
-            diff shouldNotContain "[... diff truncated at 80 KB ...]"
+            diff.length shouldBe 260_000
+            diff shouldNotContain "[... diff truncated at 250 KB ...]"
         }
     }
 

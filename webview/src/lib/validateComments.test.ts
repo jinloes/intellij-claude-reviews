@@ -56,3 +56,42 @@ void test('validateComments matches a unique suffix but rejects ambiguous suffix
   assert.equal(ambiguous.orphans.length, 1)
   assert.equal(ambiguous.orphans[0].file, 'Foo.ts')
 })
+
+void test('validateComments does not match file against substring-without-boundary (UserAction vs Action)', () => {
+  // Both files exist in the diff. A comment on "Action.java" must NOT match "UserAction.java"
+  // because "Action.java" is not preceded by "/" in "UserAction.java".
+  const diff = [
+    'diff --git a/src/Action.java b/src/Action.java',
+    '--- a/src/Action.java',
+    '+++ b/src/Action.java',
+    '@@ -1,1 +1,1 @@',
+    '-old',
+    '+new',
+    '',
+    'diff --git a/src/UserAction.java b/src/UserAction.java',
+    '--- a/src/UserAction.java',
+    '+++ b/src/UserAction.java',
+    '@@ -1,1 +1,1 @@',
+    '-old',
+    '+new',
+    '',
+  ].join('\n')
+
+  // Exact match on "src/Action.java" should still work
+  const exact = validateComments(diff, [comment('src/Action.java', 1)])
+  assert.equal(exact.adjusted.length, 1)
+  assert.equal(exact.adjusted[0].file, 'src/Action.java')
+  assert.equal(exact.orphans.length, 0)
+
+  // Short name "Action.java" is ambiguous (matches both src/Action.java and src/UserAction.java
+  // under the old broken rule) — with the fix, key.endsWith('/Action.java') matches only
+  // src/Action.java (unique), so the comment is correctly anchored.
+  const short = validateComments(diff, [comment('Action.java', 1)])
+  assert.equal(short.adjusted.length, 1)
+  assert.equal(short.adjusted[0].file, 'Action.java')
+  assert.equal(short.orphans.length, 0)
+
+  // A name that is a true non-boundary substring ("Action") should become an orphan.
+  const sub = validateComments(diff, [comment('Action', 1)])
+  assert.equal(sub.orphans.length, 1)
+})

@@ -26,7 +26,7 @@ import java.util.regex.Pattern;
 @Service
 public class GitHubService {
 
-    private static final int MAX_DIFF_BYTES = 80_000;
+    private static final int MAX_DIFF_BYTES = 250_000;
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     // Markers embedded in the GitHub review body to round-trip our metadata
@@ -125,7 +125,7 @@ public class GitHubService {
         String url = apiBase() + "/repos/" + owner + "/" + repo + "/pulls/" + prNumber;
         String diff = get(token, url, "application/vnd.github.v3.diff");
         if (diff.length() > MAX_DIFF_BYTES) {
-            diff = diff.substring(0, MAX_DIFF_BYTES) + "\n\n[... diff truncated at 80 KB ...]";
+            diff = diff.substring(0, MAX_DIFF_BYTES) + "\n\n[... diff truncated at 250 KB ...]";
         }
         return diff;
     }

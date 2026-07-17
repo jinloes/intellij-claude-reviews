@@ -57,7 +57,8 @@ function findValidLinesForFile(idx: Map<string, Set<number>>, file: string): Set
   if (idx.has(file)) return idx.get(file)!
   const matches: Set<number>[] = []
   for (const [key, val] of idx) {
-    if (file.endsWith(key) || key.endsWith(file)) matches.push(val)
+    // Require a '/' boundary so e.g. "Action.java" does not match "UserAction.java".
+    if (file === key || file.endsWith('/' + key) || key.endsWith('/' + file)) matches.push(val)
   }
   if (matches.length === 1) return matches[0]
   return null

@@ -8,7 +8,7 @@ import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 
-export const MAX_DIFF_BYTES = 80_000;
+export const MAX_DIFF_BYTES = 250_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_REQUEST_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 250;
@@ -367,9 +367,12 @@ export async function getPRDiff(
     const url = `${apiBase(githubBaseUrl)}/repos/${owner}/${repo}/pulls/${prNumber}`;
     const diff = await ghRequestWithRetry(token, url, { accept: 'application/vnd.github.v3.diff' });
     return diff.length > MAX_DIFF_BYTES
-        ? diff.substring(0, MAX_DIFF_BYTES) + '\n\n[... diff truncated at 80 KB ...]'
+        ? diff.substring(0, MAX_DIFF_BYTES) + '\n\n[... diff truncated at 250 KB ...]'
         : diff;
 }
+
+/** Maximum bytes for the full (untruncated) diff used for comment-position validation. */
+export const MAX_VALIDATION_DIFF_BYTES = 5_000_000; // 5 MB
 
 export async function getPRDiffFull(
     token: string,
@@ -379,7 +382,10 @@ export async function getPRDiffFull(
     prNumber: number,
 ): Promise<string> {
     const url = `${apiBase(githubBaseUrl)}/repos/${owner}/${repo}/pulls/${prNumber}`;
-    return ghRequestWithRetry(token, url, { accept: 'application/vnd.github.v3.diff' });
+    const diff = await ghRequestWithRetry(token, url, { accept: 'application/vnd.github.v3.diff' });
+    return diff.length > MAX_VALIDATION_DIFF_BYTES
+        ? diff.substring(0, MAX_VALIDATION_DIFF_BYTES)
+        : diff;
 }
 
 export async function getPRDetail(

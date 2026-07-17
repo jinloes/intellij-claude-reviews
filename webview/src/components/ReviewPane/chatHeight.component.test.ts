@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { render } from '@testing-library/react'
+import { createElement } from 'react'
+import { describe, expect, it, vi } from 'vitest'
 import {
   CHAT_HEIGHT_KEY,
   DEFAULT_CHAT_HEIGHT,
@@ -6,6 +8,7 @@ import {
   MIN_CHAT_HEIGHT,
   loadChatHeight,
 } from './chatHeight'
+import { ReviewPane } from './ReviewPane'
 
 describe('loadChatHeight', () => {
   it('falls back when a legacy persisted height cannot fit the chat controls', () => {
@@ -20,6 +23,14 @@ describe('loadChatHeight', () => {
     expect(loadChatHeight()).toBe(MIN_CHAT_HEIGHT)
   })
 
+  it('treats the boundary around the minimum as expected', () => {
+    localStorage.setItem(CHAT_HEIGHT_KEY, String(MIN_CHAT_HEIGHT - 1))
+    expect(loadChatHeight()).toBe(DEFAULT_CHAT_HEIGHT)
+
+    localStorage.setItem(CHAT_HEIGHT_KEY, String(MIN_CHAT_HEIGHT + 1))
+    expect(loadChatHeight()).toBe(MIN_CHAT_HEIGHT + 1)
+  })
+
   it('falls back for missing, invalid, and oversized persisted values', () => {
     for (const value of [null, 'invalid', String(MAX_CHAT_HEIGHT + 1)]) {
       localStorage.clear()
@@ -27,6 +38,17 @@ describe('loadChatHeight', () => {
 
       expect(loadChatHeight()).toBe(DEFAULT_CHAT_HEIGHT)
     }
+  })
+})
+
+describe('ReviewPane layout notifications', () => {
+  it('does not send a webviewLayoutChanged message when no PR is selected', () => {
+    const cefQuery = vi.fn()
+    Object.assign(window, { cefQuery })
+
+    render(createElement(ReviewPane, { pr: null }))
+
+    expect(cefQuery).not.toHaveBeenCalled()
   })
 })
 

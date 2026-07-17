@@ -49,6 +49,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Consumer;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
@@ -389,7 +390,10 @@ public class WebviewPanel implements Disposable {
                                         if (disposed) {
                                             return;
                                         }
-                                        browser.getCefBrowser().invalidate();
+                                        CefBrowser cefBrowser = browser.getCefBrowser();
+                                        if (cefBrowser != null) {
+                                            cefBrowser.invalidate();
+                                        }
                                         browser.getComponent().revalidate();
                                         browser.getComponent().repaint();
                                         browserPanel.revalidate();
@@ -749,7 +753,7 @@ public class WebviewPanel implements Disposable {
                                                 "MERGED",
                                                 null,
                                                 null,
-                                                null,
+                                                fetchedDiff,
                                                 effectiveValidationDiff,
                                                 false,
                                                 false,
@@ -818,16 +822,13 @@ public class WebviewPanel implements Disposable {
             String overrideFocusAreas,
             String overrideCustomInstructions) {
         String key = bridgePrKey(number, owner, repo);
-        PullRequest pr =
-                cachedPRs.stream()
-                        .filter(
-                                p ->
-                                        p.getNumber() == number
-                                                && p.getOwner().equals(owner)
-                                                && p.getRepo().equals(repo))
-                        .findFirst()
-                        .orElse(null);
-        if (pr == null) {
+        final PullRequest pr;
+        final long reviewRevision;
+        synchronized (this) {
+            pr = activePR;
+            reviewRevision = selectionRevision;
+        }
+        if (!matchesPrRequest(pr, number, owner, repo)) {
             pushMessage(new ErrorMsg("reviewError", key, "PR not found."));
             return;
         }
@@ -853,7 +854,6 @@ public class WebviewPanel implements Disposable {
         // Dispatch all blocking work to a pooled thread so the JCEF bridge returns immediately
         // and status messages can flow during the network-fetch phase.
         final PullRequest finalPr = pr;
-        final long reviewRevision = selectionRevision;
         final String finalToken = token;
         getApplication()
                 .executeOnPooledThread(
@@ -1228,33 +1228,60 @@ public class WebviewPanel implements Disposable {
             return;
         }
 
-        PullRequest pr = activePR;
+        final PullRequest pr;
+        final long chatRevision;
+        synchronized (this) {
+            pr = activePR;
+            chatRevision = selectionRevision;
+        }
         if (pr == null) {
             pushMessage(new ErrorMsg("chatError", null, "No PR selected."));
             return;
         }
         String key = bridgePrKey(pr.getNumber(), pr.getOwner(), pr.getRepo());
-        long chatRevision = selectionRevision;
-
-        String prContext = buildPrContext(pr);
-        List<ChatMessage> history = chatHistory;
-
-        // When the user has selected a code snippet, prepend it so the AI can reference it.
-        String fullQuestion =
-                StringUtils.isBlank(context)
-                        ? question
-                        : "<selection_context>\n"
-                                + context
-                                + "\n</selection_context>\n\n"
-                                + question;
 
         String token = PluginSettings.getInstance().getGithubToken();
         IntellijClaudeService chatService = resolvePrClaudeService(pr, token, false);
 
+        // When the user has selected a code snippet, use a focused prompt (no history, no PR
+        // context) — matching VS Code's buildFocusedChatPrompt path. Responses for focused
+        // questions are not stored in chatHistory since they are context-specific.
+        if (StringUtils.isNotBlank(context)) {
+            chatService.chatFocused(
+                    context,
+                    question,
+                    chunk ->
+                            publishIfCurrent(
+                                    pr, chatRevision, new ChatChunkMsg("chatChunk", key, chunk)),
+                    response -> {
+                        if (!isCurrentSession(pr, chatRevision)) {
+                            return;
+                        }
+                        pushMessage(new ChatResponseMsg("chatResponse", key, response));
+                    },
+                    err -> {
+                        if (!isCurrentSession(pr, chatRevision)) {
+                            return;
+                        }
+                        pushMessage(
+                                new ErrorMsg(
+                                        "chatError",
+                                        key,
+                                        UserFacingErrors.forProvider(
+                                                PluginSettings.getInstance().getReviewProvider(),
+                                                new Exception(err),
+                                                "answer chat question")));
+                    });
+            return;
+        }
+
+        String prContext = buildPrContext(pr);
+        List<ChatMessage> history = chatHistory;
+
         chatService.chat(
                 prContext,
                 history,
-                fullQuestion,
+                question,
                 chunk ->
                         publishIfCurrent(
                                 pr, chatRevision, new ChatChunkMsg("chatChunk", key, chunk)),
@@ -1263,7 +1290,7 @@ public class WebviewPanel implements Disposable {
                         return;
                     }
                     List<ChatMessage> updated = new ArrayList<>(history);
-                    updated.add(new ChatMessage(ChatMessage.Role.USER, fullQuestion));
+                    updated.add(new ChatMessage(ChatMessage.Role.USER, question));
                     updated.add(new ChatMessage(ChatMessage.Role.ASSISTANT, response));
                     chatHistory = updated;
                     pushMessage(new ChatResponseMsg("chatResponse", key, response));
@@ -1309,6 +1336,13 @@ public class WebviewPanel implements Disposable {
         return left.getNumber() == right.getNumber()
                 && StringUtils.equalsIgnoreCase(left.getOwner(), right.getOwner())
                 && StringUtils.equalsIgnoreCase(left.getRepo(), right.getRepo());
+    }
+
+    static boolean matchesPrRequest(PullRequest pr, int number, String owner, String repo) {
+        return pr != null
+                && pr.getNumber() == number
+                && StringUtils.equalsIgnoreCase(pr.getOwner(), owner)
+                && StringUtils.equalsIgnoreCase(pr.getRepo(), repo);
     }
 
     static boolean isCurrentSession(
@@ -1412,35 +1446,38 @@ public class WebviewPanel implements Disposable {
         return sb.toString();
     }
 
-    private synchronized IntellijClaudeService resolvePrClaudeService(
+    private IntellijClaudeService resolvePrClaudeService(
             PullRequest pr, String token, boolean emitStatus) {
-        if (pr == null || !isSamePr(activePR, pr)) {
-            return claudeService;
+        // Phase 1: quick local checks — hold the lock briefly to read shared fields.
+        final String key;
+        final java.io.File detectedRoot;
+        synchronized (this) {
+            if (pr == null || !isSamePr(activePR, pr)) {
+                return claudeService;
+            }
+            key = worktreeKey(pr.getNumber(), pr.getOwner(), pr.getRepo());
+            if (activePrClaudeService != null && key.equals(activePrWorktreeKey)) {
+                return activePrClaudeService;
+            }
+            if (StringUtils.isBlank(token)) {
+                return claudeService;
+            }
+            String projectPath = project.getBasePath();
+            if (projectPath == null) {
+                return claudeService;
+            }
+            java.io.File root = worktreeService.findGitRoot(new java.io.File(projectPath));
+            String currentRepo = RepoDetector.detectCurrentRepo(projectPath);
+            boolean sameRepo =
+                    currentRepo != null
+                            && currentRepo.equalsIgnoreCase(pr.getOwner() + "/" + pr.getRepo());
+            if (root == null || !sameRepo) {
+                return claudeService;
+            }
+            detectedRoot = root;
         }
 
-        String key = worktreeKey(pr.getNumber(), pr.getOwner(), pr.getRepo());
-        if (activePrClaudeService != null && key.equals(activePrWorktreeKey)) {
-            return activePrClaudeService;
-        }
-
-        if (StringUtils.isBlank(token)) {
-            return claudeService;
-        }
-
-        String projectPath = project.getBasePath();
-        if (projectPath == null) {
-            return claudeService;
-        }
-
-        java.io.File detectedRoot = worktreeService.findGitRoot(new java.io.File(projectPath));
-        String currentRepo = RepoDetector.detectCurrentRepo(projectPath);
-        boolean sameRepo =
-                currentRepo != null
-                        && currentRepo.equalsIgnoreCase(pr.getOwner() + "/" + pr.getRepo());
-        if (detectedRoot == null || !sameRepo) {
-            return claudeService;
-        }
-
+        // Phase 2: I/O outside the lock so other bridge operations are not blocked.
         if (emitStatus) {
             pushMessage(
                     new ReviewGeneratingMsg(
@@ -1456,10 +1493,16 @@ public class WebviewPanel implements Disposable {
                 return claudeService;
             }
 
+            // Include randomness to avoid path collisions on rapid consecutive calls.
+            String unique =
+                    pr.getNumber()
+                            + "-"
+                            + System.currentTimeMillis()
+                            + "-"
+                            + Long.toHexString(
+                                    ThreadLocalRandom.current().nextLong() & Long.MAX_VALUE);
             java.io.File wt =
-                    new java.io.File(
-                            System.getProperty("java.io.tmpdir"),
-                            "pr-pilot-wt-" + pr.getNumber() + "-" + System.currentTimeMillis());
+                    new java.io.File(System.getProperty("java.io.tmpdir"), "pr-pilot-wt-" + unique);
             if (headInfo.isFork()) {
                 worktreeService.createWorktreeFromFork(
                         detectedRoot, headInfo.getForkCloneUrl(), headInfo.getRef(), wt);
@@ -1467,19 +1510,28 @@ public class WebviewPanel implements Disposable {
                 worktreeService.createWorktree(detectedRoot, headInfo.getRef(), wt);
             }
 
-            if (!isSamePr(activePR, pr)) {
-                getApplication()
-                        .executeOnPooledThread(
-                                () -> worktreeService.removeWorktree(detectedRoot, wt));
-                return claudeService;
+            // Phase 3: write results under lock; double-check the PR hasn't changed.
+            synchronized (this) {
+                if (!isSamePr(activePR, pr)) {
+                    getApplication()
+                            .executeOnPooledThread(
+                                    () -> worktreeService.removeWorktree(detectedRoot, wt));
+                    return claudeService;
+                }
+                // A concurrent call may have already built the same worktree — discard ours.
+                if (activePrClaudeService != null && key.equals(activePrWorktreeKey)) {
+                    getApplication()
+                            .executeOnPooledThread(
+                                    () -> worktreeService.removeWorktree(detectedRoot, wt));
+                    return activePrClaudeService;
+                }
+                activePrClaudeService = new IntellijClaudeService(wt.getAbsolutePath());
+                activePrWorktreeDir = wt;
+                activePrGitRoot = detectedRoot;
+                activePrWorktreeKey = key;
+                log.info("Using worktree {} for PR #{}", wt, pr.getNumber());
+                return activePrClaudeService;
             }
-
-            activePrClaudeService = new IntellijClaudeService(wt.getAbsolutePath());
-            activePrWorktreeDir = wt;
-            activePrGitRoot = detectedRoot;
-            activePrWorktreeKey = key;
-            log.info("Using worktree {} for PR #{}", wt, pr.getNumber());
-            return activePrClaudeService;
         } catch (Exception e) {
             log.warn(
                     "Worktree creation for PR #{} failed; falling back to project dir: {}",
