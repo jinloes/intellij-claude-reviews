@@ -3,6 +3,210 @@
   flex-direction: column;
   gap: 12px;
   margin-top: 4px;
+  min-width: 0;
+}
+
+.diff-viewer__layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.diff-viewer__content {
+  min-width: 0;
+}
+
+.diff-viewer__toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 12;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 6px 10px;
+  margin-bottom: 12px;
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 2px);
+  box-shadow: 0 2px 8px hsl(0 0% 0% / 0.08);
+}
+
+.diff-viewer__current-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 240px;
+}
+
+.diff-viewer__current-label,
+.diff-viewer__current-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+}
+
+.diff-viewer__current-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: hsl(var(--foreground));
+  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+}
+
+.diff-file-nav {
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 2px);
+  background: hsl(var(--card));
+  overflow: hidden;
+  max-height: 260px;
+}
+
+.diff-file-nav__header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  background: hsl(var(--card));
+  border-bottom: 1px solid hsl(var(--border));
+  font-size: 12px;
+  font-weight: 600;
+  color: hsl(var(--foreground));
+}
+
+.diff-file-nav__count {
+  flex-shrink: 0;
+  min-width: 1.75rem;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: hsl(var(--muted) / 0.5);
+  color: hsl(var(--muted-foreground));
+  text-align: center;
+  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+}
+
+.diff-file-nav__body {
+  overflow: auto;
+  max-height: inherit;
+}
+
+.diff-file-tree,
+.diff-file-tree__children {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.diff-file-tree {
+  padding: 4px 6px 6px;
+}
+
+.diff-file-tree__children {
+  margin-left: 11px;
+  padding-left: 8px;
+  border-left: 1px solid hsl(var(--border) / 0.45);
+}
+
+.diff-file-tree__folder {
+  padding: 4px 8px 3px;
+  font-size: 11px;
+  font-weight: 500;
+  color: hsl(var(--muted-foreground));
+  text-transform: none;
+  letter-spacing: normal;
+  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+}
+
+.diff-file-tree__file {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: hsl(var(--foreground));
+  text-align: left;
+  cursor: pointer;
+}
+
+.diff-file-tree__file:hover {
+  background: hsl(var(--muted) / 0.45);
+}
+
+.diff-file-tree__file--active {
+  background: hsl(var(--primary) / 0.12);
+  color: hsl(var(--foreground));
+}
+
+.diff-file-tree__file:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 1px;
+}
+
+.diff-file-tree__status,
+.diff-file-tree__meta {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+}
+
+.diff-file-tree__status {
+  width: 0.8rem;
+  color: hsl(var(--muted-foreground) / 0.85);
+  text-transform: lowercase;
+}
+
+.diff-file-tree__status--add {
+  color: hsl(var(--status-approve));
+}
+
+.diff-file-tree__status--delete {
+  color: hsl(var(--status-issue));
+}
+
+.diff-file-tree__status--rename,
+.diff-file-tree__status--copy {
+  color: hsl(var(--primary));
+}
+
+.diff-file-tree__label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.diff-file-tree__meta {
+  min-width: 1.25rem;
+  color: hsl(var(--muted-foreground) / 0.9);
+  text-align: right;
+}
+
+@media (min-width: 1100px) {
+  .diff-viewer__layout {
+    grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
+  }
+
+  .diff-file-nav {
+    position: sticky;
+    top: 48px;
+    max-height: calc(100vh - 220px);
+  }
 }
 
 /* ── File block ──────────────────────────────────────── */
@@ -14,6 +218,7 @@
   overflow-y: visible;
   scrollbar-width: thin;
   scrollbar-color: hsl(var(--border)) transparent;
+  scroll-margin-top: 64px;
 }
 
 .diff-file::-webkit-scrollbar {
@@ -361,17 +566,11 @@
 /* ── Search bar ──────────────────────────────────────── */
 
 .diff-search-bar {
-  position: sticky;
-  top: 0;
-  z-index: 10;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 10px;
-  background: hsl(var(--card));
-  border: 1px solid hsl(var(--border));
-  border-radius: calc(var(--radius) - 2px);
-  box-shadow: 0 2px 8px hsl(0 0% 0% / 0.15);
+  flex: 1 1 320px;
+  min-width: min(100%, 320px);
 }
 
 .diff-search-input {

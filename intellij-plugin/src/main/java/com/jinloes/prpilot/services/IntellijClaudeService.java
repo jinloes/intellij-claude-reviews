@@ -133,8 +133,8 @@ public class IntellijClaudeService {
     }
 
     /**
-     * Sends a focused question about a specific code snippet. Builds the prompt with
-     * {@link ClaudeService#buildFocusedChatPrompt} so the model receives only the code context and
+     * Sends a focused question about a specific code snippet. Builds the prompt with {@link
+     * ClaudeService#buildFocusedChatPrompt} so the model receives only the code context and
      * question — no PR metadata or conversation history — matching VS Code's focused-chat path.
      */
     public void chatFocused(

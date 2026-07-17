@@ -82,8 +82,10 @@ webview/                               – Vite + React + TypeScript webview
   src/
     bridge/types.ts
     components/a11y/LiveStatus.tsx   – Reusable screen-reader status announcements
+    components/DiffViewer/fileNavigation.ts – Pure changed-file tree + active-file tracking helpers for diff navigation
     components/layout/AccessibleResizer.tsx – Pointer and keyboard-accessible pane separator
     components/ReviewPane/chatHeight.ts – Validates persisted chat-panel heights against its usable layout range
+    components/ReviewPane/verifyPrompt.ts – Builds focused Verify-with-AI prompts from comment metadata plus the nearest diff excerpt
     i18n/                            – Typed English catalog plus test-only pseudo-localization
     theme/hostTheme.ts               – Applies host light/dark/high-contrast state to the document
     lib/keyboard.ts                  – Editable-safe global keyboard shortcut helpers
@@ -232,6 +234,8 @@ The GitHub pending review is the single source of truth for in-progress reviews 
 
 ### Large diff visibility
 GitHub diffs are truncated at 250 KB in both hosts. The webview detects the truncation marker and warns that diff display and chat context are incomplete, while `DiffViewer` still lazily limits rendered changed lines for browser performance.
+
+The shared diff viewer also owns file-level navigation: it keeps a sticky “currently viewing” file indicator visible while the review body scrolls and renders a GitHub-style changed-files tree for jumping between files. If a reviewer jumps to a file outside the initial 500 changed-line preview, `DiffViewer` expands the full diff before scrolling so navigation and comment focus never strand hidden files.
 
 ### Review quality gate and chunked review mode
 The webview runs a `Review Quality Check` pass automatically over the current draft and validation diff to flag trust risks (unanchored comments, low-evidence high-severity findings, and missing rationale metadata). When risks are present it surfaces a non-blocking badge (`N trust risks detected — Review`) that expands to a panel with one-click in-memory repairs (`remove unanchored`, `add rationale placeholders`, `downgrade high-risk issues`); a clean draft shows no nag. The check remains non-blocking, but the submit dialog now requires an explicit reviewer acknowledgement checkbox whenever unresolved trust risks remain.

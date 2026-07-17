@@ -79,6 +79,7 @@ import {
   MIN_CHAT_HEIGHT,
   loadChatHeight,
 } from './chatHeight'
+import { buildExampleFixPrompt, buildVerifyCommentPrompt } from './verifyPrompt'
 
 interface Props {
   pr: PR | null
@@ -996,9 +997,15 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   }
 
   function handleVerifyComment(comment: LineComment) {
-    const q = `Verify this review comment on ${comment.file} line ${comment.line}:\n\n> ${comment.body}\n\nIs this ${comment.type} actually present in the diff?`
+    const { question, context } = buildVerifyCommentPrompt(comment, validationDiff || diff)
     if (!chatVisible) setChatVisible(true)
-    setPendingChatMessage({ q, ctx: '', id: Date.now() })
+    setPendingChatMessage({ q: question, ctx: context, id: Date.now() })
+  }
+
+  function handleSuggestFixComment(comment: LineComment) {
+    const { question, context } = buildExampleFixPrompt(comment, validationDiff || diff)
+    if (!chatVisible) setChatVisible(true)
+    setPendingChatMessage({ q: question, ctx: context, id: Date.now() })
   }
 
   function handleChatResizeDown(e: React.PointerEvent) {
@@ -1240,6 +1247,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
                 setFocusedCommentIdx={setFocusedCommentIdx}
                 onGenerate={handleGenerate}
                 onVerifyComment={hasReview ? handleVerifyComment : undefined}
+                onSuggestFixComment={hasReview ? handleSuggestFixComment : undefined}
                 editCommentHandlers={editCommentHandlers}
                 inlineComments={inlineComments}
                 orphanComments={orphanComments}
@@ -1557,6 +1565,7 @@ interface ContentProps {
   setFocusedCommentIdx: React.Dispatch<React.SetStateAction<number>>
   onGenerate: () => void
   onVerifyComment?: (comment: LineComment) => void
+  onSuggestFixComment?: (comment: LineComment) => void
   editCommentHandlers: {
     onEditComment: (idx: number, body: string) => void
     onDeleteComment: (idx: number) => void
@@ -1620,6 +1629,7 @@ function ReviewAndDiff({
   setFocusedCommentIdx,
   editCommentHandlers,
   onVerifyComment,
+  onSuggestFixComment,
   staleCommits,
   importedFromGitHub,
   onReanchor,
@@ -1635,6 +1645,7 @@ function ReviewAndDiff({
   setFocusedCommentIdx: React.Dispatch<React.SetStateAction<number>>
   editCommentHandlers: ContentProps['editCommentHandlers']
   onVerifyComment?: (comment: LineComment) => void
+  onSuggestFixComment?: (comment: LineComment) => void
   staleCommits?: boolean
   importedFromGitHub?: boolean
   onReanchor?: () => void
@@ -1714,6 +1725,7 @@ function ReviewAndDiff({
             }}
             onAddComment={editCommentHandlers.onAddComment}
             onVerifyComment={onVerifyComment}
+            onSuggestFixComment={onSuggestFixComment}
           />
         </div>
       )}
@@ -1774,6 +1786,7 @@ function PaneContent({
   setFocusedCommentIdx,
   onGenerate,
   onVerifyComment,
+  onSuggestFixComment,
   editCommentHandlers,
   inlineComments,
   orphanComments,
@@ -1894,6 +1907,7 @@ function PaneContent({
           setFocusedCommentIdx={setFocusedCommentIdx}
           editCommentHandlers={editCommentHandlers}
           onVerifyComment={onVerifyComment}
+          onSuggestFixComment={onSuggestFixComment}
           staleCommits={state.staleCommits}
           importedFromGitHub={state.importedFromGitHub}
           onReanchor={onReanchor}
@@ -1914,6 +1928,7 @@ function PaneContent({
           setFocusedCommentIdx={setFocusedCommentIdx}
           editCommentHandlers={editCommentHandlers}
           onVerifyComment={onVerifyComment}
+          onSuggestFixComment={onSuggestFixComment}
           inlineComments={inlineComments}
           orphanComments={orphanComments}
           onEditOrphan={onEditOrphan}

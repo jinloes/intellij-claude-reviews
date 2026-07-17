@@ -90,15 +90,28 @@ test('Verify with AI keeps review, chat, and footer usable in a constrained view
 
   await page.getByRole('button', { name: 'Verify with AI' }).click()
   const expectedQuestion =
-    'Verify this review comment on src/auth.ts line 2:\n\n' +
-    '> Explain this security behavior.\n\n' +
-    'Is this issue actually present in the diff?'
+    'Verify whether this draft review comment is supported by the provided context.\n\n' +
+    'Respond with:\n' +
+    '- Verdict: valid | invalid | unclear\n' +
+    '- Why: cite the changed lines or explain why the context does not support the comment\n' +
+    '- Action: keep | revise | delete\n' +
+    'If you choose revise, provide one replacement comment. Do not rely on code outside the provided context.'
+  const expectedContext =
+    'Draft review comment under verification:\n' +
+    'File: src/auth.ts\n' +
+    'Line: 2\n' +
+    'Type: issue\n' +
+    'Comment text: Explain this security behavior.\n' +
+    'Relevant diff excerpt:\n' +
+    '@@ -1,1 +1,2 @@\n' +
+    'export const ready = true\n' +
+    'export const accessible = true'
   await expect.poll(() => page.evaluate(() => {
     const fixture = (window as unknown as {
       __hostFixture: { outgoing: Array<Record<string, unknown>> }
     }).__hostFixture
     return fixture.outgoing.filter((message) => message.type === 'askClaude')
-  })).toEqual([{ protocolVersion: 1, type: 'askClaude', context: '', question: expectedQuestion }])
+  })).toEqual([{ protocolVersion: 1, type: 'askClaude', context: expectedContext, question: expectedQuestion }])
 
   const chat = page.getByRole('region', { name: 'Chat' })
   const body = page.getByTestId('review-scroll-body')
@@ -108,9 +121,9 @@ test('Verify with AI keeps review, chat, and footer usable in a constrained view
   await expect(body).toBeVisible()
   await expect(savedButton).toBeVisible()
   await expect(page.getByRole('textbox', { name: 'Ask about this pull request' })).toBeVisible()
-  await expect(page.getByTestId('chat-messages')).toContainText('Verify this review comment on src/auth.ts line 2:')
-  await expect(page.getByTestId('chat-messages')).toContainText('Explain this security behavior.')
-  await expect(page.getByTestId('chat-messages')).toContainText('Is this issue actually present in the diff?')
+  await expect(page.getByTestId('chat-messages')).toContainText('Verify whether this draft review comment is supported by the provided context.')
+  await expect(page.getByTestId('chat-messages')).toContainText('Verdict: valid | invalid | unclear')
+  await expect(page.getByTestId('chat-messages')).toContainText('Action: keep | revise | delete')
 
   const geometry = await Promise.all([body.boundingBox(), chatPanel.boundingBox(), savedButton.boundingBox()])
   expect(geometry.every((box) => box !== null)).toBe(true)
@@ -152,6 +165,38 @@ test('wide tall Verify layout fills the viewport instead of collapsing to conten
   expect(bodyBox!.height).toBeGreaterThan(600)
   expect(savedBox!.y).toBeGreaterThan(1_100)
   expect(savedBox!.y + savedBox!.height).toBeLessThanOrEqual(1_181)
+})
+
+test('Suggest fix with AI sends an example-fix prompt with focused diff context', async ({ page }) => {
+  await page.goto('/')
+  await openDraftReview(page)
+
+  await page.getByRole('button', { name: 'Suggest fix with AI' }).click()
+  const expectedQuestion =
+    'Generate an example code change that addresses this draft review comment using only the provided context.\n\n' +
+    'Respond with:\n' +
+    '- Approach: 1-2 concise bullets\n' +
+    '- Example patch: one fenced code block\n' +
+    '- Why this helps: cite the changed lines\n' +
+    '- Risks/assumptions\n' +
+    '- Test updates (if applicable)\n' +
+    'If the context is insufficient, say so explicitly instead of guessing and list what is missing.'
+  const expectedContext =
+    'Draft review comment requiring an example fix:\n' +
+    'File: src/auth.ts\n' +
+    'Line: 2\n' +
+    'Type: issue\n' +
+    'Comment text: Explain this security behavior.\n' +
+    'Relevant diff excerpt:\n' +
+    '@@ -1,1 +1,2 @@\n' +
+    'export const ready = true\n' +
+    'export const accessible = true'
+  await expect.poll(() => page.evaluate(() => {
+    const fixture = (window as unknown as {
+      __hostFixture: { outgoing: Array<Record<string, unknown>> }
+    }).__hostFixture
+    return fixture.outgoing.filter((message) => message.type === 'askClaude')
+  })).toEqual([{ protocolVersion: 1, type: 'askClaude', context: expectedContext, question: expectedQuestion }])
 })
 
 test('clicking the gutter + button adds a new inline comment', async ({ page }) => {

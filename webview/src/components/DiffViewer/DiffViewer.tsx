@@ -3,7 +3,7 @@ import remarkGfm from 'remark-gfm'
 import { Fragment, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { parseDiff, isDelete, isInsert } from 'react-diff-view'
 import type { ChangeData, FileData, HunkData } from 'react-diff-view'
-import { Check, ChevronDown, ChevronUp, Pencil, Plus, Search, ShieldCheck, Trash2, X } from 'lucide-react'
+import { Check, ChevronDown, ChevronUp, Pencil, Plus, Search, ShieldCheck, Sparkles, Trash2, X } from 'lucide-react'
 import hljs from 'highlight.js/lib/core'
 import hljsBash from 'highlight.js/lib/languages/bash'
 import hljsCss from 'highlight.js/lib/languages/css'
@@ -90,8 +90,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import type { LineComment } from '@/bridge/types'
 import { cn } from '@/lib/utils'
-import type { LineComment } from '../../bridge/types'
+import {
+  buildDiffFileNavItems,
+  buildDiffFileTree,
+  displayPathForFile,
+  findActiveFileIndex,
+  type DiffFileTreeNode,
+} from './fileNavigation'
 import './DiffViewer.css'
 
 const MAX_CHANGES = 500
@@ -104,6 +111,7 @@ interface Props {
   onDeleteComment?: (idx: number) => void
   onAddComment?: (comment: LineComment) => void
   onVerifyComment?: (comment: LineComment) => void
+  onSuggestFixComment?: (comment: LineComment) => void
 }
 
 type IndexedComment = { comment: LineComment; globalIdx: number }
@@ -155,6 +163,7 @@ export function DiffViewer({
   onDeleteComment,
   onAddComment,
   onVerifyComment,
+  onSuggestFixComment,
 }: Props) {
   const t = useI18n()
   const [pendingNew, setPendingNew] = useState<PendingNew | null>(null)
@@ -165,6 +174,11 @@ export function DiffViewer({
   const [matchCount, setMatchCount] = useState(0)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const toolbarRef = useRef<HTMLDivElement>(null)
+  const sectionRefs = useRef<Map<string, HTMLElement>>(new Map())
+  const scrollParentRef = useRef<HTMLElement | null>(null)
+  const [activeFilePath, setActiveFilePath] = useState('')
+  const [pendingScrollPath, setPendingScrollPath] = useState<string | null>(null)
 
   const openSearch = useCallback(() => {
     setSearchOpen(true)
@@ -242,6 +256,77 @@ export function DiffViewer({
     : files
 
   const byFile = groupComments(comments)
+  const allNavItems = useMemo(() => buildDiffFileNavItems(files, comments), [files, comments])
+  const visibleNavItems = useMemo(() => buildDiffFileNavItems(visibleFiles, comments), [visibleFiles, comments])
+  const fileTree = useMemo(() => buildDiffFileTree(allNavItems), [allNavItems])
+
+  const updateActiveFile = useCallback(() => {
+    if (visibleNavItems.length === 0) return
+    const rootTop = scrollParentRef.current?.getBoundingClientRect().top ?? 0
+    const stickyOffset = (toolbarRef.current?.getBoundingClientRect().height ?? 0) + 12
+    const sectionOffsets = visibleNavItems.map((item) => {
+      const section = sectionRefs.current.get(item.displayPath)
+      if (!section) return Number.POSITIVE_INFINITY
+      return section.getBoundingClientRect().top - rootTop
+    })
+    const nextItem = visibleNavItems[findActiveFileIndex(sectionOffsets, stickyOffset)]
+    if (nextItem) setActiveFilePath((current) => (current === nextItem.displayPath ? current : nextItem.displayPath))
+  }, [visibleNavItems])
+
+  const scrollToFile = useCallback((displayPath: string) => {
+    const section = sectionRefs.current.get(displayPath)
+    if (!section) return false
+    section.scrollIntoView({ behavior: scrollBehavior(), block: 'start' })
+    setActiveFilePath(displayPath)
+    return true
+  }, [])
+
+  const handleSelectFile = useCallback((displayPath: string) => {
+    const isVisible = visibleNavItems.some((item) => item.displayPath === displayPath)
+    setActiveFilePath(displayPath)
+    if (!isVisible && truncating) {
+      setPendingScrollPath(displayPath)
+      startTransition(() => setShowAll(true))
+      return
+    }
+    setPendingScrollPath(null)
+    scrollToFile(displayPath)
+  }, [scrollToFile, truncating, visibleNavItems])
+
+  useEffect(() => {
+    setActiveFilePath((current) => {
+      if (visibleNavItems.length === 0) return ''
+      return visibleNavItems.some((item) => item.displayPath === current)
+        ? current
+        : visibleNavItems[0].displayPath
+    })
+  }, [visibleNavItems])
+
+  useEffect(() => {
+    if (!pendingScrollPath) return
+    if (scrollToFile(pendingScrollPath)) setPendingScrollPath(null)
+  }, [pendingScrollPath, scrollToFile, visibleFiles])
+
+  useEffect(() => {
+    const scrollParent = findScrollParent(containerRef.current)
+    scrollParentRef.current = scrollParent
+    if (!scrollParent) return
+
+    let frame = 0
+    const scheduleUpdate = () => {
+      cancelAnimationFrame(frame)
+      frame = window.requestAnimationFrame(updateActiveFile)
+    }
+
+    scheduleUpdate()
+    scrollParent.addEventListener('scroll', scheduleUpdate, { passive: true })
+    window.addEventListener('resize', scheduleUpdate)
+    return () => {
+      cancelAnimationFrame(frame)
+      scrollParent.removeEventListener('scroll', scheduleUpdate)
+      window.removeEventListener('resize', scheduleUpdate)
+    }
+  }, [updateActiveFile])
 
   useEffect(() => {
     if (focusedCommentIdx === undefined) return
@@ -258,84 +343,211 @@ export function DiffViewer({
 
   if (files.length === 0) return null
 
+  const activeFile = allNavItems.find((item) => item.displayPath === activeFilePath)
+    ?? visibleNavItems.find((item) => item.displayPath === activeFilePath)
+    ?? allNavItems[0]
+  const activeFileIndex = activeFile ? allNavItems.findIndex((item) => item.displayPath === activeFile.displayPath) : 0
+
   return (
     <TooltipProvider delayDuration={400}>
       <div ref={containerRef} className="diff-viewer" tabIndex={-1}>
-        {!searchOpen && (
-          <div className="flex justify-end border-b border-border p-1">
-            <Button variant="ghost" size="sm" onClick={openSearch} aria-label="Find in diff" className="gap-1.5">
-              <Search className="h-3.5 w-3.5" /> Find
-            </Button>
+        <div className="diff-viewer__layout">
+          <nav className="diff-file-nav" aria-label="Changed files">
+            <div className="diff-file-nav__header">
+              <span>Changed files</span>
+              <span className="diff-file-nav__count">{allNavItems.length}</span>
+            </div>
+            <div className="diff-file-nav__body">
+              <ul className="diff-file-tree">
+                {fileTree.map((node) => (
+                  <FileTreeNodeView
+                    key={node.key}
+                    node={node}
+                    activeFilePath={activeFile?.displayPath ?? ''}
+                    onSelectFile={handleSelectFile}
+                  />
+                ))}
+              </ul>
+            </div>
+          </nav>
+
+          <div className="diff-viewer__content">
+            <div ref={toolbarRef} className="diff-viewer__toolbar">
+              <div className="diff-viewer__current-file" data-testid="diff-current-file">
+                <span className="diff-viewer__current-label">Viewing</span>
+                <span
+                  className="diff-viewer__current-path"
+                  data-testid="diff-current-file-path"
+                  title={activeFile?.displayPath ?? ''}
+                >
+                  {activeFile?.displayPath ?? '—'}
+                </span>
+                <span className="diff-viewer__current-count">
+                  {allNavItems.length > 0 ? `${activeFileIndex + 1}/${allNavItems.length}` : '0/0'}
+                </span>
+              </div>
+
+              {!searchOpen && (
+                <Button variant="ghost" size="sm" onClick={openSearch} aria-label="Find in diff" className="gap-1.5">
+                  <Search className="h-3.5 w-3.5" /> Find
+                </Button>
+              )}
+              {searchOpen && (
+                <div className="diff-search-bar">
+                  <Search className="w-3 h-3 text-muted-foreground shrink-0" />
+                  <input
+                    ref={searchInputRef}
+                    type="text"
+                    className="diff-search-input"
+                    placeholder="Find in diff…"
+                    aria-label={t('diff.search')}
+                    value={searchQuery}
+                    onChange={(e) => {
+                      setSearchQuery(e.target.value)
+                      setSearchCursor(0)
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') { e.stopPropagation(); closeSearch() }
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        if (matchCount > 0) setSearchCursor((c) => e.shiftKey ? (c - 1 + matchCount) % matchCount : (c + 1) % matchCount)
+                      }
+                    }}
+                  />
+                  <span className="diff-search-count">
+                    {searchQuery ? (matchCount === 0 ? 'No results' : `${Math.min(searchCursor + 1, matchCount)} / ${matchCount}`) : ''}
+                  </span>
+                  <Button variant="ghost" size="sm" className="h-6 w-6 p-0 text-muted-foreground" onClick={() => matchCount > 0 && setSearchCursor((c) => (c - 1 + matchCount) % matchCount)} disabled={matchCount === 0} aria-label="Previous match"><ChevronUp className="w-3 h-3" /></Button>
+                  <Button variant="ghost" size="sm" className="h-6 w-6 p-0 text-muted-foreground" onClick={() => matchCount > 0 && setSearchCursor((c) => (c + 1) % matchCount)} disabled={matchCount === 0} aria-label="Next match"><ChevronDown className="w-3 h-3" /></Button>
+                  <Button variant="ghost" size="sm" className="h-6 w-6 p-0 text-muted-foreground" onClick={closeSearch} aria-label="Close search"><X className="w-3 h-3" /></Button>
+                </div>
+              )}
+            </div>
+
+            {visibleFiles.map((file, fileIndex) => {
+              const displayPath = displayPathForFile(file)
+              const fileComments =
+                byFile.get(file.newPath) ??
+                byFile.get(file.oldPath) ??
+                findByPathSuffix(byFile, file.newPath) ??
+                new Map<number, IndexedComment[]>()
+              return (
+                <FileView
+                  key={`${file.oldRevision}-${file.newRevision}-${file.newPath}`}
+                  file={file}
+                  fileIndex={fileIndex}
+                  displayPath={displayPath}
+                  comments={fileComments}
+                  focusedCommentIdx={focusedCommentIdx}
+                  searchQuery={searchQuery}
+                  pendingNew={pendingNew?.file === displayPath ? pendingNew : undefined}
+                  onSectionRef={(element) => {
+                    if (element) sectionRefs.current.set(displayPath, element)
+                    else sectionRefs.current.delete(displayPath)
+                  }}
+                  onLineClick={onAddComment ? ({ line, rowId }) => setPendingNew({ file: displayPath, line, rowId }) : undefined}
+                  onPendingCancel={() => setPendingNew(null)}
+                  onPendingSave={(type, body) => {
+                    if (pendingNew) onAddComment?.({ file: pendingNew.file, line: pendingNew.line, type, body })
+                    setPendingNew(null)
+                  }}
+                  onEditComment={onEditComment}
+                  onDeleteComment={onDeleteComment}
+                  onVerifyComment={onVerifyComment}
+                  onSuggestFixComment={onSuggestFixComment}
+                />
+              )
+            })}
+            {truncating && (
+              <div className="flex items-center justify-between px-4 py-2 border-t border-border bg-card text-xs text-muted-foreground font-mono">
+                <span>Showing {MAX_CHANGES} of {totalChanges} changed lines</span>
+                <Button variant="outline" size="sm" className="h-6 text-xs" onClick={() => startTransition(() => setShowAll(true))}>
+                  Show full diff ↓
+                </Button>
+              </div>
+            )}
           </div>
-        )}
-        {searchOpen && (
-          <div className="diff-search-bar">
-            <Search className="w-3 h-3 text-muted-foreground shrink-0" />
-            <input
-              ref={searchInputRef}
-              type="text"
-              className="diff-search-input"
-              placeholder="Find in diff…"
-              aria-label={t('diff.search')}
-              value={searchQuery}
-              onChange={(e) => {
-                setSearchQuery(e.target.value)
-                setSearchCursor(0)
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Escape') { e.stopPropagation(); closeSearch() }
-                if (e.key === 'Enter') {
-                  e.preventDefault()
-                  if (matchCount > 0) setSearchCursor((c) => e.shiftKey ? (c - 1 + matchCount) % matchCount : (c + 1) % matchCount)
-                }
-              }}
-            />
-            <span className="diff-search-count">
-              {searchQuery ? (matchCount === 0 ? 'No results' : `${Math.min(searchCursor + 1, matchCount)} / ${matchCount}`) : ''}
-            </span>
-            <Button variant="ghost" size="sm" className="h-6 w-6 p-0 text-muted-foreground" onClick={() => matchCount > 0 && setSearchCursor((c) => (c - 1 + matchCount) % matchCount)} disabled={matchCount === 0} aria-label="Previous match"><ChevronUp className="w-3 h-3" /></Button>
-            <Button variant="ghost" size="sm" className="h-6 w-6 p-0 text-muted-foreground" onClick={() => matchCount > 0 && setSearchCursor((c) => (c + 1) % matchCount)} disabled={matchCount === 0} aria-label="Next match"><ChevronDown className="w-3 h-3" /></Button>
-            <Button variant="ghost" size="sm" className="h-6 w-6 p-0 text-muted-foreground" onClick={closeSearch} aria-label="Close search"><X className="w-3 h-3" /></Button>
-          </div>
-        )}
-        {visibleFiles.map((file) => {
-          const displayPath = file.newPath !== '/dev/null' ? file.newPath : file.oldPath
-          const fileComments =
-            byFile.get(file.newPath) ??
-            byFile.get(file.oldPath) ??
-            findByPathSuffix(byFile, file.newPath) ??
-            new Map<number, IndexedComment[]>()
-          return (
-            <FileView
-              key={`${file.oldRevision}-${file.newRevision}-${file.newPath}`}
-              file={file}
-              displayPath={displayPath}
-              comments={fileComments}
-              focusedCommentIdx={focusedCommentIdx}
-              searchQuery={searchQuery}
-              pendingNew={pendingNew?.file === displayPath ? pendingNew : undefined}
-              onLineClick={onAddComment ? ({ line, rowId }) => setPendingNew({ file: displayPath, line, rowId }) : undefined}
-              onPendingCancel={() => setPendingNew(null)}
-              onPendingSave={(type, body) => {
-                if (pendingNew) onAddComment?.({ file: pendingNew.file, line: pendingNew.line, type, body })
-                setPendingNew(null)
-              }}
-              onEditComment={onEditComment}
-              onDeleteComment={onDeleteComment}
-              onVerifyComment={onVerifyComment}
-            />
-          )
-        })}
-        {truncating && (
-          <div className="flex items-center justify-between px-4 py-2 border-t border-border bg-card text-xs text-muted-foreground font-mono">
-            <span>Showing {MAX_CHANGES} of {totalChanges} changed lines</span>
-            <Button variant="outline" size="sm" className="h-6 text-xs" onClick={() => startTransition(() => setShowAll(true))}>
-              Show full diff ↓
-            </Button>
-          </div>
-        )}
+        </div>
       </div>
     </TooltipProvider>
+  )
+}
+
+function findScrollParent(node: HTMLElement | null): HTMLElement | null {
+  let current = node?.parentElement ?? null
+  while (current) {
+    const style = window.getComputedStyle(current)
+    if (/(auto|scroll)/.test(style.overflowY)) return current
+    current = current.parentElement
+  }
+  return null
+}
+
+function statusAbbreviation(status: string): string {
+  switch (status) {
+    case 'add':
+      return 'A'
+    case 'delete':
+      return 'D'
+    case 'rename':
+      return 'R'
+    case 'copy':
+      return 'C'
+    default:
+      return 'M'
+  }
+}
+
+function folderLabel(node: DiffFileTreeNode): string {
+  const parts = node.name.split('/')
+  if (parts.length <= 2) return node.name
+  return `${parts[0]}/.../${parts[parts.length - 1]}`
+}
+
+function FileTreeNodeView({
+  node,
+  activeFilePath,
+  onSelectFile,
+}: {
+  node: DiffFileTreeNode
+  activeFilePath: string
+  onSelectFile: (displayPath: string) => void
+}) {
+  if (node.file) {
+    return (
+      <li>
+        <button
+          type="button"
+          className={cn('diff-file-tree__file', node.file.displayPath === activeFilePath && 'diff-file-tree__file--active')}
+          onClick={() => onSelectFile(node.file!.displayPath)}
+          aria-label={node.file.displayPath}
+          aria-current={node.file.displayPath === activeFilePath ? 'location' : undefined}
+          title={node.file.displayPath}
+        >
+          <span className={cn('diff-file-tree__status', `diff-file-tree__status--${node.file.status}`)} aria-hidden="true">
+            {statusAbbreviation(node.file.status)}
+          </span>
+          <span className="diff-file-tree__label">{node.name}</span>
+          {node.file.commentCount > 0 && <span className="diff-file-tree__meta">{node.file.commentCount}</span>}
+        </button>
+      </li>
+    )
+  }
+
+  return (
+    <li>
+      <div className="diff-file-tree__folder" title={node.name}>{folderLabel(node)}</div>
+      <ul className="diff-file-tree__children">
+        {node.children.map((child) => (
+          <FileTreeNodeView
+            key={child.key}
+            node={child}
+            activeFilePath={activeFilePath}
+            onSelectFile={onSelectFile}
+          />
+        ))}
+      </ul>
+    </li>
   )
 }
 
@@ -343,35 +555,47 @@ export function DiffViewer({
 
 interface FileViewProps {
   file: FileData
+  fileIndex: number
   displayPath: string
   comments: LineCommentMap
   focusedCommentIdx?: number
   searchQuery?: string
   pendingNew?: PendingNew
+  onSectionRef: (element: HTMLElement | null) => void
   onLineClick?: (target: { line: number; rowId: string }) => void
   onPendingCancel: () => void
   onPendingSave: (type: LineComment['type'], body: string) => void
   onEditComment?: (idx: number, body: string) => void
   onDeleteComment?: (idx: number) => void
   onVerifyComment?: (comment: LineComment) => void
+  onSuggestFixComment?: (comment: LineComment) => void
 }
 
 function FileView({
   file,
+  fileIndex,
   displayPath,
   comments,
   focusedCommentIdx,
   searchQuery,
   pendingNew,
+  onSectionRef,
   onLineClick,
   onPendingCancel,
   onPendingSave,
   onEditComment,
   onDeleteComment,
   onVerifyComment,
+  onSuggestFixComment,
 }: FileViewProps) {
   return (
-    <section className="diff-file" aria-labelledby={`diff-file-${CSS.escape(displayPath)}`}>
+    <section
+      ref={onSectionRef}
+      className="diff-file"
+      data-testid={`diff-file-section-${fileIndex}`}
+      data-file-path={displayPath}
+      aria-labelledby={`diff-file-${CSS.escape(displayPath)}`}
+    >
       <div className="diff-file__header">
         <h3 id={`diff-file-${CSS.escape(displayPath)}`} className="diff-file__path">{displayPath}</h3>
         {file.type !== 'modify' && (
@@ -397,6 +621,7 @@ function FileView({
               onEditComment={onEditComment}
               onDeleteComment={onDeleteComment}
               onVerifyComment={onVerifyComment}
+              onSuggestFixComment={onSuggestFixComment}
             />
           ))}
         </tbody>
@@ -420,6 +645,7 @@ interface HunkRowsProps {
   onEditComment?: (idx: number, body: string) => void
   onDeleteComment?: (idx: number) => void
   onVerifyComment?: (comment: LineComment) => void
+  onSuggestFixComment?: (comment: LineComment) => void
 }
 
 function HunkRows({
@@ -435,6 +661,7 @@ function HunkRows({
   onEditComment,
   onDeleteComment,
   onVerifyComment,
+  onSuggestFixComment,
 }: HunkRowsProps) {
   const highlighted = useMemo(
     () => hunk.changes.map((c) => syntaxHighlight(c.content, filePath)),
@@ -498,6 +725,7 @@ function HunkRows({
                 onEdit={onEditComment ? (body) => onEditComment(globalIdx, body) : undefined}
                 onDelete={onDeleteComment ? () => onDeleteComment(globalIdx) : undefined}
                 onVerify={onVerifyComment ? () => onVerifyComment(comment) : undefined}
+                onSuggestFix={onSuggestFixComment ? () => onSuggestFixComment(comment) : undefined}
               />
             ))}
 
@@ -539,9 +767,10 @@ interface InlineCommentRowProps {
   onEdit?: (body: string) => void
   onDelete?: () => void
   onVerify?: () => void
+  onSuggestFix?: () => void
 }
 
-function InlineCommentRow({ comment, globalIdx, focused, onEdit, onDelete, onVerify }: InlineCommentRowProps) {
+function InlineCommentRow({ comment, globalIdx, focused, onEdit, onDelete, onVerify, onSuggestFix }: InlineCommentRowProps) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(comment.body)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -608,7 +837,7 @@ function InlineCommentRow({ comment, globalIdx, focused, onEdit, onDelete, onVer
                 {comment.rationale && <TooltipContent side="top" className="max-w-xs">{comment.rationale}</TooltipContent>}
               </Tooltip>
             )}
-            {(onVerify || onEdit || onDelete) && !editing && (
+            {(onVerify || onSuggestFix || onEdit || onDelete) && !editing && (
               <div className="flex items-center gap-1">
                 {onVerify && (
                   <Tooltip>
@@ -624,6 +853,22 @@ function InlineCommentRow({ comment, globalIdx, focused, onEdit, onDelete, onVer
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent side="top">Verify with AI</TooltipContent>
+                  </Tooltip>
+                )}
+                {onSuggestFix && comment.type !== 'note' && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 w-6 p-0 text-muted-foreground hover:text-primary"
+                        onClick={onSuggestFix}
+                        aria-label="Suggest fix with AI"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">Suggest fix with AI</TooltipContent>
                   </Tooltip>
                 )}
                 {onEdit && (
