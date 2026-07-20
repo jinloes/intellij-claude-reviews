@@ -128,6 +128,21 @@ class PluginSettingsTest {
     }
 
     @Test
+    void copilotAutoEnableMcpOnReviewDefaultsToFalse() {
+        PluginSettings s = new PluginSettings();
+        assertThat(s.isCopilotAutoEnableMcpOnReview()).isFalse();
+    }
+
+    @Test
+    void copilotAutoEnableMcpOnReviewRoundTrips() {
+        PluginSettings s = new PluginSettings();
+        s.setCopilotAutoEnableMcpOnReview(true);
+        assertThat(s.isCopilotAutoEnableMcpOnReview()).isTrue();
+        s.setCopilotAutoEnableMcpOnReview(false);
+        assertThat(s.isCopilotAutoEnableMcpOnReview()).isFalse();
+    }
+
+    @Test
     void reviewFocusAreasDefaultsToEmptyAndTrims() {
         PluginSettings s = new PluginSettings();
         assertThat(s.getReviewFocusAreas()).isEmpty();

@@ -40,6 +40,7 @@ export interface SettingsState {
     reviewEffort: string;
     githubBaseUrl: string;
     copilotInheritMcp: boolean;
+    copilotAutoEnableMcpOnReview: boolean;
     copilotConfigDir: string;
     reviewFocusAreas: string;
     reviewCustomInstructions: string;
@@ -211,6 +212,8 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
       <div class="field" id="mcpField">
         <label><input type="checkbox" id="inheritMcp" style="width:auto;margin-right:6px;">Allow MCP tools for untrusted PR content (advanced)</label>
         <div class="hint">Capability elevation: MCP tools discovered from user and repository configuration may access external systems while Copilot processes pull-request content. Disabled by default.</div>
+        <label style="margin-top:8px;"><input type="checkbox" id="reviewAutoEnableMcp" style="width:auto;margin-right:6px;">Always enable MCP when generating Copilot reviews (opt-in)</label>
+        <div class="hint">Review-only override. Chat still follows the general MCP toggle above.</div>
         <label for="copilotConfigDir" style="margin-top:8px;">Copilot config directory override</label>
         <input type="text" id="copilotConfigDir" aria-describedby="copilotConfigDirHint" placeholder="Empty uses ~/.copilot">
         <div class="hint" id="copilotConfigDirHint">Optional override of the Copilot config directory used to discover MCP servers.</div>
@@ -316,6 +319,7 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
   $('copilotModel').addEventListener('change', () => save('reviewModelCopilot', copilotModelValue()));
   $('effort').addEventListener('change', () => save('reviewEffort', $('effort').value));
   $('inheritMcp').addEventListener('change', () => save('copilotInheritMcp', $('inheritMcp').checked));
+  $('reviewAutoEnableMcp').addEventListener('change', () => save('copilotAutoEnableMcpOnReview', $('reviewAutoEnableMcp').checked));
   $('copilotConfigDir').addEventListener('change', () => save('copilotConfigDir', $('copilotConfigDir').value.trim()));
   $('baseUrl').addEventListener('change', () => save('githubBaseUrl', $('baseUrl').value.trim()));
   $('focusAreas').addEventListener('change', () => save('reviewFocusAreas', $('focusAreas').value.trim()));
@@ -357,6 +361,7 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
       $('effort').value = state.reviewEffort;
       $('baseUrl').value = state.githubBaseUrl;
       $('inheritMcp').checked = state.copilotInheritMcp === true;
+      $('reviewAutoEnableMcp').checked = state.copilotAutoEnableMcpOnReview === true;
       $('copilotConfigDir').value = state.copilotConfigDir || '';
       $('focusAreas').value = state.reviewFocusAreas || '';
       $('customInstructions').value = state.reviewCustomInstructions || '';

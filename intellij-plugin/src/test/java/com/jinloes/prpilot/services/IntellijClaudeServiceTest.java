@@ -10,6 +10,25 @@ import org.junit.jupiter.api.Test;
 class IntellijClaudeServiceTest {
 
     @Nested
+    class ResolveReviewInheritMcp {
+
+        @Test
+        void staysDisabledByDefault() {
+            assertThat(IntellijClaudeService.resolveReviewInheritMcp(false, false)).isFalse();
+        }
+
+        @Test
+        void keepsExplicitInheritanceEnabled() {
+            assertThat(IntellijClaudeService.resolveReviewInheritMcp(true, false)).isTrue();
+        }
+
+        @Test
+        void enablesMcpForReviewWhenOptInIsSet() {
+            assertThat(IntellijClaudeService.resolveReviewInheritMcp(false, true)).isTrue();
+        }
+    }
+
+    @Nested
     class FriendlyMessage {
 
         @Test

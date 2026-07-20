@@ -59,6 +59,12 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
         public boolean copilotInheritMcp = false;
 
         /**
+         * When true, Copilot review generation always enables MCP even if the general inheritance
+         * toggle is off. This is review-only; chat still follows {@code copilotInheritMcp}.
+         */
+        public boolean copilotAutoEnableMcpOnReview = false;
+
+        /**
          * Optional override of the Copilot config directory used to discover MCP servers. Empty
          * uses the CLI default ({@code ~/.copilot}). Only applied when {@code reviewProvider} is
          * COPILOT.
@@ -194,6 +200,14 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
 
     public void setCopilotInheritMcp(boolean inherit) {
         myState.copilotInheritMcp = inherit;
+    }
+
+    public boolean isCopilotAutoEnableMcpOnReview() {
+        return myState.copilotAutoEnableMcpOnReview;
+    }
+
+    public void setCopilotAutoEnableMcpOnReview(boolean enabled) {
+        myState.copilotAutoEnableMcpOnReview = enabled;
     }
 
     public String getCopilotConfigDir() {

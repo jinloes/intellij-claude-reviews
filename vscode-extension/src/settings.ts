@@ -26,6 +26,7 @@ function readState(): SettingsState {
         reviewEffort: c.get<string>('reviewEffort', 'medium'),
         githubBaseUrl: c.get<string>('githubBaseUrl', 'https://github.com'),
         copilotInheritMcp: c.get<boolean>('copilotInheritMcp', false),
+        copilotAutoEnableMcpOnReview: c.get<boolean>('copilotAutoEnableMcpOnReview', false),
         copilotConfigDir: c.get<string>('copilotConfigDir', ''),
         reviewFocusAreas: c.get<string>('reviewFocusAreas', ''),
         reviewCustomInstructions: c.get<string>('reviewCustomInstructions', ''),
@@ -38,11 +39,18 @@ function readState(): SettingsState {
 
 const ALLOWED_KEYS = new Set([
     'reviewProvider', 'reviewModel', 'reviewModelCopilot', 'reviewEffort', 'githubBaseUrl',
-    'copilotInheritMcp', 'copilotConfigDir', 'reviewFocusAreas', 'reviewCustomInstructions',
+    'copilotInheritMcp', 'copilotAutoEnableMcpOnReview', 'copilotConfigDir', 'reviewFocusAreas',
+    'reviewCustomInstructions',
     'notificationsEnabled', 'notifyReviewRequested', 'notifyStarredRepos', 'notificationPollMinutes',
 ]);
 
-const BOOLEAN_KEYS = new Set(['copilotInheritMcp', 'notificationsEnabled', 'notifyReviewRequested', 'notifyStarredRepos']);
+const BOOLEAN_KEYS = new Set([
+    'copilotInheritMcp',
+    'copilotAutoEnableMcpOnReview',
+    'notificationsEnabled',
+    'notifyReviewRequested',
+    'notifyStarredRepos',
+]);
 
 /** Opens (or reveals) the PR Pilot settings webview panel. */
 export function openSettings(context: vscode.ExtensionContext): void {

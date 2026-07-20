@@ -152,6 +152,11 @@
           "default": false,
           "description": "Advanced capability elevation. When enabled, Copilot may call MCP tools discovered from the CLI and repository configuration while processing untrusted pull-request content. Disabled by default."
         },
+        "pr-pilot.copilotAutoEnableMcpOnReview": {
+          "type": "boolean",
+          "default": false,
+          "description": "Review-only opt-in. When enabled, Copilot review generation always enables MCP tool access even if `pr-pilot.copilotInheritMcp` is off. Chat continues to follow `pr-pilot.copilotInheritMcp`."
+        },
         "pr-pilot.copilotConfigDir": {
           "type": "string",
           "default": "",

@@ -55,6 +55,8 @@ public class PluginSettingsComponent {
     private final JComboBox<String> copilotEffortCombo = new JComboBox<>(COPILOT_EFFORTS);
     private final JCheckBox copilotInheritMcpBox =
             new JCheckBox("Allow MCP tools for untrusted PR content (advanced)");
+    private final JCheckBox copilotAutoEnableMcpOnReviewBox =
+            new JCheckBox("Always enable MCP when generating Copilot reviews (opt-in)");
     private final JBTextField copilotConfigDirField = new JBTextField();
     private final JBTextField reviewFocusAreasField = new JBTextField();
     private final JBTextArea reviewCustomInstructionsArea = new JBTextArea(3, 0);
@@ -158,6 +160,7 @@ public class PluginSettingsComponent {
                         .addLabeledComponent(
                                 new JBLabel("Reasoning effort:"), effortRowPanel, 1, false)
                         .addComponent(copilotInheritMcpBox, 1)
+                        .addComponent(copilotAutoEnableMcpOnReviewBox, 1)
                         .addLabeledComponent(
                                 new JBLabel("Copilot config dir:"), copilotConfigDirField, 1, false)
                         .addComponent(mcpHint, 1)
@@ -341,6 +344,14 @@ public class PluginSettingsComponent {
         return copilotConfigDirField.getText().trim();
     }
 
+    public boolean isCopilotAutoEnableMcpOnReview() {
+        return copilotAutoEnableMcpOnReviewBox.isSelected();
+    }
+
+    public void setCopilotAutoEnableMcpOnReview(boolean v) {
+        copilotAutoEnableMcpOnReviewBox.setSelected(v);
+    }
+
     public void setCopilotConfigDir(String dir) {
         copilotConfigDirField.setText(dir != null ? dir : "");
     }
@@ -374,6 +385,7 @@ public class PluginSettingsComponent {
         advancedCopilotPanel.setVisible(copilotProvider && showAdvanced);
         copilotEffortCombo.setEnabled(copilotProvider);
         copilotInheritMcpBox.setEnabled(copilotProvider);
+        copilotAutoEnableMcpOnReviewBox.setEnabled(copilotProvider);
         copilotConfigDirField.setEnabled(copilotProvider);
     }
 

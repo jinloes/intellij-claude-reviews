@@ -19,6 +19,40 @@ import java.util.function.Consumer;
  */
 public class IntellijClaudeService {
 
+    @FunctionalInterface
+    private interface CheckedRunnable {
+        void run() throws Exception;
+    }
+
+    @FunctionalInterface
+    private interface CheckedSupplier<T> {
+        T get() throws Exception;
+    }
+
+    private static final class RuntimeSettings {
+        private final ReviewProvider provider;
+        private final String model;
+        private final String effort;
+        private final boolean inheritMcp;
+        private final boolean forceMcpOnReview;
+        private final String configDir;
+
+        private RuntimeSettings(
+                ReviewProvider provider,
+                String model,
+                String effort,
+                boolean inheritMcp,
+                boolean forceMcpOnReview,
+                String configDir) {
+            this.provider = provider;
+            this.model = model;
+            this.effort = effort;
+            this.inheritMcp = inheritMcp;
+            this.forceMcpOnReview = forceMcpOnReview;
+            this.configDir = configDir;
+        }
+    }
+
     private final ClaudeService claude;
     private final CopilotService copilot;
 
@@ -46,47 +80,30 @@ public class IntellijClaudeService {
             BiConsumer<String, String> onChunk,
             Consumer<ReviewResult> onComplete,
             Consumer<String> onError) {
-        PluginSettings settings = PluginSettings.getInstance();
-        ReviewProvider provider = settings.getReviewProvider();
-        String model = settings.getActiveReviewModel();
-        String effort = settings.getReviewEffort();
-        boolean inheritMcp = settings.isCopilotInheritMcp();
-        String configDir = settings.getCopilotConfigDir();
-        ApplicationManager.getApplication()
-                .executeOnPooledThread(
-                        () -> {
-                            try {
-                                BiConsumer<String, String> wrappedChunk =
-                                        onChunk == null
-                                                ? null
-                                                : (kind, chunk) ->
-                                                        invokeLater(
-                                                                () -> onChunk.accept(kind, chunk));
-                                Consumer<String> wrappedStatus =
-                                        status -> invokeLater(() -> onStatus.accept(status));
-                                ReviewResult result =
-                                        provider == ReviewProvider.COPILOT
-                                                ? copilot.reviewPR(
-                                                        request,
-                                                        model,
-                                                        effort,
-                                                        wrappedStatus,
-                                                        wrappedChunk,
-                                                        inheritMcp,
-                                                        configDir)
-                                                : claude.reviewPR(
-                                                        request,
-                                                        model,
-                                                        wrappedStatus,
-                                                        wrappedChunk);
-                                invokeLater(() -> onComplete.accept(result));
-                            } catch (InterruptedException e) {
-                                Thread.currentThread().interrupt();
-                                invokeLater(() -> onError.accept("Review interrupted."));
-                            } catch (Exception e) {
-                                invokeLater(() -> onError.accept(friendlyMessage(provider, e)));
-                            }
-                        });
+        RuntimeSettings settings = readRuntimeSettings();
+        Consumer<String> wrappedStatus = wrapCallback(onStatus);
+        BiConsumer<String, String> wrappedChunk = wrapChunkCallback(onChunk);
+        runOnPooledThread(
+                settings.provider,
+                "Review interrupted.",
+                onError,
+                () ->
+                        settings.provider == ReviewProvider.COPILOT
+                                ? copilot.reviewPR(
+                                        request,
+                                        settings.model,
+                                        settings.effort,
+                                        wrappedStatus,
+                                        wrappedChunk,
+                                        resolveReviewInheritMcp(
+                                                settings.inheritMcp, settings.forceMcpOnReview),
+                                        settings.configDir)
+                                : claude.reviewPR(
+                                        request,
+                                        settings.model,
+                                        wrappedStatus,
+                                        wrappedChunk),
+                onComplete);
     }
 
     public void chat(
@@ -96,40 +113,24 @@ public class IntellijClaudeService {
             Consumer<String> onChunk,
             Consumer<String> onDone,
             Consumer<String> onError) {
-        PluginSettings settings = PluginSettings.getInstance();
-        ReviewProvider provider = settings.getReviewProvider();
-        String effort = settings.getReviewEffort();
-        boolean inheritMcp = settings.isCopilotInheritMcp();
-        String configDir = settings.getCopilotConfigDir();
-        ApplicationManager.getApplication()
-                .executeOnPooledThread(
-                        () -> {
-                            try {
-                                Consumer<String> wrappedChunk =
-                                        chunk -> invokeLater(() -> onChunk.accept(chunk));
-                                String result =
-                                        provider == ReviewProvider.COPILOT
-                                                ? copilot.chat(
-                                                        prContext,
-                                                        history,
-                                                        userMessage,
-                                                        effort,
-                                                        wrappedChunk,
-                                                        inheritMcp,
-                                                        configDir)
-                                                : claude.chat(
-                                                        prContext,
-                                                        history,
-                                                        userMessage,
-                                                        wrappedChunk);
-                                invokeLater(() -> onDone.accept(result));
-                            } catch (InterruptedException e) {
-                                Thread.currentThread().interrupt();
-                                invokeLater(() -> onError.accept("Chat interrupted."));
-                            } catch (Exception e) {
-                                invokeLater(() -> onError.accept(friendlyMessage(provider, e)));
-                            }
-                        });
+        RuntimeSettings settings = readRuntimeSettings();
+        Consumer<String> wrappedChunk = wrapCallback(onChunk);
+        runOnPooledThread(
+                settings.provider,
+                "Chat interrupted.",
+                onError,
+                () ->
+                        settings.provider == ReviewProvider.COPILOT
+                                ? copilot.chat(
+                                        prContext,
+                                        history,
+                                        userMessage,
+                                        settings.effort,
+                                        wrappedChunk,
+                                        settings.inheritMcp,
+                                        settings.configDir)
+                                : claude.chat(prContext, history, userMessage, wrappedChunk),
+                onDone);
     }
 
     /**
@@ -143,35 +144,23 @@ public class IntellijClaudeService {
             Consumer<String> onChunk,
             Consumer<String> onDone,
             Consumer<String> onError) {
-        PluginSettings settings = PluginSettings.getInstance();
-        ReviewProvider provider = settings.getReviewProvider();
-        String effort = settings.getReviewEffort();
-        boolean inheritMcp = settings.isCopilotInheritMcp();
-        String configDir = settings.getCopilotConfigDir();
+        RuntimeSettings settings = readRuntimeSettings();
         String rawPrompt = ClaudeService.buildFocusedChatPrompt(focusedContext, question);
-        ApplicationManager.getApplication()
-                .executeOnPooledThread(
-                        () -> {
-                            try {
-                                Consumer<String> wrappedChunk =
-                                        chunk -> invokeLater(() -> onChunk.accept(chunk));
-                                String result =
-                                        provider == ReviewProvider.COPILOT
-                                                ? copilot.chatWithPrompt(
-                                                        rawPrompt,
-                                                        effort,
-                                                        wrappedChunk,
-                                                        inheritMcp,
-                                                        configDir)
-                                                : claude.chatWithPrompt(rawPrompt, wrappedChunk);
-                                invokeLater(() -> onDone.accept(result));
-                            } catch (InterruptedException e) {
-                                Thread.currentThread().interrupt();
-                                invokeLater(() -> onError.accept("Chat interrupted."));
-                            } catch (Exception e) {
-                                invokeLater(() -> onError.accept(friendlyMessage(provider, e)));
-                            }
-                        });
+        Consumer<String> wrappedChunk = wrapCallback(onChunk);
+        runOnPooledThread(
+                settings.provider,
+                "Chat interrupted.",
+                onError,
+                () ->
+                        settings.provider == ReviewProvider.COPILOT
+                                ? copilot.chatWithPrompt(
+                                        rawPrompt,
+                                        settings.effort,
+                                        wrappedChunk,
+                                        settings.inheritMcp,
+                                        settings.configDir)
+                                : claude.chatWithPrompt(rawPrompt, wrappedChunk),
+                onDone);
     }
 
     /** Cancels the currently running request on either backend. */
@@ -186,7 +175,65 @@ public class IntellijClaudeService {
         ApplicationManager.getApplication().invokeLater(r);
     }
 
+    private static Consumer<String> wrapCallback(Consumer<String> callback) {
+        return value -> invokeLater(() -> callback.accept(value));
+    }
+
+    private static BiConsumer<String, String> wrapChunkCallback(BiConsumer<String, String> callback) {
+        return callback == null ? null : (kind, chunk) -> invokeLater(() -> callback.accept(kind, chunk));
+    }
+
+    private static RuntimeSettings readRuntimeSettings() {
+        PluginSettings settings = PluginSettings.getInstance();
+        return new RuntimeSettings(
+                settings.getReviewProvider(),
+                settings.getActiveReviewModel(),
+                settings.getReviewEffort(),
+                settings.isCopilotInheritMcp(),
+                settings.isCopilotAutoEnableMcpOnReview(),
+                settings.getCopilotConfigDir());
+    }
+
+    private static <T> void runOnPooledThread(
+            ReviewProvider provider,
+            String interruptedMessage,
+            Consumer<String> onError,
+            CheckedSupplier<T> supplier,
+            Consumer<T> onSuccess) {
+        runOnPooledThread(
+                provider,
+                interruptedMessage,
+                onError,
+                () -> {
+                    T value = supplier.get();
+                    invokeLater(() -> onSuccess.accept(value));
+                });
+    }
+
+    private static void runOnPooledThread(
+            ReviewProvider provider,
+            String interruptedMessage,
+            Consumer<String> onError,
+            CheckedRunnable runnable) {
+        ApplicationManager.getApplication()
+                .executeOnPooledThread(
+                        () -> {
+                            try {
+                                runnable.run();
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                invokeLater(() -> onError.accept(interruptedMessage));
+                            } catch (Exception e) {
+                                invokeLater(() -> onError.accept(friendlyMessage(provider, e)));
+                            }
+                        });
+    }
+
     static String friendlyMessage(ReviewProvider provider, Exception e) {
         return UserFacingErrors.forProvider(provider, e, "generate response");
+    }
+
+    static boolean resolveReviewInheritMcp(boolean inheritMcp, boolean forceMcpOnReview) {
+        return inheritMcp || forceMcpOnReview;
     }
 }

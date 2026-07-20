@@ -35,6 +35,14 @@ export function permissionDecision(kind: string, allowMcp: boolean): PermissionR
     };
 }
 
+/**
+ * Resolves whether MCP should be enabled for Copilot review generation.
+ * `forceForReview` is an explicit opt-in that affects review only; chat still uses `inheritMcp`.
+ */
+export function resolveReviewInheritMcp(inheritMcp: boolean, forceForReview: boolean): boolean {
+    return inheritMcp || forceForReview;
+}
+
 // ── Binary resolution ──────────────────────────────────────────────────────────
 
 function findCopilotBinary(): string {

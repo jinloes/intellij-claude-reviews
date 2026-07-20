@@ -575,6 +575,10 @@ function copilotInheritMcp(): boolean {
     return config().get<boolean>('copilotInheritMcp', false);
 }
 
+function copilotAutoEnableMcpOnReview(): boolean {
+    return config().get<boolean>('copilotAutoEnableMcpOnReview', false);
+}
+
 function copilotConfigDir(): string {
     return config().get<string>('copilotConfigDir', '').trim();
 }
@@ -872,7 +876,10 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
                 model: reviewModel(),
                 effort: reviewEffort(),
                 workingDir: reviewDir,
-                inheritMcp: copilotInheritMcp(),
+                inheritMcp: copilot.resolveReviewInheritMcp(
+                    copilotInheritMcp(),
+                    copilotAutoEnableMcpOnReview(),
+                ),
                 configDir: copilotConfigDir(),
                 onStatus: (status) => push(state, { type: 'reviewGenerating', prKey: key, message: status }),
                 onChunk: (kind, chunk) => push(state, { type: 'reviewChunk', prKey: key, kind, chunk }),
