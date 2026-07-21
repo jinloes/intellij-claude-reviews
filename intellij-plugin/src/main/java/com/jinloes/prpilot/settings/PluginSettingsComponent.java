@@ -54,9 +54,9 @@ public class PluginSettingsComponent {
     private final JComboBox<String> copilotModelCombo = new JComboBox<>(COPILOT_MODEL_SUGGESTIONS);
     private final JComboBox<String> copilotEffortCombo = new JComboBox<>(COPILOT_EFFORTS);
     private final JCheckBox copilotInheritMcpBox =
-            new JCheckBox("Allow MCP tools for untrusted PR content (advanced)");
+            new JCheckBox("Allow MCP tools for untrusted PR content");
     private final JCheckBox copilotAutoEnableMcpOnReviewBox =
-            new JCheckBox("Always enable MCP when generating Copilot reviews (opt-in)");
+            new JCheckBox("Always enable MCP for Copilot reviews");
     private final JBTextField copilotConfigDirField = new JBTextField();
     private final JBTextField reviewFocusAreasField = new JBTextField();
     private final JBTextArea reviewCustomInstructionsArea = new JBTextArea(3, 0);
@@ -65,8 +65,8 @@ public class PluginSettingsComponent {
 
     private final JPanel modelComboPanel = new JPanel(new java.awt.CardLayout());
     private final JPanel copilotModelCard = new JPanel();
-    private final JCheckBox showAdvancedCopilotBox =
-            new JCheckBox("Show advanced Copilot settings");
+    private final JCheckBox showAdvancedCopilotBox = new JCheckBox("Show advanced Copilot options");
+    private final JPanel advancedCopilotSection = new JPanel();
     private final JPanel advancedCopilotPanel = new JPanel();
     private JPanel effortRowPanel;
 
@@ -108,10 +108,9 @@ public class PluginSettingsComponent {
         copilotModelCombo.setEditable(true);
         copilotModelCombo.setAlignmentX(Component.LEFT_ALIGNMENT);
         JLabel copilotHint =
-                new JBLabel(
+                hintLabel(
                         "<html><small>Auto-populated from <code>copilot help config</code>;"
                                 + " type any model ID to override.</small></html>");
-        copilotHint.setBorder(JBUI.Borders.emptyTop(2));
         // BoxLayout centers children unless told otherwise. Force LEFT_ALIGNMENT on every child of
         // copilotModelCard or the hint floats to the middle/right of the row.
         copilotHint.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -142,20 +141,28 @@ public class PluginSettingsComponent {
         effortRowPanel = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 4, 0));
         effortRowPanel.add(copilotEffortCombo);
         JLabel effortHint =
-                new JBLabel(
+                hintLabel(
                         "<html><small>Higher effort = deeper review, slower."
                                 + " Applies only to GitHub Copilot.</small></html>");
         effortRowPanel.add(effortHint);
 
         JLabel mcpHint =
-                new JBLabel(
-                        "<html><small>When enabled, the Copilot review/chat session inherits MCP"
-                                + " servers from <code>~/.copilot/mcp-config.json</code> and any"
-                                + " repo-local <code>.mcp.json</code>. Applies only to GitHub"
-                                + " Copilot.</small></html>");
-        mcpHint.setBorder(JBUI.Borders.emptyTop(2));
-        advancedCopilotPanel.setLayout(new BoxLayout(advancedCopilotPanel, BoxLayout.Y_AXIS));
-        advancedCopilotPanel.add(
+                hintLabel(
+                        "<html><small>When enabled, Copilot inherits MCP servers from"
+                                + " <code>~/.copilot/mcp-config.json</code> and any repo-local"
+                                + " <code>.mcp.json</code>.</small></html>");
+        // BoxLayout centers children by default (alignmentX 0.5) unless each child explicitly opts
+        // into LEFT_ALIGNMENT — every direct child added below needs it or the row floats to the
+        // middle of the form, which is what was happening to the "Show advanced" checkbox.
+        JLabel advancedHint =
+                hintLabel(
+                        "<html><small>Optional controls for reasoning depth, MCP access, and"
+                                + " Copilot config discovery.</small></html>");
+        advancedHint.setAlignmentX(Component.LEFT_ALIGNMENT);
+        showAdvancedCopilotBox.setAlignmentX(Component.LEFT_ALIGNMENT);
+        showAdvancedCopilotBox.addActionListener(e -> updateAdvancedCopilotOptionsVisibility());
+
+        JPanel advancedFormPanel =
                 FormBuilder.createFormBuilder()
                         .addLabeledComponent(
                                 new JBLabel("Reasoning effort:"), effortRowPanel, 1, false)
@@ -164,15 +171,23 @@ public class PluginSettingsComponent {
                         .addLabeledComponent(
                                 new JBLabel("Copilot config dir:"), copilotConfigDirField, 1, false)
                         .addComponent(mcpHint, 1)
-                        .getPanel());
-        showAdvancedCopilotBox.addActionListener(e -> updateAdvancedCopilotOptionsVisibility());
+                        .getPanel();
+        advancedFormPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        advancedCopilotPanel.setLayout(new BoxLayout(advancedCopilotPanel, BoxLayout.Y_AXIS));
+        advancedCopilotPanel.setBorder(JBUI.Borders.emptyTop(6));
+        advancedCopilotPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        advancedCopilotPanel.add(advancedFormPanel);
+
+        advancedCopilotSection.setLayout(new BoxLayout(advancedCopilotSection, BoxLayout.Y_AXIS));
+        advancedCopilotSection.add(showAdvancedCopilotBox);
+        advancedCopilotSection.add(advancedHint);
+        advancedCopilotSection.add(advancedCopilotPanel);
 
         JLabel note =
-                new JBLabel(
-                        "<html><small>Authentication is handled by the <b>gh</b> CLI.<br>"
-                                + "Run <code>gh auth login</code> in a terminal if not signed in.<br>"
-                                + "For GitHub Enterprise, change the Base URL to your company's GitHub host.</small></html>");
-        note.setBorder(JBUI.Borders.emptyTop(4));
+                hintLabel(
+                        "<html><small>Authentication uses the <b>gh</b> CLI. Run <code>gh auth login</code>"
+                                + " if needed. Change the base URL for GitHub Enterprise.</small></html>");
 
         JPanel statusPanel = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 6, 0));
         statusPanel.add(checkButton);
@@ -197,26 +212,25 @@ public class PluginSettingsComponent {
 
         mainPanel =
                 FormBuilder.createFormBuilder()
-                        .addLabeledComponent(
-                                new JBLabel("GitHub Base URL:"), baseUrlField, 1, false)
+                        .addComponent(sectionTitle("GitHub connection"), 1)
+                        .addLabeledComponent(new JBLabel("Base URL:"), baseUrlField, 1, false)
                         .addComponent(note, 1)
-                        .addSeparator(8)
                         .addComponent(statusPanel, 1)
                         .addSeparator(8)
+                        .addComponent(sectionTitle("Review settings"), 1)
                         .addLabeledComponent(
                                 new JBLabel("Review provider:"), providerCombo, 1, false)
                         .addLabeledComponent(
                                 new JBLabel("Review model:"), modelComboPanel, 1, false)
-                        .addComponent(showAdvancedCopilotBox, 1)
-                        .addComponent(advancedCopilotPanel, 1)
+                        .addComponent(advancedCopilotSection, 1)
                         .addSeparator(8)
+                        .addComponent(sectionTitle("Review defaults"), 1)
                         .addLabeledComponent(
                                 new JBLabel("Review focus areas:"), reviewFocusAreasField, 1, false)
                         .addComponent(
-                                new JBLabel(
-                                        "<html><small>Comma-separated areas to prioritize (e.g."
-                                                + " security, performance, test coverage)."
-                                                + "</small></html>"),
+                                hintLabel(
+                                        "<html><small>Comma-separated areas to prioritize (for example"
+                                                + " security, performance, or test coverage).</small></html>"),
                                 1)
                         .addLabeledComponent(
                                 new JBLabel("Custom review instructions:"),
@@ -224,11 +238,12 @@ public class PluginSettingsComponent {
                                 1,
                                 false)
                         .addComponent(
-                                new JBLabel(
+                                hintLabel(
                                         "<html><small>Extra instructions appended to every review"
-                                                + " prompt (e.g. team conventions).</small></html>"),
+                                                + " prompt, such as team conventions.</small></html>"),
                                 1)
                         .addSeparator(8)
+                        .addComponent(sectionTitle("Notifications"), 1)
                         .addComponent(notificationsEnabledBox, 1)
                         .addComponent(notifSubPanel, 1)
                         .addComponentFillVertically(new JPanel(), 0)
@@ -372,6 +387,18 @@ public class PluginSettingsComponent {
         reviewCustomInstructionsArea.setText(value != null ? value : "");
     }
 
+    private static JBLabel sectionTitle(String text) {
+        JBLabel label = new JBLabel("<html><b>" + text + "</b></html>");
+        label.setBorder(JBUI.Borders.emptyTop(8));
+        return label;
+    }
+
+    private static JBLabel hintLabel(String html) {
+        JBLabel label = new JBLabel(html);
+        label.setBorder(JBUI.Borders.emptyTop(2));
+        return label;
+    }
+
     private void updateActiveModelCombo() {
         ReviewProvider active = getReviewProvider();
         ((java.awt.CardLayout) modelComboPanel.getLayout()).show(modelComboPanel, active.getId());
@@ -381,7 +408,7 @@ public class PluginSettingsComponent {
     private void updateAdvancedCopilotOptionsVisibility() {
         boolean copilotProvider = getReviewProvider() == ReviewProvider.COPILOT;
         boolean showAdvanced = showAdvancedCopilotBox.isSelected();
-        showAdvancedCopilotBox.setVisible(copilotProvider);
+        advancedCopilotSection.setVisible(copilotProvider);
         advancedCopilotPanel.setVisible(copilotProvider && showAdvanced);
         copilotEffortCombo.setEnabled(copilotProvider);
         copilotInheritMcpBox.setEnabled(copilotProvider);

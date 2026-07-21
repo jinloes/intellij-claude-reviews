@@ -99,10 +99,7 @@ public class IntellijClaudeService {
                                                 settings.inheritMcp, settings.forceMcpOnReview),
                                         settings.configDir)
                                 : claude.reviewPR(
-                                        request,
-                                        settings.model,
-                                        wrappedStatus,
-                                        wrappedChunk),
+                                        request, settings.model, wrappedStatus, wrappedChunk),
                 onComplete);
     }
 
@@ -179,8 +176,11 @@ public class IntellijClaudeService {
         return value -> invokeLater(() -> callback.accept(value));
     }
 
-    private static BiConsumer<String, String> wrapChunkCallback(BiConsumer<String, String> callback) {
-        return callback == null ? null : (kind, chunk) -> invokeLater(() -> callback.accept(kind, chunk));
+    private static BiConsumer<String, String> wrapChunkCallback(
+            BiConsumer<String, String> callback) {
+        return callback == null
+                ? null
+                : (kind, chunk) -> invokeLater(() -> callback.accept(kind, chunk));
     }
 
     private static RuntimeSettings readRuntimeSettings() {

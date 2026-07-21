@@ -129,8 +129,10 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
 <style nonce="${nonce}">
   body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 16px 20px; font-size: 13px; }
   h1 { font-size: 16px; font-weight: 600; margin: 0 0 4px; }
-  p.sub { color: var(--vscode-descriptionForeground); margin: 0 0 20px; }
-  .field { margin-bottom: 18px; max-width: 560px; }
+  p.sub { color: var(--vscode-descriptionForeground); margin: 0 0 18px; }
+  .section { margin: 0 0 18px; max-width: 560px; }
+  .section-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: var(--vscode-descriptionForeground); margin: 0 0 10px; }
+  .field { margin-bottom: 14px; }
   label { display: block; font-weight: 600; margin-bottom: 4px; }
   .hint { color: var(--vscode-descriptionForeground); font-size: 12px; margin-top: 4px; }
   .status { min-height: 18px; margin: 0 0 14px; font-size: 12px; color: var(--vscode-descriptionForeground); }
@@ -154,8 +156,7 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
   button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
   .hidden { display: none; }
   details.advanced {
-    margin: 0 0 18px;
-    max-width: 560px;
+    margin: 0 0 8px;
     border: 1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent));
     border-radius: 4px;
     padding: 8px 10px;
@@ -173,82 +174,99 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
 </head>
 <body>
   <h1>PR Pilot Settings</h1>
-  <p class="sub">Changes are saved immediately to your User settings.</p>
+  <p class="sub">Changes are saved immediately to your User settings. Configure review provider, model, MCP access, and notifications from one page.</p>
   <div id="status" class="status" role="status" aria-live="polite"></div>
 
-  <div class="field">
-    <label for="provider">Review provider</label>
-    <select id="provider">
-      <option value="claude">Claude Code (claude CLI)</option>
-      <option value="copilot">GitHub Copilot (copilot CLI)</option>
-    </select>
-    <div class="hint">Backend CLI used to generate reviews and chat replies.</div>
-  </div>
+  <div class="section">
+    <div class="section-title">Review backend</div>
 
-  <div class="field" id="claudeModelField">
-    <label for="claudeModel">Claude review model</label>
-    <select id="claudeModel">${claudeOptions}</select>
-    <div class="hint">Model ID for the Claude CLI. "CLI default" leaves it unset.</div>
-  </div>
-
-  <div class="field hidden" id="copilotModelField">
-    <label for="copilotModel">Copilot review model</label>
-    <div class="row">
-      <select id="copilotModel"></select>
-      <button id="refreshModels" class="secondary" title="Re-probe available models">Refresh</button>
+    <div class="field">
+      <label for="provider">Provider</label>
+      <select id="provider">
+        <option value="claude">Claude Code (claude CLI)</option>
+        <option value="copilot">GitHub Copilot (copilot CLI)</option>
+      </select>
+      <div class="hint">Backend CLI used to generate reviews and chat replies.</div>
     </div>
-    <div class="hint">Pick a discovered model. Choose "CLI default" to use the Copilot CLI's own routing.</div>
-  </div>
 
-  <details id="advancedCopilot" class="advanced hidden">
-    <summary>Advanced Copilot settings</summary>
-    <div class="advanced-fields">
-      <div class="field" id="effortField">
-        <label for="effort">Reasoning effort (Copilot)</label>
-        <select id="effort">${effortOptions}</select>
-        <div class="hint">Higher = deeper review, slower. Applies only to GitHub Copilot.</div>
+    <div class="field" id="claudeModelField">
+      <label for="claudeModel">Claude model</label>
+      <select id="claudeModel">${claudeOptions}</select>
+      <div class="hint">Model ID for the Claude CLI. "CLI default" leaves it unset.</div>
+    </div>
+
+    <div class="field hidden" id="copilotModelField">
+      <label for="copilotModel">Copilot model</label>
+      <div class="row">
+        <select id="copilotModel"></select>
+        <button id="refreshModels" class="secondary" title="Re-probe available models">Refresh</button>
       </div>
+      <div class="hint">Pick a discovered model. Choose "CLI default" to use the Copilot CLI's own routing.</div>
+    </div>
 
-      <div class="field" id="mcpField">
-        <label><input type="checkbox" id="inheritMcp" style="width:auto;margin-right:6px;">Allow MCP tools for untrusted PR content (advanced)</label>
-        <div class="hint">Capability elevation: MCP tools discovered from user and repository configuration may access external systems while Copilot processes pull-request content. Disabled by default.</div>
-        <label style="margin-top:8px;"><input type="checkbox" id="reviewAutoEnableMcp" style="width:auto;margin-right:6px;">Always enable MCP when generating Copilot reviews (opt-in)</label>
-        <div class="hint">Review-only override. Chat still follows the general MCP toggle above.</div>
-        <label for="copilotConfigDir" style="margin-top:8px;">Copilot config directory override</label>
-        <input type="text" id="copilotConfigDir" aria-describedby="copilotConfigDirHint" placeholder="Empty uses ~/.copilot">
-        <div class="hint" id="copilotConfigDirHint">Optional override of the Copilot config directory used to discover MCP servers.</div>
+    <details id="advancedCopilot" class="advanced hidden">
+      <summary>Advanced Copilot options</summary>
+      <div class="hint">Optional controls for reasoning depth, MCP access, and Copilot config discovery.</div>
+      <div class="advanced-fields">
+        <div class="field" id="effortField">
+          <label for="effort">Reasoning effort</label>
+          <select id="effort">${effortOptions}</select>
+          <div class="hint">Higher = deeper review, slower. Applies only to GitHub Copilot.</div>
+        </div>
+
+        <div class="field" id="mcpField">
+          <label><input type="checkbox" id="inheritMcp" style="width:auto;margin-right:6px;">Allow MCP tools for untrusted PR content</label>
+          <div class="hint">Capability elevation: MCP tools from user and repository configuration may access external systems while Copilot processes pull-request content.</div>
+          <label style="margin-top:8px;"><input type="checkbox" id="reviewAutoEnableMcp" style="width:auto;margin-right:6px;">Always enable MCP for Copilot reviews</label>
+          <div class="hint">Review-only override. Chat still follows the general MCP toggle above.</div>
+          <label for="copilotConfigDir" style="margin-top:8px;">Copilot config directory</label>
+          <input type="text" id="copilotConfigDir" aria-describedby="copilotConfigDirHint" placeholder="Empty uses ~/.copilot">
+          <div class="hint" id="copilotConfigDirHint">Optional override of the Copilot config directory used to discover MCP servers.</div>
+        </div>
       </div>
+    </details>
+  </div>
+
+  <div class="section">
+    <div class="section-title">GitHub connection</div>
+
+    <div class="field">
+      <label for="baseUrl">GitHub base URL</label>
+      <div class="row">
+        <input type="text" id="baseUrl" placeholder="https://github.com">
+        <button id="testConnection" class="secondary" title="Verify gh authentication for this host">Test</button>
+      </div>
+      <div class="hint">Change for GitHub Enterprise (for example https://github.mycompany.com).</div>
     </div>
-  </details>
+  </div>
 
-  <div class="field">
-    <label for="baseUrl">GitHub base URL</label>
-    <div class="row">
-      <input type="text" id="baseUrl" placeholder="https://github.com">
-      <button id="testConnection" class="secondary" title="Verify gh authentication for this host">Test</button>
+  <div class="section">
+    <div class="section-title">Review defaults</div>
+
+    <div class="field">
+      <label for="focusAreas">Review focus areas</label>
+      <input type="text" id="focusAreas" placeholder="e.g. security, performance, test coverage">
+      <div class="hint">Comma-separated areas the reviewer should prioritize.</div>
     </div>
-    <div class="hint">Change for GitHub Enterprise (e.g. https://github.mycompany.com).</div>
+
+    <div class="field">
+      <label for="customInstructions">Custom review instructions</label>
+      <textarea id="customInstructions" rows="3" placeholder="Extra instructions appended to every review prompt (for example team conventions to enforce)."></textarea>
+      <div class="hint">Plain text. Use this for conventions or repeated review guidance.</div>
+    </div>
   </div>
 
-  <div class="field">
-    <label><input type="checkbox" id="notificationsEnabled" style="width:auto;margin-right:6px;">Enable background PR notifications</label>
-    <label><input type="checkbox" id="notifyReviewRequested" style="width:auto;margin-right:6px;">Notify when a review is requested from me</label>
-    <label><input type="checkbox" id="notifyStarredRepos" style="width:auto;margin-right:6px;">Notify for new PRs in starred repositories</label>
-    <label for="notificationPollMinutes">Notification polling interval (minutes)</label>
-    <input type="number" id="notificationPollMinutes" min="1" max="60" step="1">
-    <div class="hint">Notification changes apply to the next polling cycle.</div>
-  </div>
+  <div class="section">
+    <div class="section-title">Notifications</div>
 
-  <div class="field">
-    <label for="focusAreas">Review focus areas</label>
-    <input type="text" id="focusAreas" placeholder="e.g. security, performance, test coverage">
-    <div class="hint">Comma-separated areas the reviewer should prioritize. Sent to the model as steering context.</div>
-  </div>
-
-  <div class="field">
-    <label for="customInstructions">Custom review instructions</label>
-    <textarea id="customInstructions" rows="3" placeholder="Extra instructions appended to every review prompt (e.g. team conventions to enforce)."></textarea>
-    <div class="hint">Plain text. Follow team conventions or emphasize specific concerns.</div>
+    <div class="field">
+      <label><input type="checkbox" id="notificationsEnabled" style="width:auto;margin-right:6px;">Enable background PR notifications</label>
+      <label><input type="checkbox" id="notifyReviewRequested" style="width:auto;margin-right:6px;">Notify when a review is requested from me</label>
+      <label><input type="checkbox" id="notifyStarredRepos" style="width:auto;margin-right:6px;">Notify for new PRs in starred repositories</label>
+      <label for="notificationPollMinutes">Notification polling interval (minutes)</label>
+      <input type="number" id="notificationPollMinutes" min="1" max="60" step="1">
+      <div class="hint">Notification changes apply to the next polling cycle.</div>
+    </div>
   </div>
 
 <script nonce="${nonce}">

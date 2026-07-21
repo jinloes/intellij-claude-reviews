@@ -93,8 +93,13 @@ test('buildSettingsHtml restricts default-src and includes the cspSource for sty
 
 test('buildSettingsHtml renders both provider-specific model fields and the effort field', () => {
     const html = buildSettingsHtml('csp', 'n');
+    assert.match(html, /Review backend/);
+    assert.match(html, /GitHub connection/);
+    assert.match(html, /Review defaults/);
+    assert.match(html, /Notifications/);
     assert.match(html, /id="claudeModelField"/);
     assert.match(html, /id="copilotModelField"/);
+    assert.match(html, /Advanced Copilot options/);
     assert.match(html, /id="effortField"/);
     assert.match(html, /id="status"/);
     assert.match(html, /id="testConnection"/);
