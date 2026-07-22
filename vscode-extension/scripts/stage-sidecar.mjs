@@ -19,4 +19,3 @@ fs.rmSync(targetDir, { recursive: true, force: true });
 fs.mkdirSync(targetDir, { recursive: true });
 fs.copyFileSync(sourceJar, targetJar);
 console.log(`Staged sidecar jar into ${targetJar}`);
-

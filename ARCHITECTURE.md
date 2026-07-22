@@ -85,6 +85,9 @@ sidecar/                                – Java 17, non-web Spring Boot process
       ReviewParseResult.java            – Valid review or provider-safe validation error
     pr/
       PrSearchQueryService.java          – Pure normalized GitHub PR-search query construction
+    github/
+      GitHubAuthService.java              – Token-safe gh CLI and GitHub API authentication verification
+      CheckAuthResult.java                – Stable authentication diagnosis DTO
     repo/
       RepoDetector.java                  – Orchestrates git metadata discovery + origin parsing into owner/repo
       GitDirectoryResolver.java          – Resolves the git metadata dir; understands linked-worktree `.git` files
@@ -100,6 +103,7 @@ sidecar/                                – Java 17, non-web Spring Boot process
     StdioJsonRpcServerTest.java
     review/ReviewJsonParserTest.java
     pr/PrSearchQueryServiceTest.java
+    github/GitHubAuthServiceTest.java
     repo/RepoDetectorTest.java
     repo/RemoteUrlParserTest.java
 
@@ -144,7 +148,7 @@ vscode-extension/                      – VS Code extension host
     notifications.ts                   – Pure background-notification helpers (source labeling, dedupe/merge with review-requested precedence); no vscode import, unit-tested
     userFacingError.ts                 – Maps host/provider errors to user-actionable copy
     workspace.ts                       – Resolves the VS Code workspace dir, including dev-host target repo override
-    sidecar.ts                         – Best-effort JSON-RPC client for the optional Java sidecar process (pr/buildSearchQuery today); always falls back to local TS logic
+    sidecar.ts                         – Best-effort JSON-RPC client for the optional Java sidecar process; always falls back to local TS logic
   shared/
     user-facing-errors.yaml            – Shared message templates consumed by both hosts
   scripts/
@@ -163,6 +167,7 @@ vscode-extension/                      – VS Code extension host
 Only decisions that encode active constraints future code must respect and are not obvious from source.
 
 ### Webview styling
+
 All webview UI uses shadcn/ui + Tailwind CSS. Avoid ad-hoc CSS modules/inline layout styles. `DiffViewer.css` is the only hand-crafted CSS exception for diff-table specifics. Use semantic status tokens (`text-status-*`, `bg-status-*/10`, `border-status-*/50`) rather than hardcoded palette classes. Theme colors are semantic CSS variables selected by host-provided `light`, `dark`, `highContrastLight`, or `highContrastDark` bridge state; do not infer the IDE theme from browser media queries alone.
 
 The shared webview switches from split panes to explicit list/review navigation below 640px. Pane separators must remain operable by pointer and keyboard, keep ARIA values within viewport-derived bounds, and honor reduced-motion preferences. The application shell is pinned to the browser viewport with `overflow: clip`, and pane contents grow with `flex: 1` plus `min-height: 0`; do not replace this with a nested `height: 100%` chain because IntelliJ's JCEF Chromium can resolve a flex-stretched parent's percentage-height child to content height. Descendant auto-scroll must update its local scroll container directly rather than call `scrollIntoView`, because `overflow: hidden` ancestors remain programmatically scrollable and JCEF can translate the fixed shell off-screen.
@@ -185,10 +190,12 @@ The sidecar's `pr/buildSearchQuery` capability is pure query construction only: 
 
 The sidecar's `repo/detect` capability reads local git metadata directly (no git process spawned) to resolve the owner/repo for a directory. Unlike both existing host implementations, `GitDirectoryResolver` understands linked-worktree `.git` files (a regular file containing `gitdir: <path>`, relative or absolute) in addition to a standard `.git` directory. `RemoteUrlParser` is deliberately stricter than either host: it requires exactly two non-blank path segments (owner and repo), rejecting SCP-style urls with extra path segments that IntelliJ's `RepoDetector` currently accepts. Every non-`found` outcome (`not_git`, `config_missing`, `origin_missing`, `origin_url_malformed`, `gitdir_malformed`, `gitdir_unreadable`, etc.) is a typed, non-fatal `DetectStatus` returned as a normal JSON-RPC result — never a protocol error. `-32602` is reserved for malformed RPC params (missing/non-string `path`).
 
-### Sidecar wiring (VS Code)
-The VS Code extension is the sidecar's first real caller: `sidecar.ts`'s `SidecarClient` lazily spawns `java -jar <jar>` and speaks the same bounded Content-Length-framed JSON-RPC as `StdioFrameCodec`/`StdioJsonRpcServer`. `extension.ts` owns one process-wide `SidecarClient` instance created in `activate()` and disposed in `deactivate()`/on extension deconstruction; it is passed into `github.searchPRs` so `pr/buildSearchQuery` builds the search query when the sidecar responds successfully, and into `github.detectCurrentRepoAsync` so `repo/detect` resolves the current repo when the sidecar finds one.
+The sidecar's `github/checkAuth` capability validates an HTTPS GitHub origin, runs `gh auth token` with the matching Enterprise hostname when needed, and verifies the resulting token with the host's `/user` API. It returns token-free structured statuses (`authenticated`, `not_installed`, `not_authenticated`, `api_failed`, or `invalid_base_url`) as normal domain results; never log, serialize, or include the token in an error message. Invalid JSON-RPC request parameters remain protocol errors.
 
-The sidecar is an optional accelerant, never a hard dependency: every `SidecarClient` method resolves to `null` (never throws) on spawn failure, missing `java`, timeout, or a malformed response, and both `github.searchPRs` and `github.detectCurrentRepoAsync` fall back to the local `buildPRSearchQuery`/`detectCurrentRepo` implementations whenever that happens. `buildPRSearchQuery`/`PrSearchQueryService` and `detectCurrentRepo`/`RepoDetector` must therefore stay behaviorally compatible (the Java side is intentionally the stricter, linked-worktree-aware superset) — see the parity table in `AGENTS.md`.
+### Sidecar wiring (VS Code)
+The VS Code extension is the sidecar's first real caller: `sidecar.ts`'s `SidecarClient` lazily spawns `java -jar <jar>` and speaks the same bounded Content-Length-framed JSON-RPC as `StdioFrameCodec`/`StdioJsonRpcServer`. `extension.ts` owns one process-wide `SidecarClient` instance created in `activate()` and disposed in `deactivate()`/on extension deconstruction; it is passed into `github.searchPRs` so `pr/buildSearchQuery` builds the search query when the sidecar responds successfully, into `github.detectCurrentRepoAsync` so `repo/detect` resolves the current repo when the sidecar finds one, and into Settings so `github/checkAuth` verifies the configured host.
+
+The sidecar is an optional accelerant, never a hard dependency: every `SidecarClient` method resolves to `null` (never throws) on spawn failure, missing `java`, timeout, or a malformed response, and `github.searchPRs`, `github.detectCurrentRepoAsync`, and Settings fall back to their local implementations whenever that happens. `buildPRSearchQuery`/`PrSearchQueryService` and `detectCurrentRepo`/`RepoDetector` must therefore stay behaviorally compatible (the Java side is intentionally the stricter, linked-worktree-aware superset) — see the parity table in `AGENTS.md`.
 
 `resolveSidecarJarPath` mirrors `resolveWebviewDistPath`'s dev/packaged fallback: it prefers a jar staged at `vscode-extension/sidecar/pr-pilot-sidecar.jar` (produced by `scripts/stage-sidecar.mjs` from the Gradle `:sidecar:bootJar` output, matching the webview's `stage-webview.mjs` pattern) and falls back to the sibling `sidecar/build/libs/pr-pilot-sidecar.jar` during local development. The release pipeline runs `:sidecar:bootJar` before packaging so shipped `.vsix` builds bundle the jar.
 
@@ -211,6 +218,7 @@ Copilot and Claude share prompt builders/parsing (`ClaudeService` companion help
 
 ### Copilot SDK runtime
 Both hosts use official Copilot SDKs (`com.github:copilot-sdk-java` and `@github/copilot-sdk`) to control local `copilot`. Stream `assistant.message_delta` to text chunks, surface `tool.execution_start` names as status, and parse final `assistant.message` JSON with delta fallback.
+
 
 ### Provider capability isolation
 Claude review/chat processes disable tools, use `permission-mode=dontAsk`, pass a strict empty MCP configuration, and read user settings only. The review prompt therefore embeds the bounded GitHub diff instead of asking the CLI to fetch repository data. Temporary stream output is owner-only and deleted in `finally`; raw model output is not retained in logs.
