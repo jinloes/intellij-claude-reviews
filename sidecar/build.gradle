@@ -31,5 +31,10 @@ tasks.named('test') {
     useJUnitPlatform()
 }
 
-
+// Stable, predictable jar name so host processes (e.g. the VS Code extension's
+// SidecarClient) can locate the build output without globbing a version-suffixed name.
+bootJar {
+    archiveFileName = 'pr-pilot-sidecar.jar'
+    mainClass = 'com.jinloes.prpilot.sidecar.PrPilotSidecarApplication'
+}
 

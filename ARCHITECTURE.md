@@ -71,7 +71,7 @@ intellij-plugin/                       – IntelliJ plugin host; depends on :cor
       WebviewDtos.java               – package-private DTO records serialized to webview bridge
       RepoDetector.java
 
-sidecar/                                – Java 17, non-web Spring Boot process for future shared host orchestration
+sidecar/                                – Java 17, non-web Spring Boot process for shared host orchestration; spawned on demand by the VS Code extension over stdio JSON-RPC (see "Sidecar wiring (VS Code)")
   src/main/java/com/jinloes/prpilot/sidecar/
     PrPilotSidecarApplication.java      – Non-web Boot entry point; owns stdio process lifecycle
     SidecarConfiguration.java           – Explicit Spring bean composition root
@@ -134,11 +134,16 @@ vscode-extension/                      – VS Code extension host
     notifications.ts                   – Pure background-notification helpers (source labeling, dedupe/merge with review-requested precedence); no vscode import, unit-tested
     userFacingError.ts                 – Maps host/provider errors to user-actionable copy
     workspace.ts                       – Resolves the VS Code workspace dir, including dev-host target repo override
+    sidecar.ts                         – Best-effort JSON-RPC client for the optional Java sidecar process (pr/buildSearchQuery today); always falls back to local TS logic
   shared/
     user-facing-errors.yaml            – Shared message templates consumed by both hosts
+  scripts/
+    stage-webview.mjs                  – Copies built webview/dist into vscode-extension/webview-dist for packaging
+    stage-sidecar.mjs                  – Copies the built sidecar/build/libs/pr-pilot-sidecar.jar into vscode-extension/sidecar for packaging
   test/
     claude.test.ts
     copilot.test.ts
+    sidecar.test.ts
     review.test.ts
     userFacingError.test.ts
 ```
@@ -167,6 +172,15 @@ CI runs full-page Playwright + axe scenarios (`npm run test:a11y`) using `playwr
 The sidecar's `review/parse` capability is a pure Java implementation of the strict provider-review contract. It accepts raw provider output, tolerates the current outer prose/markdown-fence format, and returns either a validated review or an `invalid_review_json` domain result. Validation failures must not include or log raw provider output. Invalid JSON-RPC parameters remain protocol errors; malformed provider review content is an expected domain result.
 
 The sidecar's `pr/buildSearchQuery` capability is pure query construction only: it does not discover repositories, authenticate, or call GitHub. It normalizes unrecognized state values to `open`, unrecognized scopes to `currentRepo`, and blank repository paths to the existing `author:@me` fallback.
+
+### Sidecar wiring (VS Code)
+The VS Code extension is the sidecar's first real caller: `sidecar.ts`'s `SidecarClient` lazily spawns `java -jar <jar>` and speaks the same bounded Content-Length-framed JSON-RPC as `StdioFrameCodec`/`StdioJsonRpcServer`. `extension.ts` owns one process-wide `SidecarClient` instance created in `activate()` and disposed in `deactivate()`/on extension deconstruction; it is passed into `github.searchPRs` so `pr/buildSearchQuery` builds the search query when the sidecar responds successfully.
+
+The sidecar is an optional accelerant, never a hard dependency: every `SidecarClient` method resolves to `null` (never throws) on spawn failure, missing `java`, timeout, or a malformed response, and `github.searchPRs` falls back to the local `buildPRSearchQuery` implementation whenever that happens. `buildPRSearchQuery` in `github.ts` and `PrSearchQueryService` in the sidecar must therefore stay behaviorally identical — see the parity table in `AGENTS.md`.
+
+`resolveSidecarJarPath` mirrors `resolveWebviewDistPath`'s dev/packaged fallback: it prefers a jar staged at `vscode-extension/sidecar/pr-pilot-sidecar.jar` (produced by `scripts/stage-sidecar.mjs` from the Gradle `:sidecar:bootJar` output, matching the webview's `stage-webview.mjs` pattern) and falls back to the sibling `sidecar/build/libs/pr-pilot-sidecar.jar` during local development. The release pipeline runs `:sidecar:bootJar` before packaging so shipped `.vsix` builds bundle the jar.
+
+IntelliJ intentionally does not spawn the sidecar process: the plugin already runs in the same JVM, so any future migration of sidecar capabilities into the IntelliJ host would call the Java classes directly in-process rather than over stdio JSON-RPC. This is a container difference (see "IntelliJ webview surfaces"), not a missing feature — `PRToolWindowFactory.buildQuery` remains IntelliJ's canonical query-building implementation.
 
 ### Java interop conventions for commonMain Kotlin
 Java callers must use generated getters/setters (`getX()`), not Kotlin property or record-style accessors. `DiffParser` access from Java is via `DiffParser.INSTANCE.*`. Keep JSON in `core` on kotlinx.serialization.

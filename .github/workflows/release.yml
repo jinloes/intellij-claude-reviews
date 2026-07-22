@@ -36,6 +36,9 @@ jobs:
       - name: Build IntelliJ plugin
         run: ./gradlew :intellij-plugin:buildPlugin
 
+      - name: Build sidecar jar
+        run: ./gradlew :sidecar:bootJar
+
       - name: Install VS Code extension dependencies
         working-directory: vscode-extension
         run: npm ci
@@ -50,7 +53,7 @@ jobs:
 
       - name: Package VS Code extension
         working-directory: vscode-extension
-        run: npm run stage:webview && npx --yes @vscode/vsce package --out pr-pilot-${{ github.ref_name }}.vsix
+        run: npm run stage:webview && npm run stage:sidecar && npx --yes @vscode/vsce package --out pr-pilot-${{ github.ref_name }}.vsix
 
       - name: Mark release channel from tag
         id: channel

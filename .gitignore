@@ -37,6 +37,7 @@ hs_err_pid*
 node_modules/
 dist/
 vscode-extension/webview-dist/
+vscode-extension/sidecar/
 
 # Logs
 *.log

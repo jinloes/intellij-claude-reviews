@@ -271,14 +271,25 @@ async function ghRequestWithRetry(
 /** Maximum PRs shown in the list. Search over-fetches by one to detect truncation accurately. */
 export const PR_SEARCH_LIMIT = 50;
 
+/** Minimal shape SidecarClient satisfies; kept structural so github.ts has no import-time
+ * dependency on the sidecar module (and tests can pass a plain stub). */
+export interface SearchQuerySidecar {
+    buildSearchQuery(state: string, searchScope: string, currentRepo?: string): Promise<string | null>;
+}
+
 export async function searchPRs(
     token: string,
     githubBaseUrl: string,
     state: string,
     searchScope: PRSearchScope,
     currentRepo?: string,
+    sidecar?: SearchQuerySidecar,
 ): Promise<PR[]> {
-    const q = buildPRSearchQuery(state, searchScope, currentRepo);
+    // The sidecar's pr/buildSearchQuery mirrors buildPRSearchQuery exactly (see
+    // PrSearchQueryService); when unavailable or it fails for any reason, fall back to the
+    // local implementation so PR search never depends on the sidecar process.
+    const q = (await sidecar?.buildSearchQuery(state, searchScope, currentRepo))
+        ?? buildPRSearchQuery(state, searchScope, currentRepo);
     // Over-fetch by one so the caller can tell "exactly the limit" from "more exist".
     return searchPRsByQuery(token, githubBaseUrl, q, PR_SEARCH_LIMIT + 1);
 }

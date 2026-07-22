@@ -15,6 +15,12 @@ import { toUserFacingError, providerNotInstalledMessage } from './userFacingErro
 import { resolveWebviewDistPath } from './webviewAssets';
 import { buildErrorHtml, buildLauncherHtml, buildMainWebviewHtml } from './webviewHtml';
 import { classifyHostTheme, type HostTheme } from './hostTheme';
+import { SidecarClient, resolveSidecarJarPath } from './sidecar';
+
+// Process-wide, lazily-started sidecar process shared by all views. Optional accelerant only —
+// every call site falls back to a local implementation when this is unavailable (no `java`,
+// missing jar, spawn failure, timeout). See ARCHITECTURE.md "Sidecar wiring (VS Code)".
+let sidecarClient: SidecarClient | null = null;
 
 type Provider = 'claude' | 'copilot';
 
@@ -31,6 +37,8 @@ function cancelActiveProvider(): void {
 }
 
 export function activate(context: vscode.ExtensionContext) {
+    sidecarClient = new SidecarClient(resolveSidecarJarPath(context.extensionUri.fsPath));
+    context.subscriptions.push({ dispose: () => sidecarClient?.dispose() });
     const provider = new ClaudeReviewsViewProvider(context.extensionUri);
     const notificationPoller = new PRNotificationPoller(context, (pr) => provider.openPullRequest(pr));
     context.subscriptions.push(
@@ -62,7 +70,10 @@ async function selectCopilotModel(): Promise<void> {
     await vscode.commands.executeCommand('pr-pilot.openSettings');
 }
 
-export function deactivate() {}
+export function deactivate() {
+    sidecarClient?.dispose();
+    sidecarClient = null;
+}
 
 // ── Background PR notifications ───────────────────────────────────────────────
 
@@ -673,6 +684,7 @@ async function handleRefreshPRs(state: ViewState, msg: Record<string, unknown>):
             state.prStateFilter,
             state.searchScope,
             currentRepo ?? undefined,
+            sidecarClient ?? undefined,
         );
         // searchPRs over-fetches by one to distinguish "exactly the limit" from "more exist".
         const limited = found.length > github.PR_SEARCH_LIMIT;

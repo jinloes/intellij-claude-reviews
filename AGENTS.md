@@ -44,6 +44,7 @@ When logic changes in one host, update the parallel file in the other host:
 | `CopilotService.DEFAULT_REASONING_EFFORT` | `vscode-extension/src/copilot.ts` |
 | `webview/src/bridge/types.ts` message schemas | `WebviewPanel.java` and `vscode-extension/src/extension.ts` handlers |
 | `PluginSettings` adding new setting | `vscode-extension/package.json` config contribution + `vscode-extension/src/extension.ts` reader |
+| `sidecar/.../pr/PrSearchQueryService.java` query behavior | `vscode-extension/src/github.ts` `buildPRSearchQuery` (the sidecar's fallback path) |
 
 ## Testing conventions
 
