@@ -47,7 +47,8 @@ export function activate(context: vscode.ExtensionContext) {
         }),
         vscode.commands.registerCommand('pr-pilot.open', () => provider.openPanel()),
         vscode.commands.registerCommand('pr-pilot.selectCopilotModel', selectCopilotModel),
-        vscode.commands.registerCommand('pr-pilot.openSettings', () => settings.openSettings(context)),
+        vscode.commands.registerCommand('pr-pilot.openSettings', () =>
+            settings.openSettings(context, sidecarClient ?? undefined)),
         notificationPoller,
     );
     notificationPoller.syncFromSettings();

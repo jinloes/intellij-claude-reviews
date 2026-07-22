@@ -16,6 +16,36 @@ interface SidecarRpcResponse {
     error?: { message?: string };
 }
 
+export interface SidecarGitHubAuthResult {
+    status: 'authenticated' | 'not_installed' | 'not_authenticated' | 'api_failed' | 'invalid_base_url';
+    username: string | null;
+    message: string;
+}
+
+const AUTH_STATUSES = new Set<SidecarGitHubAuthResult['status']>([
+    'authenticated',
+    'not_installed',
+    'not_authenticated',
+    'api_failed',
+    'invalid_base_url',
+]);
+
+/** Validates the token-free result shape returned by `github/checkAuth`. */
+export function parseGitHubAuthResult(value: unknown): SidecarGitHubAuthResult | null {
+    if (!value || typeof value !== 'object') return null;
+    const result = value as Record<string, unknown>;
+    if (typeof result.status !== 'string' || !AUTH_STATUSES.has(result.status as SidecarGitHubAuthResult['status'])) {
+        return null;
+    }
+    if (result.username !== null && typeof result.username !== 'string') return null;
+    if (typeof result.message !== 'string') return null;
+    return {
+        status: result.status as SidecarGitHubAuthResult['status'],
+        username: typeof result.username === 'string' ? result.username : null,
+        message: result.message,
+    };
+}
+
 /** Encodes a JSON-RPC payload with the same bounded Content-Length framing the sidecar's
  * StdioFrameCodec (Java) reads/writes. Kept as a pure function so framing can be unit tested
  * without spawning a real process. */
@@ -176,6 +206,19 @@ export class SidecarClient {
             const owner = result.repository?.owner;
             const repo = result.repository?.repo;
             return owner && repo ? `${owner}/${repo}` : null;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Verifies GitHub CLI credentials and the GitHub API via `github/checkAuth`. The sidecar
+     * never returns the token. Resolves to `null` on any transport or response-shape failure so
+     * settings can retain their local `gh auth token` fallback.
+     */
+    async checkGitHubAuth(githubBaseUrl: string): Promise<SidecarGitHubAuthResult | null> {
+        try {
+            return parseGitHubAuthResult(await this.request('github/checkAuth', { githubBaseUrl }));
         } catch {
             return null;
         }

@@ -13,6 +13,16 @@ import {
 
 let panel: vscode.WebviewPanel | undefined;
 
+interface GitHubAuthResult {
+    status: string;
+    username: string | null;
+    message: string;
+}
+
+export interface GitHubAuthSidecar {
+    checkGitHubAuth(githubBaseUrl: string): Promise<GitHubAuthResult | null>;
+}
+
 function config(): vscode.WorkspaceConfiguration {
     return vscode.workspace.getConfiguration('pr-pilot');
 }
@@ -53,7 +63,7 @@ const BOOLEAN_KEYS = new Set([
 ]);
 
 /** Opens (or reveals) the PR Pilot settings webview panel. */
-export function openSettings(context: vscode.ExtensionContext): void {
+export function openSettings(context: vscode.ExtensionContext, sidecar?: GitHubAuthSidecar): void {
     if (panel) {
         panel.reveal();
         return;
@@ -172,6 +182,17 @@ export function openSettings(context: vscode.ExtensionContext): void {
                     return;
                 }
                 try {
+                    const authResult = await sidecar?.checkGitHubAuth(baseUrl);
+                    if (authResult) {
+                        current.webview.postMessage({
+                            type: 'testResult',
+                            ok: authResult.status === 'authenticated',
+                            message: authResult.status === 'authenticated' && authResult.username
+                                ? `Signed in as @${authResult.username}.`
+                                : authResult.message,
+                        });
+                        return;
+                    }
                     await github.resolveToken(baseUrl);
                     current.webview.postMessage({
                         type: 'testResult',

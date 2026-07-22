@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as path from 'path';
 
-import { encodeFrame, extractFrames, resolveSidecarJarPath } from '../src/sidecar';
+import { encodeFrame, extractFrames, parseGitHubAuthResult, resolveSidecarJarPath } from '../src/sidecar';
 
 const extensionRoot = path.resolve('/workspace/pr-pilot/vscode-extension');
 
@@ -47,6 +47,27 @@ test('extractFrames discards an unparseable header instead of looping forever', 
   assert.equal(remaining.length, 0);
 });
 
+test('parseGitHubAuthResult accepts the token-free authenticated result shape', () => {
+  assert.deepEqual(
+    parseGitHubAuthResult({
+      status: 'authenticated',
+      username: 'octocat',
+      message: 'GitHub authentication is available.',
+    }),
+    {
+      status: 'authenticated',
+      username: 'octocat',
+      message: 'GitHub authentication is available.',
+    },
+  );
+});
+
+test('parseGitHubAuthResult rejects malformed or unknown authentication results', () => {
+  assert.equal(parseGitHubAuthResult({ status: 'unknown', username: null, message: 'x' }), null);
+  assert.equal(parseGitHubAuthResult({ status: 'authenticated', username: 1, message: 'x' }), null);
+  assert.equal(parseGitHubAuthResult({ status: 'authenticated', username: null }), null);
+});
+
 test('resolveSidecarJarPath prefers the packaged jar staged alongside the extension', () => {
   const resolved = resolveSidecarJarPath(
     extensionRoot,
@@ -70,4 +91,3 @@ test('resolveSidecarJarPath returns null when neither packaged nor dev jar exist
   const resolved = resolveSidecarJarPath(extensionRoot, () => false, () => []);
   assert.equal(resolved, null);
 });
-

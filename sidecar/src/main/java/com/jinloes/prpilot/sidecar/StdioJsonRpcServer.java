@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
 import com.jinloes.prpilot.sidecar.pr.PrSearchQueryService;
 import com.jinloes.prpilot.sidecar.repo.RepoDetector;
 import com.jinloes.prpilot.sidecar.review.ReviewJsonParser;
@@ -22,6 +23,7 @@ final class StdioJsonRpcServer {
     private final ReviewJsonParser reviewJsonParser;
     private final PrSearchQueryService prSearchQueryService;
     private final RepoDetector repoDetector;
+    private final GitHubAuthService gitHubAuthService;
 
     StdioJsonRpcServer(
             ObjectMapper objectMapper,
@@ -29,13 +31,15 @@ final class StdioJsonRpcServer {
             SidecarBootstrapService bootstrapService,
             ReviewJsonParser reviewJsonParser,
             PrSearchQueryService prSearchQueryService,
-            RepoDetector repoDetector) {
+            RepoDetector repoDetector,
+            GitHubAuthService gitHubAuthService) {
         this.objectMapper = Objects.requireNonNull(objectMapper);
         this.frameCodec = Objects.requireNonNull(frameCodec);
         this.bootstrapService = Objects.requireNonNull(bootstrapService);
         this.reviewJsonParser = Objects.requireNonNull(reviewJsonParser);
         this.prSearchQueryService = Objects.requireNonNull(prSearchQueryService);
         this.repoDetector = Objects.requireNonNull(repoDetector);
+        this.gitHubAuthService = Objects.requireNonNull(gitHubAuthService);
     }
 
     void run(InputStream input, OutputStream output) {
@@ -76,6 +80,7 @@ final class StdioJsonRpcServer {
                         case "review/parse" -> parseReview(request);
                         case "pr/buildSearchQuery" -> buildPrSearchQuery(request);
                         case "repo/detect" -> detectRepo(request);
+                        case "github/checkAuth" -> checkGitHubAuth(request);
                         default -> error(requestId(request), -32601, "Method not found");
                     };
         } catch (RuntimeException exception) {
@@ -122,6 +127,19 @@ final class StdioJsonRpcServer {
             return error(requestId(request), -32602, "Invalid params");
         }
         return result(requestId(request), repoDetector.detect(params.path("path").textValue()));
+    }
+
+    private ObjectNode checkGitHubAuth(JsonNode request) {
+        JsonNode params = request.get("params");
+        if (params == null
+                || !params.isObject()
+                || params.size() != 1
+                || !params.path("githubBaseUrl").isTextual()) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        return result(
+                requestId(request),
+                gitHubAuthService.check(params.path("githubBaseUrl").textValue()));
     }
 
     private boolean hasOnlyFields(JsonNode object, Set<String> allowedFields) {
