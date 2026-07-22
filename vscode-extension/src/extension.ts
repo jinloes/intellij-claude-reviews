@@ -734,13 +734,12 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
         const base = githubBaseUrl();
         const readiness = providerReadiness();
 
-        const [diff, validationDiffRaw, detail, draft] = await Promise.all([
+        const [diff, detail, draft] = await Promise.all([
             github.getPRDiff(token, base, owner, repo, number),
-            github.getPRDiffFull(token, base, owner, repo, number).catch(() => ''),
             github.getPRDetail(token, base, owner, repo, number),
             github.loadDraftReview(token, base, owner, repo, number),
         ]);
-        const validationDiff = validationDiffRaw || diff;
+        const validationDiff = diff;
 
         if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
 
@@ -779,6 +778,20 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
             push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasReviewDraft: false });
             push(state, { type: 'draftLoaded', prKey: key, prState: 'NO_DRAFT', diff, validationDiff, providerReadiness: readiness });
         }
+
+        // Comment-position validation benefits from an untruncated diff, but it must not block the
+        // draft status UI on a large or slow response. The bounded review diff above is sufficient
+        // until this optional fetch completes.
+        void github.getPRDiffFull(token, base, owner, repo, number)
+            .then((fullDiff) => {
+                if (prKey(state.activePR) === key && state.selectionRevision === selectionRevision) {
+                    state.activeValidationDiff = fullDiff || diff;
+                }
+            })
+            .catch((err) => {
+                console.warn(`[pr-pilot] Full validation diff for PR #${number} failed; using review diff:`,
+                    err instanceof Error ? err.message : String(err));
+            });
     } catch (err) {
         state.cachedToken = null;
         if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;

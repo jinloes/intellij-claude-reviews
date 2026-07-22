@@ -102,24 +102,40 @@
         "pr-pilot.reviewModel": {
           "type": "string",
           "default": "",
-          "description": "Model ID for the Claude CLI. Empty uses the CLI default.",
-          "examples": [
+          "enum": [
             "",
             "claude-haiku-4-5-20251001",
             "claude-sonnet-4-6",
             "claude-opus-4-7"
-          ]
+          ],
+          "enumDescriptions": [
+            "Use the Claude CLI default.",
+            "Haiku — fastest.",
+            "Sonnet — balanced.",
+            "Opus — most thorough."
+          ],
+          "description": "Review model for the Claude CLI."
         },
         "pr-pilot.reviewModelCopilot": {
           "type": "string",
           "default": "claude-sonnet-4.6",
-          "description": "Model ID for the GitHub Copilot CLI. Default `claude-sonnet-4.6` balances JSON schema adherence and code-review depth without Opus-tier latency. Empty uses the CLI's default routing. Use `PR Pilot: Open Settings` (or the gear in the PR Pilot view title) to pick from models discovered via the Copilot SDK.",
-          "examples": [
+          "enum": [
+            "",
             "claude-sonnet-4.6",
             "claude-opus-4.7",
+            "claude-opus-4.8",
             "gpt-5.5",
             "gpt-5.4"
-          ]
+          ],
+          "enumDescriptions": [
+            "Use the Copilot CLI's default routing.",
+            "Balanced default for JSON schema adherence and code review.",
+            "Most thorough Claude option.",
+            "Most thorough Claude option.",
+            "GPT-5.5.",
+            "GPT-5.4."
+          ],
+          "description": "Review model for the GitHub Copilot CLI. PR Pilot: Open Settings lists models discovered for the signed-in account."
         },
         "pr-pilot.reviewProvider": {
           "type": "string",

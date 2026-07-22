@@ -10,6 +10,7 @@ import {
   detectCurrentRepo,
   isRetriableNetworkError,
   isRetriableStatus,
+  MAX_VALIDATION_DIFF_BYTES,
   normalizeGithubBaseUrl,
 } from '../src/github';
 
@@ -78,6 +79,10 @@ test('isRetriableNetworkError recognizes transient network failures', () => {
   assert.equal(isRetriableNetworkError(new Error('socket hang up')), true);
   assert.equal(isRetriableNetworkError(new Error('request timeout')), true);
   assert.equal(isRetriableNetworkError(new Error('bad credentials')), false);
+});
+
+test('validation diff stays within the webview bridge message limit', () => {
+  assert.equal(MAX_VALIDATION_DIFF_BYTES, 1_000_000);
 });
 
 test('normalizeGithubBaseUrl defaults to github.com and trims trailing slash', () => {

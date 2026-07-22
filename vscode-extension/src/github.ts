@@ -371,8 +371,12 @@ export async function getPRDiff(
         : diff;
 }
 
-/** Maximum bytes for the full (untruncated) diff used for comment-position validation. */
-export const MAX_VALIDATION_DIFF_BYTES = 5_000_000; // 5 MB
+/**
+ * Maximum validation diff size sent through the webview bridge. This must not exceed the
+ * bridge's MAX_DIFF limit or draftLoaded/reviewResult messages are rejected, leaving the review
+ * pane in its loading state.
+ */
+export const MAX_VALIDATION_DIFF_BYTES = 1_000_000;
 
 export async function getPRDiffFull(
     token: string,

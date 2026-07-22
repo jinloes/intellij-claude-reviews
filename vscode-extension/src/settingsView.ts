@@ -25,7 +25,7 @@ export const CLAUDE_MODEL_OPTIONS: ClaudeModelOption[] = [
 
 /** Fallback Copilot model IDs when SDK discovery is unavailable. Mirrors COPILOT_MODEL_SUGGESTIONS. */
 export const COPILOT_MODEL_SUGGESTIONS: string[] = [
-    'claude-sonnet-4.6', 'claude-opus-4.7', 'gpt-5.5', 'gpt-5.4',
+    'claude-sonnet-4.6', 'claude-opus-4.7', 'claude-opus-4.8', 'gpt-5.5', 'gpt-5.4',
 ];
 
 /** Reasoning-effort levels accepted by `copilot --reasoning-effort`. Mirrors COPILOT_EFFORTS. */
