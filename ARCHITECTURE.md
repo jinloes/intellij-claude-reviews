@@ -85,6 +85,14 @@ sidecar/                                – Java 17, non-web Spring Boot process
       ReviewParseResult.java            – Valid review or provider-safe validation error
     pr/
       PrSearchQueryService.java          – Pure normalized GitHub PR-search query construction
+    repo/
+      RepoDetector.java                  – Orchestrates git metadata discovery + origin parsing into owner/repo
+      GitDirectoryResolver.java          – Resolves the git metadata dir; understands linked-worktree `.git` files
+      GitConfigOriginReader.java         – Reads the `[remote "origin"]` url from `config`
+      RemoteUrlParser.java               – Strict HTTPS/SSH-URI/SCP url -> owner/repo parsing
+      RepositoryId.java                  – owner/repo DTO
+      DetectResult.java                  – Typed detect() outcome (status + optional RepositoryId)
+      DetectStatus.java                  – Non-fatal detection outcomes (found, not_git, origin_missing, etc.)
   src/main/resources/
     logback-spring.xml                  – Sends all sidecar logs to stderr; stdout is protocol-only
   src/test/java/com/jinloes/prpilot/sidecar/
@@ -92,6 +100,8 @@ sidecar/                                – Java 17, non-web Spring Boot process
     StdioJsonRpcServerTest.java
     review/ReviewJsonParserTest.java
     pr/PrSearchQueryServiceTest.java
+    repo/RepoDetectorTest.java
+    repo/RemoteUrlParserTest.java
 
 webview/                               – Vite + React + TypeScript webview
   a11y/
@@ -173,10 +183,12 @@ The sidecar's `review/parse` capability is a pure Java implementation of the str
 
 The sidecar's `pr/buildSearchQuery` capability is pure query construction only: it does not discover repositories, authenticate, or call GitHub. It normalizes unrecognized state values to `open`, unrecognized scopes to `currentRepo`, and blank repository paths to the existing `author:@me` fallback.
 
-### Sidecar wiring (VS Code)
-The VS Code extension is the sidecar's first real caller: `sidecar.ts`'s `SidecarClient` lazily spawns `java -jar <jar>` and speaks the same bounded Content-Length-framed JSON-RPC as `StdioFrameCodec`/`StdioJsonRpcServer`. `extension.ts` owns one process-wide `SidecarClient` instance created in `activate()` and disposed in `deactivate()`/on extension deconstruction; it is passed into `github.searchPRs` so `pr/buildSearchQuery` builds the search query when the sidecar responds successfully.
+The sidecar's `repo/detect` capability reads local git metadata directly (no git process spawned) to resolve the owner/repo for a directory. Unlike both existing host implementations, `GitDirectoryResolver` understands linked-worktree `.git` files (a regular file containing `gitdir: <path>`, relative or absolute) in addition to a standard `.git` directory. `RemoteUrlParser` is deliberately stricter than either host: it requires exactly two non-blank path segments (owner and repo), rejecting SCP-style urls with extra path segments that IntelliJ's `RepoDetector` currently accepts. Every non-`found` outcome (`not_git`, `config_missing`, `origin_missing`, `origin_url_malformed`, `gitdir_malformed`, `gitdir_unreadable`, etc.) is a typed, non-fatal `DetectStatus` returned as a normal JSON-RPC result — never a protocol error. `-32602` is reserved for malformed RPC params (missing/non-string `path`).
 
-The sidecar is an optional accelerant, never a hard dependency: every `SidecarClient` method resolves to `null` (never throws) on spawn failure, missing `java`, timeout, or a malformed response, and `github.searchPRs` falls back to the local `buildPRSearchQuery` implementation whenever that happens. `buildPRSearchQuery` in `github.ts` and `PrSearchQueryService` in the sidecar must therefore stay behaviorally identical — see the parity table in `AGENTS.md`.
+### Sidecar wiring (VS Code)
+The VS Code extension is the sidecar's first real caller: `sidecar.ts`'s `SidecarClient` lazily spawns `java -jar <jar>` and speaks the same bounded Content-Length-framed JSON-RPC as `StdioFrameCodec`/`StdioJsonRpcServer`. `extension.ts` owns one process-wide `SidecarClient` instance created in `activate()` and disposed in `deactivate()`/on extension deconstruction; it is passed into `github.searchPRs` so `pr/buildSearchQuery` builds the search query when the sidecar responds successfully, and into `github.detectCurrentRepoAsync` so `repo/detect` resolves the current repo when the sidecar finds one.
+
+The sidecar is an optional accelerant, never a hard dependency: every `SidecarClient` method resolves to `null` (never throws) on spawn failure, missing `java`, timeout, or a malformed response, and both `github.searchPRs` and `github.detectCurrentRepoAsync` fall back to the local `buildPRSearchQuery`/`detectCurrentRepo` implementations whenever that happens. `buildPRSearchQuery`/`PrSearchQueryService` and `detectCurrentRepo`/`RepoDetector` must therefore stay behaviorally compatible (the Java side is intentionally the stricter, linked-worktree-aware superset) — see the parity table in `AGENTS.md`.
 
 `resolveSidecarJarPath` mirrors `resolveWebviewDistPath`'s dev/packaged fallback: it prefers a jar staged at `vscode-extension/sidecar/pr-pilot-sidecar.jar` (produced by `scripts/stage-sidecar.mjs` from the Gradle `:sidecar:bootJar` output, matching the webview's `stage-webview.mjs` pattern) and falls back to the sibling `sidecar/build/libs/pr-pilot-sidecar.jar` during local development. The release pipeline runs `:sidecar:bootJar` before packaging so shipped `.vsix` builds bundle the jar.
 

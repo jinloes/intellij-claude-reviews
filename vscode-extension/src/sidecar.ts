@@ -160,6 +160,27 @@ export class SidecarClient {
         }
     }
 
+    /**
+     * Detects the owner/repo for `path` via the sidecar's `repo/detect` capability (mirrors
+     * RepoDetector, which additionally understands linked-worktree `.git` files that the local
+     * TypeScript `detectCurrentRepo` does not). Resolves to `null` on any failure — spawn
+     * failure, missing `java`, timeout, malformed response, or any non-`found` detection status
+     * — so the caller falls back to the local `detectCurrentRepo` implementation in github.ts.
+     */
+    async detectRepo(path: string): Promise<string | null> {
+        try {
+            const result = (await this.request('repo/detect', { path })) as
+                | { status?: string; repository?: { owner?: string; repo?: string } }
+                | undefined;
+            if (result?.status !== 'found') return null;
+            const owner = result.repository?.owner;
+            const repo = result.repository?.repo;
+            return owner && repo ? `${owner}/${repo}` : null;
+        } catch {
+            return null;
+        }
+    }
+
     dispose(): void {
         const child = this.child;
         this.child = null;
@@ -194,9 +215,3 @@ export function resolveSidecarJarPath(
         return null;
     }
 }
-
-
-
-
-
-

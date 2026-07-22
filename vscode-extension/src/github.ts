@@ -808,3 +808,22 @@ export function detectCurrentRepo(workspaceFolder: string): string | null {
         return null;
     }
 }
+
+/** Minimal shape SidecarClient satisfies; kept structural so github.ts has no import-time
+ * dependency on the sidecar module (and tests can pass a plain stub). */
+export interface RepoDetectionSidecar {
+    detectRepo(path: string): Promise<string | null>;
+}
+
+/**
+ * Detects the owner/repo for `workspaceFolder`, preferring the sidecar's `repo/detect`
+ * capability (which additionally understands linked-worktree `.git` files) and falling back to
+ * the local `detectCurrentRepo` implementation when the sidecar is unavailable or finds nothing.
+ */
+export async function detectCurrentRepoAsync(
+    workspaceFolder: string,
+    sidecar?: RepoDetectionSidecar,
+): Promise<string | null> {
+    const viaSidecar = await sidecar?.detectRepo(workspaceFolder);
+    return viaSidecar ?? detectCurrentRepo(workspaceFolder);
+}

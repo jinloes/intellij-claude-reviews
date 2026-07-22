@@ -517,7 +517,7 @@ async function resolveWorkingDir(
     if (!token || !fallback) return fallback;
 
     const gitRoot = worktree.findGitRoot(fallback);
-    const currentRepo = github.detectCurrentRepo(fallback);
+    const currentRepo = await github.detectCurrentRepoAsync(fallback, sidecarClient ?? undefined);
     const sameRepo = currentRepo !== null
         && currentRepo.toLowerCase() === `${pr.owner}/${pr.repo}`.toLowerCase();
     if (!gitRoot || !sameRepo) return fallback;
@@ -677,7 +677,7 @@ async function handleRefreshPRs(state: ViewState, msg: Record<string, unknown>):
             state.searchScope = 'reviewRequested';
         }
 
-        const currentRepo = github.detectCurrentRepo(workingDir() || process.cwd());
+        const currentRepo = await github.detectCurrentRepoAsync(workingDir() || process.cwd(), sidecarClient ?? undefined);
         const found = await github.searchPRs(
             token,
             githubBaseUrl(),

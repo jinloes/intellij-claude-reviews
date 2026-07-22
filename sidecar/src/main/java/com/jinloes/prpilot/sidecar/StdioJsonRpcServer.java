@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.jinloes.prpilot.sidecar.pr.PrSearchQueryService;
+import com.jinloes.prpilot.sidecar.repo.RepoDetector;
 import com.jinloes.prpilot.sidecar.review.ReviewJsonParser;
 import java.io.IOException;
 import java.io.InputStream;
@@ -20,18 +21,21 @@ final class StdioJsonRpcServer {
     private final SidecarBootstrapService bootstrapService;
     private final ReviewJsonParser reviewJsonParser;
     private final PrSearchQueryService prSearchQueryService;
+    private final RepoDetector repoDetector;
 
     StdioJsonRpcServer(
             ObjectMapper objectMapper,
             StdioFrameCodec frameCodec,
             SidecarBootstrapService bootstrapService,
             ReviewJsonParser reviewJsonParser,
-            PrSearchQueryService prSearchQueryService) {
+            PrSearchQueryService prSearchQueryService,
+            RepoDetector repoDetector) {
         this.objectMapper = Objects.requireNonNull(objectMapper);
         this.frameCodec = Objects.requireNonNull(frameCodec);
         this.bootstrapService = Objects.requireNonNull(bootstrapService);
         this.reviewJsonParser = Objects.requireNonNull(reviewJsonParser);
         this.prSearchQueryService = Objects.requireNonNull(prSearchQueryService);
+        this.repoDetector = Objects.requireNonNull(repoDetector);
     }
 
     void run(InputStream input, OutputStream output) {
@@ -71,6 +75,7 @@ final class StdioJsonRpcServer {
                                 result(requestId(request), bootstrapService.initialize());
                         case "review/parse" -> parseReview(request);
                         case "pr/buildSearchQuery" -> buildPrSearchQuery(request);
+                        case "repo/detect" -> detectRepo(request);
                         default -> error(requestId(request), -32601, "Method not found");
                     };
         } catch (RuntimeException exception) {
@@ -106,6 +111,17 @@ final class StdioJsonRpcServer {
                                 optionalText(params, "state"),
                                 optionalText(params, "searchScope"),
                                 optionalText(params, "currentRepo"))));
+    }
+
+    private ObjectNode detectRepo(JsonNode request) {
+        JsonNode params = request.get("params");
+        if (params == null
+                || !params.isObject()
+                || params.size() != 1
+                || !params.path("path").isTextual()) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        return result(requestId(request), repoDetector.detect(params.path("path").textValue()));
     }
 
     private boolean hasOnlyFields(JsonNode object, Set<String> allowedFields) {

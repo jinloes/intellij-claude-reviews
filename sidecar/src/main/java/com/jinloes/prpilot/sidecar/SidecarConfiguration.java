@@ -2,6 +2,7 @@ package com.jinloes.prpilot.sidecar;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jinloes.prpilot.sidecar.pr.PrSearchQueryService;
+import com.jinloes.prpilot.sidecar.repo.RepoDetector;
 import com.jinloes.prpilot.sidecar.review.ReviewJsonParser;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -29,13 +30,24 @@ class SidecarConfiguration {
     }
 
     @Bean
+    RepoDetector repoDetector() {
+        return new RepoDetector();
+    }
+
+    @Bean
     StdioJsonRpcServer stdioJsonRpcServer(
             ObjectMapper objectMapper,
             StdioFrameCodec frameCodec,
             SidecarBootstrapService bootstrapService,
             ReviewJsonParser reviewJsonParser,
-            PrSearchQueryService prSearchQueryService) {
+            PrSearchQueryService prSearchQueryService,
+            RepoDetector repoDetector) {
         return new StdioJsonRpcServer(
-                objectMapper, frameCodec, bootstrapService, reviewJsonParser, prSearchQueryService);
+                objectMapper,
+                frameCodec,
+                bootstrapService,
+                reviewJsonParser,
+                prSearchQueryService,
+                repoDetector);
     }
 }

@@ -8,6 +8,7 @@ import {
   apiBase,
   buildPRSearchQuery,
   detectCurrentRepo,
+  detectCurrentRepoAsync,
   isRetriableNetworkError,
   isRetriableStatus,
   MAX_VALIDATION_DIFF_BYTES,
@@ -104,6 +105,17 @@ function withGitConfig(config: string, fn: (dir: string) => void): void {
   }
 }
 
+async function withGitConfigAsync(config: string, fn: (dir: string) => Promise<void>): Promise<void> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-pilot-repo-'));
+  try {
+    fs.mkdirSync(path.join(dir, '.git'));
+    fs.writeFileSync(path.join(dir, '.git', 'config'), config);
+    await fn(dir);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 test('detectCurrentRepo reads the origin remote (https)', () => {
   withGitConfig(
     '[remote "origin"]\n\turl = https://github.com/acme/platform.git\n',
@@ -125,6 +137,38 @@ test('detectCurrentRepo picks origin, not the first remote in the file', () => {
     '[remote "upstream"]\n\turl = https://github.com/upstream-org/platform.git\n' +
       '[remote "origin"]\n\turl = https://github.com/acme/platform.git\n',
     (dir) => assert.equal(detectCurrentRepo(dir), 'acme/platform'),
+  );
+});
+
+test('detectCurrentRepoAsync prefers the sidecar result when it finds a repo', async () => {
+  await withGitConfigAsync(
+    '[remote "origin"]\n\turl = https://github.com/acme/platform.git\n',
+    async (dir) => {
+      const result = await detectCurrentRepoAsync(dir, {
+        detectRepo: async () => 'from-sidecar/repo',
+      });
+      assert.equal(result, 'from-sidecar/repo');
+    },
+  );
+});
+
+test('detectCurrentRepoAsync falls back to the local implementation when the sidecar finds nothing', async () => {
+  await withGitConfigAsync(
+    '[remote "origin"]\n\turl = https://github.com/acme/platform.git\n',
+    async (dir) => {
+      const result = await detectCurrentRepoAsync(dir, { detectRepo: async () => null });
+      assert.equal(result, 'acme/platform');
+    },
+  );
+});
+
+test('detectCurrentRepoAsync works with no sidecar supplied', async () => {
+  await withGitConfigAsync(
+    '[remote "origin"]\n\turl = https://github.com/acme/platform.git\n',
+    async (dir) => {
+      const result = await detectCurrentRepoAsync(dir);
+      assert.equal(result, 'acme/platform');
+    },
   );
 });
 

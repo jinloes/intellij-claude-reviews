@@ -45,6 +45,7 @@ When logic changes in one host, update the parallel file in the other host:
 | `webview/src/bridge/types.ts` message schemas | `WebviewPanel.java` and `vscode-extension/src/extension.ts` handlers |
 | `PluginSettings` adding new setting | `vscode-extension/package.json` config contribution + `vscode-extension/src/extension.ts` reader |
 | `sidecar/.../pr/PrSearchQueryService.java` query behavior | `vscode-extension/src/github.ts` `buildPRSearchQuery` (the sidecar's fallback path) |
+| `sidecar/.../repo/RepoDetector.java` (+ `RemoteUrlParser`/`GitDirectoryResolver`/`GitConfigOriginReader`) detection behavior | `vscode-extension/src/github.ts` `detectCurrentRepo` (the sidecar's fallback path) and `intellij-plugin/.../RepoDetector.java` |
 
 ## Testing conventions
 

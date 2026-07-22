@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jinloes.prpilot.sidecar.pr.PrSearchQueryService;
+import com.jinloes.prpilot.sidecar.repo.RepoDetector;
 import com.jinloes.prpilot.sidecar.review.ReviewJsonParser;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -12,6 +13,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class StdioJsonRpcServerTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -26,7 +28,8 @@ class StdioJsonRpcServerTest {
                         frameCodec,
                         new SidecarBootstrapService(),
                         new ReviewJsonParser(objectMapper),
-                        new PrSearchQueryService());
+                        new PrSearchQueryService(),
+                        new RepoDetector());
     }
 
     @Test
@@ -122,6 +125,45 @@ class StdioJsonRpcServerTest {
 
         assertThat(unknownFieldResponse.path("error").path("code").asInt()).isEqualTo(-32602);
         assertThat(nonTextResponse.path("error").path("code").asInt()).isEqualTo(-32602);
+    }
+
+    @Test
+    void detectsARepoFromAGitConfig(@TempDir java.nio.file.Path tempDir) throws IOException {
+        java.nio.file.Path gitDir = tempDir.resolve(".git");
+        java.nio.file.Files.createDirectories(gitDir);
+        java.nio.file.Files.writeString(
+                gitDir.resolve("config"),
+                "[remote \"origin\"]\n\turl = https://github.com/acme/widgets.git\n");
+
+        com.fasterxml.jackson.databind.node.ObjectNode request = objectMapper.createObjectNode();
+        request.put("jsonrpc", "2.0");
+        request.put("id", "repo-1");
+        request.put("method", "repo/detect");
+        request.putObject("params").put("path", tempDir.toString());
+
+        JsonNode response = server.handle(objectMapper.writeValueAsBytes(request));
+
+        assertThat(response.path("id").asText()).isEqualTo("repo-1");
+        assertThat(response.path("result").path("status").asText()).isEqualTo("found");
+        assertThat(response.path("result").path("repository").path("owner").asText())
+                .isEqualTo("acme");
+        assertThat(response.path("result").path("repository").path("repo").asText())
+                .isEqualTo("widgets");
+    }
+
+    @Test
+    void rejectsInvalidRepoDetectParams() {
+        JsonNode missingField =
+                server.handle(
+                        "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"repo/detect\",\"params\":{}}"
+                                .getBytes(StandardCharsets.UTF_8));
+        JsonNode nonTextField =
+                server.handle(
+                        "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"repo/detect\",\"params\":{\"path\":1}}"
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(missingField.path("error").path("code").asInt()).isEqualTo(-32602);
+        assertThat(nonTextField.path("error").path("code").asInt()).isEqualTo(-32602);
     }
 
     @Test
