@@ -55,9 +55,9 @@ class ClaudeServiceKotestTest : FunSpec({
         }
 
         test("JSON embedded in surrounding prose — braces extracted") {
-            val json = "Here is the review: {\"summary\":\"s\",\"verdict\":\"REQUEST_CHANGES\",\"lineComments\":[]} done."
+            val json = "Here is the review: {\"summary\":\"s\",\"verdict\":\"COMMENT\",\"lineComments\":[]} done."
             val result = ClaudeService.parseReview(json)
-            result.getVerdict() shouldBe "REQUEST_CHANGES"
+            result.getVerdict() shouldBe "COMMENT"
         }
 
         test("invalid JSON — throws Exception") {
@@ -67,7 +67,7 @@ class ClaudeServiceKotestTest : FunSpec({
         }
 
         test("JSON with line comment — round-trips correctly") {
-            val json = """{"summary":"overview","verdict":"REQUEST_CHANGES","lineComments":[{"file":"src/Foo.java","line":10,"type":"issue","body":"null check"}]}"""
+            val json = """{"summary":"overview","verdict":"REQUEST_CHANGES","lineComments":[{"file":"src/Foo.java","line":10,"type":"issue","severity":"major","category":"correctness","confidence":"high","rationale":"The diff dereferences the nullable value.","body":"Guard the nullable value before dereferencing it."}]}"""
             val result = ClaudeService.parseReview(json)
             result.getLineComments() shouldHaveSize 1
             result.getLineComments()[0].getFile() shouldBe "src/Foo.java"
@@ -82,11 +82,25 @@ class ClaudeServiceKotestTest : FunSpec({
             c.getRationale() shouldBe "read the schema"
         }
 
-        test("JSON without rich fields — they default to empty") {
+        test("JSON without required comment fields — rejected") {
             val json = """{"summary":"s","verdict":"APPROVE","lineComments":[{"file":"a","line":1,"type":"note","body":"b"}]}"""
-            val c = ClaudeService.parseReview(json).getLineComments()[0]
-            c.getSeverity() shouldBe ""
-            c.getConfidence() shouldBe ""
+            shouldThrow<IllegalArgumentException> {
+                ClaudeService.parseReview(json)
+            }
+        }
+
+        test("JSON with unexpected fields — rejected") {
+            val json = """{"summary":"s","verdict":"APPROVE","lineComments":[],"extra":true}"""
+            shouldThrow<IllegalArgumentException> {
+                ClaudeService.parseReview(json)
+            }
+        }
+
+        test("low-confidence issue — rejected") {
+            val json = """{"summary":"s","verdict":"REQUEST_CHANGES","lineComments":[{"file":"a","line":1,"type":"issue","severity":"major","category":"correctness","confidence":"low","rationale":"The line returns null.","body":"Handle the null return value."}]}"""
+            shouldThrow<IllegalArgumentException> {
+                ClaudeService.parseReview(json)
+            }
         }
     }
 
@@ -135,7 +149,7 @@ class ClaudeServiceKotestTest : FunSpec({
 
         test("instructs confidence-gated, evidence-backed findings") {
             val prompt = ClaudeService.buildPrompt(fakeRequest())
-            prompt shouldContain "Confidence gating"
+            prompt shouldContain "Never report a low-confidence"
             prompt shouldContain "confidence"
         }
 

@@ -6,7 +6,10 @@ import { parseReview } from '../src/review';
 const valid = JSON.stringify({
   summary: '## Overview\nDoes a thing.',
   verdict: 'COMMENT',
-  lineComments: [{ file: 'src/a.ts', line: 5, type: 'issue', body: 'fix' }],
+  lineComments: [{
+    file: 'src/a.ts', line: 5, type: 'note', severity: 'minor', category: 'maintainability',
+    confidence: 'low', body: 'Is this intentional?',
+  }],
 });
 
 test('parseReview parses a well-formed object', () => {
@@ -98,29 +101,56 @@ test('parseReview keeps valid severity, category, confidence, and rationale', ()
   assert.equal(c.rationale, 'read the schema');
 });
 
-test('parseReview drops invalid enum values for the richer fields', () => {
-  const r = parseReview(JSON.stringify({
+test('parseReview rejects invalid enum values for required comment fields', () => {
+  assert.throws(() => parseReview(JSON.stringify({
     summary: 's',
     verdict: 'COMMENT',
     lineComments: [{
       file: 'a.ts', line: 5, type: 'note', body: 'b',
       severity: 'catastrophic', category: 'vibes', confidence: 'certain',
     }],
-  }));
-  const c = r.lineComments[0];
-  assert.equal(c.severity, undefined);
-  assert.equal(c.category, undefined);
-  assert.equal(c.confidence, undefined);
+  })), /lineComments/);
 });
 
-test('parseReview normalizes mixed-case enums and omits absent rich fields', () => {
-  const r = parseReview(JSON.stringify({
+test('parseReview rejects missing required comment fields', () => {
+  assert.throws(() => parseReview(JSON.stringify({
     summary: 's',
     verdict: 'COMMENT',
     lineComments: [{ file: 'a.ts', line: 5, type: 'note', body: 'b', severity: 'NIT' }],
-  }));
-  const c = r.lineComments[0];
-  assert.equal(c.severity, 'nit');
-  assert.equal(c.category, undefined);
-  assert.equal(c.rationale, undefined);
+  })), /lineComments/);
+});
+
+test('parseReview rejects low-confidence issues and verdict mismatches', () => {
+  const issue = {
+    file: 'a.ts', line: 5, type: 'issue', body: 'b', severity: 'major',
+    category: 'correctness', confidence: 'low', rationale: 'The added branch returns null.',
+  };
+  assert.throws(
+    () => parseReview(JSON.stringify({ summary: 's', verdict: 'REQUEST_CHANGES', lineComments: [issue] })),
+    /lineComments/,
+  );
+
+  const highConfidenceIssue = { ...issue, confidence: 'high' };
+  assert.throws(
+    () => parseReview(JSON.stringify({ summary: 's', verdict: 'APPROVE', lineComments: [highConfidenceIssue] })),
+    /verdict/,
+  );
+});
+
+test('parseReview rejects unexpected top-level and comment fields', () => {
+  assert.throws(
+    () => parseReview(JSON.stringify({ summary: 's', verdict: 'APPROVE', lineComments: [], extra: true })),
+    /top-level/,
+  );
+  assert.throws(
+    () => parseReview(JSON.stringify({
+      summary: 's',
+      verdict: 'COMMENT',
+      lineComments: [{
+        file: 'a.ts', line: 5, type: 'note', body: 'b', severity: 'minor',
+        category: 'tests', confidence: 'low', extra: true,
+      }],
+    })),
+    /lineComments/,
+  );
 });
