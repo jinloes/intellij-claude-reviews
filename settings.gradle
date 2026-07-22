@@ -2,5 +2,6 @@ rootProject.name = 'pr-pilot'
 
 include 'core'
 include 'intellij-plugin'
+include 'sidecar'
 include 'webview'
 include 'vscode-extension'

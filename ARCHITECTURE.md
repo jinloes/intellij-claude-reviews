@@ -71,6 +71,28 @@ intellij-plugin/                       – IntelliJ plugin host; depends on :cor
       WebviewDtos.java               – package-private DTO records serialized to webview bridge
       RepoDetector.java
 
+sidecar/                                – Java 17, non-web Spring Boot process for future shared host orchestration
+  src/main/java/com/jinloes/prpilot/sidecar/
+    PrPilotSidecarApplication.java      – Non-web Boot entry point; owns stdio process lifecycle
+    SidecarConfiguration.java           – Explicit Spring bean composition root
+    StdioFrameCodec.java                – Bounded Content-Length UTF-8 framing for JSON-RPC over stdio
+    StdioJsonRpcServer.java             – Initial JSON-RPC dispatcher and structured protocol errors
+    SidecarBootstrapService.java        – Sidecar initialization capability response
+    review/
+      ReviewJsonParser.java             – Pure strict provider-review JSON extraction and validation engine
+      ReviewResult.java                 – Sidecar review result DTO
+      ReviewLineComment.java            – Sidecar validated inline-comment DTO
+      ReviewParseResult.java            – Valid review or provider-safe validation error
+    pr/
+      PrSearchQueryService.java          – Pure normalized GitHub PR-search query construction
+  src/main/resources/
+    logback-spring.xml                  – Sends all sidecar logs to stderr; stdout is protocol-only
+  src/test/java/com/jinloes/prpilot/sidecar/
+    StdioFrameCodecTest.java
+    StdioJsonRpcServerTest.java
+    review/ReviewJsonParserTest.java
+    pr/PrSearchQueryServiceTest.java
+
 webview/                               – Vite + React + TypeScript webview
   a11y/
     app.a11y.spec.ts                 – Full-page Playwright + axe checks for setup, discovery, review, and submit states
@@ -139,6 +161,12 @@ CI runs full-page Playwright + axe scenarios (`npm run test:a11y`) using `playwr
 
 ### Module boundaries
 `core` is KMP and has zero IntelliJ dependencies. `intellij-plugin` depends on JVM variant of `core`. Keep Java sources in `core/src/main/java` and `core/src/test/java` (do not move to `src/jvmMain/java`).
+
+`sidecar` is a Java 17 Spring Boot application configured with `WebApplicationType.NONE`; it is not an HTTP server. Its protocol uses bounded `Content-Length`-framed UTF-8 JSON-RPC over standard input/output. Standard output must contain protocol frames only—diagnostics belong on standard error. Keep the service engine independent of Spring and IDE APIs; Spring remains the sidecar composition and lifecycle layer.
+
+The sidecar's `review/parse` capability is a pure Java implementation of the strict provider-review contract. It accepts raw provider output, tolerates the current outer prose/markdown-fence format, and returns either a validated review or an `invalid_review_json` domain result. Validation failures must not include or log raw provider output. Invalid JSON-RPC parameters remain protocol errors; malformed provider review content is an expected domain result.
+
+The sidecar's `pr/buildSearchQuery` capability is pure query construction only: it does not discover repositories, authenticate, or call GitHub. It normalizes unrecognized state values to `open`, unrecognized scopes to `currentRepo`, and blank repository paths to the existing `author:@me` fallback.
 
 ### Java interop conventions for commonMain Kotlin
 Java callers must use generated getters/setters (`getX()`), not Kotlin property or record-style accessors. `DiffParser` access from Java is via `DiffParser.INSTANCE.*`. Keep JSON in `core` on kotlinx.serialization.

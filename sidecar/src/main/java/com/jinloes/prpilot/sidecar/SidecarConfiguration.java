@@ -1,0 +1,41 @@
+package com.jinloes.prpilot.sidecar;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jinloes.prpilot.sidecar.pr.PrSearchQueryService;
+import com.jinloes.prpilot.sidecar.review.ReviewJsonParser;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration(proxyBeanMethods = false)
+class SidecarConfiguration {
+    @Bean
+    StdioFrameCodec stdioFrameCodec() {
+        return new StdioFrameCodec();
+    }
+
+    @Bean
+    SidecarBootstrapService sidecarBootstrapService() {
+        return new SidecarBootstrapService();
+    }
+
+    @Bean
+    ReviewJsonParser reviewJsonParser(ObjectMapper objectMapper) {
+        return new ReviewJsonParser(objectMapper);
+    }
+
+    @Bean
+    PrSearchQueryService prSearchQueryService() {
+        return new PrSearchQueryService();
+    }
+
+    @Bean
+    StdioJsonRpcServer stdioJsonRpcServer(
+            ObjectMapper objectMapper,
+            StdioFrameCodec frameCodec,
+            SidecarBootstrapService bootstrapService,
+            ReviewJsonParser reviewJsonParser,
+            PrSearchQueryService prSearchQueryService) {
+        return new StdioJsonRpcServer(
+                objectMapper, frameCodec, bootstrapService, reviewJsonParser, prSearchQueryService);
+    }
+}
