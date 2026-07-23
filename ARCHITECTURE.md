@@ -91,6 +91,8 @@ sidecar/                                – Java 17, non-web Spring Boot process
       PrDetailService.java               – Token-safe authenticated GitHub PR metadata lookup
       PrDetailResult.java                – Structured PR detail outcome DTO
       PrDetail.java                      – Token-free PR metadata and worktree head DTO
+      PrDiffService.java                 – Token-safe byte-bounded review diff retrieval
+      PrDiffResult.java                  – Structured bounded review diff outcome DTO
     github/
       GitHubAuthService.java              – Token-safe gh CLI and GitHub API authentication verification
       CheckAuthResult.java                – Stable authentication diagnosis DTO
@@ -203,6 +205,8 @@ The sidecar's `github/checkAuth` capability validates an HTTPS GitHub origin, ru
 The sidecar's `prs/list` capability owns its `gh auth token` lookup and GitHub `/search/issues` call; hosts never pass a token over JSON-RPC. It uses the canonical `PrSearchQueryService` rules, fetches 51 rows but returns at most 50 with an explicit `limited` flag, and returns token-free domain statuses (`not_installed`, `not_authenticated`, `invalid_base_url`, `rate_limited`, `network_error`, or `api_failed`) rather than JSON-RPC errors. JSON-RPC errors remain reserved for malformed parameters and protocol failures.
 
 The sidecar's `prs/getDetail` capability owns its `gh auth token` lookup and GitHub pull-request metadata request. It validates owner/repository path segments, maps malformed GitHub JSON to `api_failed`, and returns only title/body, merged status, and nullable head/base repository metadata needed for fork-aware worktrees. No token, HTTP response body, or raw exception becomes protocol output.
+
+The sidecar's `prs/getDiff` currently supports review mode only. It streams at most 250,001 bytes, returning a 250 KB UTF-8 review diff and truncation marker when needed; validation diffs remain host-local because the current 1 MiB JSON-RPC payload limit cannot safely carry the existing 1,000,000-character validation contract after JSON escaping.
 
 ### Sidecar wiring (VS Code)
 The VS Code extension is the sidecar's first real caller: `sidecar.ts`'s `SidecarClient` lazily spawns `java -jar <jar>` and speaks the same bounded Content-Length-framed JSON-RPC as `StdioFrameCodec`/`StdioJsonRpcServer`. `extension.ts` owns one process-wide `SidecarClient` instance created in `activate()` and disposed in `deactivate()`/on extension deconstruction; it is passed into `github.searchPRs` so `pr/buildSearchQuery` builds the search query when the sidecar responds successfully, into `github.detectCurrentRepoAsync` so `repo/detect` resolves the current repo when the sidecar finds one, and into Settings so `github/checkAuth` verifies the configured host.

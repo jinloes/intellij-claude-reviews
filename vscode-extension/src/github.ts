@@ -449,7 +449,13 @@ export async function getPRDiff(
     owner: string,
     repo: string,
     prNumber: number,
+    sidecar?: { getPullRequestDiff(base: string, owner: string, repo: string, number: number): Promise<{ status: string; message: string; diff: string | null } | null> },
 ): Promise<string> {
+    const sidecarResult = await sidecar?.getPullRequestDiff(githubBaseUrl, owner, repo, prNumber);
+    if (sidecarResult) {
+        if (sidecarResult.status !== 'ok' || sidecarResult.diff === null) throw new Error(sidecarResult.message);
+        return sidecarResult.diff;
+    }
     const url = `${apiBase(githubBaseUrl)}/repos/${owner}/${repo}/pulls/${prNumber}`;
     const diff = await ghRequestWithRetry(token, url, { accept: 'application/vnd.github.v3.diff' });
     return diff.length > MAX_DIFF_BYTES

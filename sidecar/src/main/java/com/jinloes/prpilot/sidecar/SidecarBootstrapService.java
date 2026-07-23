@@ -13,6 +13,8 @@ final class SidecarBootstrapService {
                         true,
                         "prDetail",
                         true,
+                        "prDiff",
+                        true,
                         "prList",
                         true,
                         "prSearchQuery",

@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
 import com.jinloes.prpilot.sidecar.pr.PrDetailService;
+import com.jinloes.prpilot.sidecar.pr.PrDiffService;
 import com.jinloes.prpilot.sidecar.pr.PrListService;
 import com.jinloes.prpilot.sidecar.pr.PrSearchQueryService;
 import com.jinloes.prpilot.sidecar.repo.RepoDetector;
@@ -35,7 +36,8 @@ class StdioJsonRpcServerTest {
                         new RepoDetector(),
                         new GitHubAuthService(),
                         new PrListService(),
-                        new PrDetailService());
+                        new PrDetailService(),
+                        new PrDiffService());
     }
 
     @Test

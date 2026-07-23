@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
 import com.jinloes.prpilot.sidecar.pr.PrDetailService;
+import com.jinloes.prpilot.sidecar.pr.PrDiffService;
 import com.jinloes.prpilot.sidecar.pr.PrListService;
 import com.jinloes.prpilot.sidecar.pr.PrSearchQueryService;
 import com.jinloes.prpilot.sidecar.repo.RepoDetector;
@@ -28,6 +29,7 @@ final class StdioJsonRpcServer {
     private final GitHubAuthService gitHubAuthService;
     private final PrListService prListService;
     private final PrDetailService prDetailService;
+    private final PrDiffService prDiffService;
 
     StdioJsonRpcServer(
             ObjectMapper objectMapper,
@@ -38,7 +40,8 @@ final class StdioJsonRpcServer {
             RepoDetector repoDetector,
             GitHubAuthService gitHubAuthService,
             PrListService prListService,
-            PrDetailService prDetailService) {
+            PrDetailService prDetailService,
+            PrDiffService prDiffService) {
         this.objectMapper = Objects.requireNonNull(objectMapper);
         this.frameCodec = Objects.requireNonNull(frameCodec);
         this.bootstrapService = Objects.requireNonNull(bootstrapService);
@@ -48,6 +51,7 @@ final class StdioJsonRpcServer {
         this.gitHubAuthService = Objects.requireNonNull(gitHubAuthService);
         this.prListService = Objects.requireNonNull(prListService);
         this.prDetailService = Objects.requireNonNull(prDetailService);
+        this.prDiffService = Objects.requireNonNull(prDiffService);
     }
 
     void run(InputStream input, OutputStream output) {
@@ -91,6 +95,7 @@ final class StdioJsonRpcServer {
                         case "github/checkAuth" -> checkGitHubAuth(request);
                         case "prs/list" -> listPullRequests(request);
                         case "prs/getDetail" -> getPullRequestDetail(request);
+                        case "prs/getDiff" -> getPullRequestDiff(request);
                         default -> error(requestId(request), -32601, "Method not found");
                     };
         } catch (RuntimeException exception) {
@@ -192,6 +197,29 @@ final class StdioJsonRpcServer {
                                 params.path("owner").textValue(),
                                 params.path("repo").textValue(),
                                 params.path("number").intValue())));
+    }
+
+    private ObjectNode getPullRequestDiff(JsonNode request) {
+        JsonNode params = request.get("params");
+        if (params == null
+                || !params.isObject()
+                || !hasOnlyFields(
+                        params, Set.of("githubBaseUrl", "owner", "repo", "number", "mode"))
+                || !params.path("githubBaseUrl").isTextual()
+                || !params.path("owner").isTextual()
+                || !params.path("repo").isTextual()
+                || !params.path("number").isInt()
+                || !params.path("mode").isTextual())
+            return error(requestId(request), -32602, "Invalid params");
+        return result(
+                requestId(request),
+                prDiffService.get(
+                        new PrDiffService.Params(
+                                params.path("githubBaseUrl").textValue(),
+                                params.path("owner").textValue(),
+                                params.path("repo").textValue(),
+                                params.path("number").intValue(),
+                                params.path("mode").textValue())));
     }
 
     private boolean hasOnlyFields(JsonNode object, Set<String> allowedFields) {

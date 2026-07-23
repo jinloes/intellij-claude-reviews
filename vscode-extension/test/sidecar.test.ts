@@ -7,6 +7,7 @@ import {
   extractFrames,
   parseGitHubAuthResult,
   parsePrDetailResult,
+  parsePrDiffResult,
   parsePrListResult,
   resolveSidecarJarPath,
 } from '../src/sidecar';
@@ -151,6 +152,12 @@ test('parsePrDetailResult rejects malformed successful and unknown results', () 
   assert.equal(parsePrDetailResult({ status: 'unknown', message: 'x', detail: null }), null);
   assert.equal(parsePrDetailResult({ status: 'ok', message: 'x', detail: null }), null);
   assert.equal(parsePrDetailResult({ status: 'ok', message: 'x', detail: { merged: false } }), null);
+});
+
+test('parsePrDiffResult accepts only complete successful review diffs', () => {
+  assert.deepEqual(parsePrDiffResult({ status: 'ok', message: 'Pull request diff loaded.', diff: 'diff', truncated: false, limitBytes: 250000 }),
+    { status: 'ok', message: 'Pull request diff loaded.', diff: 'diff', truncated: false, limitBytes: 250000 });
+  assert.equal(parsePrDiffResult({ status: 'ok', message: 'x', diff: null, truncated: false, limitBytes: 250000 }), null);
 });
 
 test('resolveSidecarJarPath prefers the packaged jar staged alongside the extension', () => {

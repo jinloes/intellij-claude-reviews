@@ -745,7 +745,7 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
         const readiness = providerReadiness();
 
         const [diff, detail, draft] = await Promise.all([
-            github.getPRDiff(token, base, owner, repo, number),
+            github.getPRDiff(token, base, owner, repo, number, sidecarClient ?? undefined),
             github.getPRDetailWithSidecar(
                 token, base, owner, repo, number, sidecarClient ?? undefined,
             ),

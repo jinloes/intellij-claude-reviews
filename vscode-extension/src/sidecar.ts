@@ -47,6 +47,14 @@ export interface SidecarPrDetailHead {
     cloneUrl: string | null;
 }
 
+export interface SidecarPrDiffResult {
+    status: 'ok' | 'not_installed' | 'not_authenticated' | 'invalid_base_url' | 'invalid_request' | 'rate_limited' | 'network_error' | 'api_failed';
+    message: string;
+    diff: string | null;
+    truncated: boolean;
+    limitBytes: number;
+}
+
 export interface SidecarPrDetailResult {
     status: 'ok' | 'not_installed' | 'not_authenticated' | 'invalid_base_url' | 'invalid_request' | 'rate_limited' | 'network_error' | 'api_failed';
     message: string;
@@ -87,6 +95,7 @@ const PR_DETAIL_STATUSES = new Set<SidecarPrDetailResult['status']>([
     'network_error',
     'api_failed',
 ]);
+const PR_DIFF_STATUSES = new Set<SidecarPrDiffResult['status']>(PR_DETAIL_STATUSES);
 
 /** Validates the token-free result shape returned by `github/checkAuth`. */
 export function parseGitHubAuthResult(value: unknown): SidecarGitHubAuthResult | null {
@@ -205,6 +214,17 @@ export function parsePrDetailResult(value: unknown): SidecarPrDetailResult | nul
             baseRepoFullName: typeof detail.baseRepoFullName === 'string' ? detail.baseRepoFullName : null,
         },
     };
+}
+
+export function parsePrDiffResult(value: unknown): SidecarPrDiffResult | null {
+    if (!value || typeof value !== 'object') return null;
+    const result = value as Record<string, unknown>;
+    if (typeof result.status !== 'string' || !PR_DIFF_STATUSES.has(result.status as SidecarPrDiffResult['status'])
+        || typeof result.message !== 'string' || (result.diff !== null && typeof result.diff !== 'string')
+        || typeof result.truncated !== 'boolean' || typeof result.limitBytes !== 'number') return null;
+    if ((result.status === 'ok') !== (typeof result.diff === 'string')) return null;
+    return { status: result.status as SidecarPrDiffResult['status'], message: result.message,
+        diff: typeof result.diff === 'string' ? result.diff : null, truncated: result.truncated, limitBytes: result.limitBytes };
 }
 
 /** Encodes a JSON-RPC payload with the same bounded Content-Length framing the sidecar's
@@ -429,6 +449,11 @@ export class SidecarClient {
         } catch {
             return null;
         }
+    }
+
+    async getPullRequestDiff(githubBaseUrl: string, owner: string, repo: string, number: number): Promise<SidecarPrDiffResult | null> {
+        try { return parsePrDiffResult(await this.request('prs/getDiff', { githubBaseUrl, owner, repo, number, mode: 'review' })); }
+        catch { return null; }
     }
 
     dispose(): void {
