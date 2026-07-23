@@ -139,6 +139,53 @@ interface DraftReviewSidecar {
     } | null>;
 }
 
+interface DraftReviewMutationSidecarResult {
+    status: string;
+    message: string;
+    reviewId: string | null;
+    commentsDropped: boolean;
+}
+
+interface SidecarCommentInput {
+    file: string;
+    line: number;
+    type: string;
+    body: string;
+    severity?: string;
+    category?: string;
+    confidence?: string;
+    rationale?: string;
+}
+
+interface DraftReviewMutationSidecar {
+    saveDraftReview(
+        githubBaseUrl: string,
+        owner: string,
+        repo: string,
+        number: number,
+        summary: string,
+        verdict: string,
+        lineComments: SidecarCommentInput[],
+        orphans: SidecarCommentInput[],
+    ): Promise<DraftReviewMutationSidecarResult | null>;
+    submitReview(
+        githubBaseUrl: string,
+        owner: string,
+        repo: string,
+        number: number,
+        reviewId: string,
+        event: string,
+        body: string,
+    ): Promise<DraftReviewMutationSidecarResult | null>;
+    deleteDraftReview(
+        githubBaseUrl: string,
+        owner: string,
+        repo: string,
+        number: number,
+        reviewId: string,
+    ): Promise<DraftReviewMutationSidecarResult | null>;
+}
+
 interface SearchItem {
     title: string;
     html_url: string;
@@ -929,6 +976,90 @@ export async function deleteDraftReview(
 ): Promise<void> {
     const url = `${apiBase(githubBaseUrl)}/repos/${owner}/${repo}/pulls/${number}/reviews/${reviewId}`;
     await ghRequestWithRetry(token, url, { method: 'DELETE' });
+}
+
+function toSidecarComment(c: LineComment): SidecarCommentInput {
+    return {
+        file: c.file,
+        line: c.line,
+        type: c.type,
+        body: c.body,
+        ...(c.severity ? { severity: c.severity } : {}),
+        ...(c.category ? { category: c.category } : {}),
+        ...(c.confidence ? { confidence: c.confidence } : {}),
+        ...(c.rationale ? { rationale: c.rationale } : {}),
+    };
+}
+
+/**
+ * Uses the optional sidecar's token-safe draft-review save capability (including the body-first,
+ * per-comment 422 fallback) when available. A malformed or unavailable sidecar response falls
+ * back to the existing direct request; valid sidecar domain failures throw their safe message so
+ * the caller can report the failure instead of silently retrying locally.
+ */
+export async function saveDraftReviewWithSidecar(
+    token: string,
+    githubBaseUrl: string,
+    owner: string,
+    repo: string,
+    number: number,
+    review: ReviewResult,
+    orphans: LineComment[] = [],
+    sidecar?: DraftReviewMutationSidecar,
+): Promise<{ reviewId: string; commentsDropped: boolean }> {
+    const result = await sidecar?.saveDraftReview(
+        githubBaseUrl,
+        owner,
+        repo,
+        number,
+        review.summary,
+        review.verdict,
+        review.lineComments.map(toSidecarComment),
+        orphans.map(toSidecarComment),
+    );
+    if (!result) return saveDraftReview(token, githubBaseUrl, owner, repo, number, review, orphans);
+    if (result.status !== 'ok' || !result.reviewId) throw new Error(result.message);
+    return { reviewId: result.reviewId, commentsDropped: result.commentsDropped };
+}
+
+/**
+ * Uses the optional sidecar's token-safe review-submission capability when available. A
+ * malformed or unavailable sidecar response falls back to the existing direct request; valid
+ * sidecar domain failures throw their safe message so the caller can report the failure.
+ */
+export async function submitReviewWithSidecar(
+    token: string,
+    githubBaseUrl: string,
+    owner: string,
+    repo: string,
+    number: number,
+    reviewId: string,
+    event: string,
+    body: string,
+    sidecar?: DraftReviewMutationSidecar,
+): Promise<void> {
+    const result = await sidecar?.submitReview(githubBaseUrl, owner, repo, number, reviewId, event, body);
+    if (!result) return submitReview(token, githubBaseUrl, owner, repo, number, reviewId, event, body);
+    if (result.status !== 'ok') throw new Error(result.message);
+}
+
+/**
+ * Uses the optional sidecar's token-safe draft-deletion capability when available. A malformed
+ * or unavailable sidecar response falls back to the existing direct request; valid sidecar
+ * domain failures throw their safe message so the caller can report the failure.
+ */
+export async function deleteDraftReviewWithSidecar(
+    token: string,
+    githubBaseUrl: string,
+    owner: string,
+    repo: string,
+    number: number,
+    reviewId: string,
+    sidecar?: DraftReviewMutationSidecar,
+): Promise<void> {
+    const result = await sidecar?.deleteDraftReview(githubBaseUrl, owner, repo, number, reviewId);
+    if (!result) return deleteDraftReview(token, githubBaseUrl, owner, repo, number, reviewId);
+    if (result.status !== 'ok') throw new Error(result.message);
 }
 
 // ── Repo auto-detection ────────────────────────────────────────────────────────

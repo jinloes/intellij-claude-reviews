@@ -5,6 +5,7 @@ import * as path from 'path';
 import {
   encodeFrame,
   extractFrames,
+  parseDraftReviewMutationResult,
   parseDraftReviewResult,
   parseGitHubAuthResult,
   parsePrDetailResult,
@@ -219,6 +220,34 @@ test('parseDraftReviewResult rejects malformed successful and unknown results', 
   assert.equal(parseDraftReviewResult({ status: 'unknown', message: 'x', id: null, commitId: null, review: null }), null);
   assert.equal(parseDraftReviewResult({ status: 'ok', message: 'x', id: null, commitId: null, review: null }), null);
   assert.equal(parseDraftReviewResult({ status: 'ok', message: 'x', id: '1', commitId: null, review: { summary: 's' } }), null);
+});
+
+test('parseDraftReviewMutationResult accepts a successful save result', () => {
+  assert.deepEqual(
+    parseDraftReviewMutationResult({ status: 'ok', message: 'Draft review saved.', reviewId: '42', commentsDropped: true }),
+    { status: 'ok', message: 'Draft review saved.', reviewId: '42', commentsDropped: true },
+  );
+});
+
+test('parseDraftReviewMutationResult accepts a successful result with a null reviewId', () => {
+  assert.deepEqual(
+    parseDraftReviewMutationResult({ status: 'ok', message: 'Review submitted.', reviewId: null, commentsDropped: false }),
+    { status: 'ok', message: 'Review submitted.', reviewId: null, commentsDropped: false },
+  );
+});
+
+test('parseDraftReviewMutationResult accepts a token-free domain failure', () => {
+  assert.deepEqual(
+    parseDraftReviewMutationResult({ status: 'not_authenticated', message: 'x', reviewId: null, commentsDropped: false }),
+    { status: 'not_authenticated', message: 'x', reviewId: null, commentsDropped: false },
+  );
+});
+
+test('parseDraftReviewMutationResult rejects malformed or unknown-status results', () => {
+  assert.equal(parseDraftReviewMutationResult({ status: 'unknown', message: 'x', reviewId: null, commentsDropped: false }), null);
+  assert.equal(parseDraftReviewMutationResult({ status: 'ok', message: 'x', reviewId: 42, commentsDropped: false }), null);
+  assert.equal(parseDraftReviewMutationResult({ status: 'ok', message: 'x', reviewId: null, commentsDropped: 'no' }), null);
+  assert.equal(parseDraftReviewMutationResult(null), null);
 });
 
 test('resolveSidecarJarPath prefers the packaged jar staged alongside the extension', () => {

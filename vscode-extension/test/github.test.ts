@@ -7,6 +7,7 @@ import * as path from 'path';
 import {
   apiBase,
   buildPRSearchQuery,
+  deleteDraftReviewWithSidecar,
   detectCurrentRepo,
   detectCurrentRepoAsync,
   getPRDetailWithSidecar,
@@ -15,7 +16,9 @@ import {
   loadDraftReviewWithSidecar,
   MAX_VALIDATION_DIFF_BYTES,
   normalizeGithubBaseUrl,
+  saveDraftReviewWithSidecar,
   searchPRs,
+  submitReviewWithSidecar,
 } from '../src/github';
 
 test('buildPRSearchQuery uses current repo when scope is currentRepo', () => {
@@ -268,6 +271,151 @@ test('loadDraftReviewWithSidecar surfaces valid domain failures', async () => {
       },
     ),
     /gh auth login/,
+  );
+});
+
+test('saveDraftReviewWithSidecar uses a valid sidecar save result without direct GitHub fallback', async () => {
+  const review: import('../src/github').ReviewResult = {
+    summary: 'Looks good',
+    verdict: 'APPROVE',
+    lineComments: [{ file: 'a.ts', line: 10, type: 'note', body: 'nit' }],
+  };
+  const saved = await saveDraftReviewWithSidecar(
+    'unused-token',
+    'https://github.com',
+    'acme',
+    'widgets',
+    42,
+    review,
+    [],
+    {
+      saveDraftReview: async () => ({
+        status: 'ok',
+        message: 'Draft review saved.',
+        reviewId: '7',
+        commentsDropped: true,
+      }),
+      submitReview: async () => {
+        throw new Error('submitReview must not be called');
+      },
+      deleteDraftReview: async () => {
+        throw new Error('deleteDraftReview must not be called');
+      },
+    },
+  );
+
+  assert.deepEqual(saved, { reviewId: '7', commentsDropped: true });
+});
+
+test('saveDraftReviewWithSidecar surfaces valid domain failures', async () => {
+  const review: import('../src/github').ReviewResult = {
+    summary: 'Looks good',
+    verdict: 'APPROVE',
+    lineComments: [],
+  };
+  await assert.rejects(
+    saveDraftReviewWithSidecar(
+      'unused-token',
+      'https://github.com',
+      'acme',
+      'widgets',
+      42,
+      review,
+      [],
+      {
+        saveDraftReview: async () => ({
+          status: 'not_authenticated',
+          message: "Run 'gh auth login' in a terminal for this GitHub host.",
+          reviewId: null,
+          commentsDropped: false,
+        }),
+        submitReview: async () => null,
+        deleteDraftReview: async () => null,
+      },
+    ),
+    /gh auth login/,
+  );
+});
+
+test('submitReviewWithSidecar resolves without direct GitHub fallback on a valid ok result', async () => {
+  await submitReviewWithSidecar(
+    'unused-token',
+    'https://github.com',
+    'acme',
+    'widgets',
+    42,
+    '7',
+    'APPROVE',
+    '',
+    {
+      saveDraftReview: async () => {
+        throw new Error('saveDraftReview must not be called');
+      },
+      submitReview: async () => ({ status: 'ok', message: 'Review submitted.', reviewId: null, commentsDropped: false }),
+      deleteDraftReview: async () => {
+        throw new Error('deleteDraftReview must not be called');
+      },
+    },
+  );
+});
+
+test('submitReviewWithSidecar surfaces valid domain failures', async () => {
+  await assert.rejects(
+    submitReviewWithSidecar(
+      'unused-token',
+      'https://github.com',
+      'acme',
+      'widgets',
+      42,
+      '7',
+      'APPROVE',
+      '',
+      {
+        saveDraftReview: async () => null,
+        submitReview: async () => ({ status: 'rate_limited', message: 'GitHub rate limit exceeded. Try again shortly.', reviewId: null, commentsDropped: false }),
+        deleteDraftReview: async () => null,
+      },
+    ),
+    /rate limit/,
+  );
+});
+
+test('deleteDraftReviewWithSidecar resolves without direct GitHub fallback on a valid ok result', async () => {
+  await deleteDraftReviewWithSidecar(
+    'unused-token',
+    'https://github.com',
+    'acme',
+    'widgets',
+    42,
+    '7',
+    {
+      saveDraftReview: async () => {
+        throw new Error('saveDraftReview must not be called');
+      },
+      submitReview: async () => {
+        throw new Error('submitReview must not be called');
+      },
+      deleteDraftReview: async () => ({ status: 'ok', message: 'Draft review deleted.', reviewId: null, commentsDropped: false }),
+    },
+  );
+});
+
+test('deleteDraftReviewWithSidecar surfaces valid domain failures', async () => {
+  await assert.rejects(
+    deleteDraftReviewWithSidecar(
+      'unused-token',
+      'https://github.com',
+      'acme',
+      'widgets',
+      42,
+      '7',
+      {
+        saveDraftReview: async () => null,
+        submitReview: async () => null,
+        deleteDraftReview: async () => ({ status: 'api_failed', message: 'GitHub API request failed.', reviewId: null, commentsDropped: false }),
+      },
+    ),
+    /GitHub API request failed/,
   );
 });
 

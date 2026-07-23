@@ -78,6 +78,18 @@ export interface SidecarLineComment {
     rationale: string | null;
 }
 
+/** Request-shaped comment sent to `prs/saveDraftReview` — optional fields may be omitted. */
+export interface SidecarCommentInput {
+    file: string;
+    line: number;
+    type: string;
+    body: string;
+    severity?: string;
+    category?: string;
+    confidence?: string;
+    rationale?: string;
+}
+
 export interface SidecarDraftReviewResult {
     status: 'ok' | 'none' | 'not_installed' | 'not_authenticated' | 'invalid_base_url' | 'invalid_request' | 'rate_limited' | 'network_error' | 'api_failed';
     message: string;
@@ -89,6 +101,13 @@ export interface SidecarDraftReviewResult {
         lineComments: SidecarLineComment[];
         importedFromGitHub: boolean;
     } | null;
+}
+
+export interface SidecarDraftReviewMutationResult {
+    status: 'ok' | 'not_installed' | 'not_authenticated' | 'invalid_base_url' | 'invalid_request' | 'rate_limited' | 'network_error' | 'api_failed';
+    message: string;
+    reviewId: string | null;
+    commentsDropped: boolean;
 }
 
 const AUTH_STATUSES = new Set<SidecarGitHubAuthResult['status']>([
@@ -124,6 +143,17 @@ const PR_DIFF_STATUSES = new Set<SidecarPrDiffResult['status']>(PR_DETAIL_STATUS
 const DRAFT_REVIEW_STATUSES = new Set<SidecarDraftReviewResult['status']>([
     'ok',
     'none',
+    'not_installed',
+    'not_authenticated',
+    'invalid_base_url',
+    'invalid_request',
+    'rate_limited',
+    'network_error',
+    'api_failed',
+]);
+
+const DRAFT_REVIEW_MUTATION_STATUSES = new Set<SidecarDraftReviewMutationResult['status']>([
+    'ok',
     'not_installed',
     'not_authenticated',
     'invalid_base_url',
@@ -327,6 +357,26 @@ export function parseDraftReviewResult(value: unknown): SidecarDraftReviewResult
             lineComments: lineComments as SidecarLineComment[],
             importedFromGitHub: review.importedFromGitHub,
         },
+    };
+}
+
+/** Validates the token-free result shape returned by `prs/saveDraftReview`, `prs/submitReview`,
+ * and `prs/deleteDraftReview` — all three share the same result shape. */
+export function parseDraftReviewMutationResult(value: unknown): SidecarDraftReviewMutationResult | null {
+    if (!value || typeof value !== 'object') return null;
+    const result = value as Record<string, unknown>;
+    if (typeof result.status !== 'string'
+        || !DRAFT_REVIEW_MUTATION_STATUSES.has(result.status as SidecarDraftReviewMutationResult['status'])
+        || typeof result.message !== 'string'
+        || (result.reviewId !== null && typeof result.reviewId !== 'string')
+        || typeof result.commentsDropped !== 'boolean') {
+        return null;
+    }
+    return {
+        status: result.status as SidecarDraftReviewMutationResult['status'],
+        message: result.message,
+        reviewId: typeof result.reviewId === 'string' ? result.reviewId : null,
+        commentsDropped: result.commentsDropped,
     };
 }
 
@@ -577,6 +627,89 @@ export class SidecarClient {
                 owner,
                 repo,
                 number,
+            }));
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Saves a pending (draft) review through the sidecar without returning a GitHub token to the
+     * extension. Resolves to null only for transport or response-shape failures so callers retain
+     * local fallback behavior; valid domain outcomes (including failures) are returned as-is.
+     */
+    async saveDraftReview(
+        githubBaseUrl: string,
+        owner: string,
+        repo: string,
+        number: number,
+        summary: string,
+        verdict: string,
+        lineComments: SidecarCommentInput[],
+        orphans: SidecarCommentInput[],
+    ): Promise<SidecarDraftReviewMutationResult | null> {
+        try {
+            return parseDraftReviewMutationResult(await this.request('prs/saveDraftReview', {
+                githubBaseUrl,
+                owner,
+                repo,
+                number,
+                summary,
+                verdict,
+                lineComments,
+                orphans,
+            }));
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Submits (publishes) a pending review through the sidecar without returning a GitHub token
+     * to the extension. Resolves to null only for transport or response-shape failures.
+     */
+    async submitReview(
+        githubBaseUrl: string,
+        owner: string,
+        repo: string,
+        number: number,
+        reviewId: string,
+        event: string,
+        body: string,
+    ): Promise<SidecarDraftReviewMutationResult | null> {
+        try {
+            return parseDraftReviewMutationResult(await this.request('prs/submitReview', {
+                githubBaseUrl,
+                owner,
+                repo,
+                number,
+                reviewId,
+                event,
+                body,
+            }));
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Deletes a pending review through the sidecar without returning a GitHub token to the
+     * extension. Resolves to null only for transport or response-shape failures.
+     */
+    async deleteDraftReview(
+        githubBaseUrl: string,
+        owner: string,
+        repo: string,
+        number: number,
+        reviewId: string,
+    ): Promise<SidecarDraftReviewMutationResult | null> {
+        try {
+            return parseDraftReviewMutationResult(await this.request('prs/deleteDraftReview', {
+                githubBaseUrl,
+                owner,
+                repo,
+                number,
+                reviewId,
             }));
         } catch {
             return null;

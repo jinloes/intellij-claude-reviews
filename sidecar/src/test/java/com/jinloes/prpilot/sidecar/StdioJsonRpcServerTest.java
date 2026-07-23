@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
+import com.jinloes.prpilot.sidecar.pr.DraftReviewMutationService;
 import com.jinloes.prpilot.sidecar.pr.DraftReviewService;
 import com.jinloes.prpilot.sidecar.pr.PrDetailService;
 import com.jinloes.prpilot.sidecar.pr.PrDiffService;
@@ -39,7 +40,8 @@ class StdioJsonRpcServerTest {
                         new PrListService(),
                         new PrDetailService(),
                         new PrDiffService(),
-                        new DraftReviewService());
+                        new DraftReviewService(),
+                        new DraftReviewMutationService());
     }
 
     @Test
@@ -70,6 +72,12 @@ class StdioJsonRpcServerTest {
         assertThat(response.path("result").path("capabilities").path("prList").asBoolean())
                 .isTrue();
         assertThat(response.path("result").path("capabilities").path("prDetail").asBoolean())
+                .isTrue();
+        assertThat(
+                        response.path("result")
+                                .path("capabilities")
+                                .path("draftReviewMutations")
+                                .asBoolean())
                 .isTrue();
     }
 
@@ -299,6 +307,98 @@ class StdioJsonRpcServerTest {
 
         assertThat(missingNumber.path("error").path("code").asInt()).isEqualTo(-32602);
         assertThat(extraField.path("error").path("code").asInt()).isEqualTo(-32602);
+    }
+
+    @Test
+    void returnsAStructuredResultForAnInvalidSaveDraftReviewBaseUrl() {
+        JsonNode response =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":\"save-1\",\"method\":\"prs/saveDraftReview\","
+                                        + "\"params\":{\"githubBaseUrl\":\"http://github.com\",\"owner\":\"acme\","
+                                        + "\"repo\":\"widgets\",\"number\":42,\"summary\":\"s\",\"verdict\":\"APPROVE\","
+                                        + "\"lineComments\":[]}}")
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(response.path("id").asText()).isEqualTo("save-1");
+        assertThat(response.path("result").path("status").asText()).isEqualTo("invalid_base_url");
+    }
+
+    @Test
+    void rejectsInvalidSaveDraftReviewParams() {
+        JsonNode missingLineComments =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"prs/saveDraftReview\","
+                                        + "\"params\":{\"githubBaseUrl\":\"https://github.com\",\"owner\":\"acme\","
+                                        + "\"repo\":\"widgets\",\"number\":1,\"summary\":\"s\",\"verdict\":\"APPROVE\"}}")
+                                .getBytes(StandardCharsets.UTF_8));
+        JsonNode malformedComment =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"prs/saveDraftReview\","
+                                        + "\"params\":{\"githubBaseUrl\":\"https://github.com\",\"owner\":\"acme\","
+                                        + "\"repo\":\"widgets\",\"number\":1,\"summary\":\"s\",\"verdict\":\"APPROVE\","
+                                        + "\"lineComments\":[{\"file\":\"a.java\"}]}}")
+                                .getBytes(StandardCharsets.UTF_8));
+        JsonNode extraField =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"prs/saveDraftReview\","
+                                        + "\"params\":{\"githubBaseUrl\":\"https://github.com\",\"owner\":\"acme\","
+                                        + "\"repo\":\"widgets\",\"number\":1,\"summary\":\"s\",\"verdict\":\"APPROVE\","
+                                        + "\"lineComments\":[],\"extra\":true}}")
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(missingLineComments.path("error").path("code").asInt()).isEqualTo(-32602);
+        assertThat(malformedComment.path("error").path("code").asInt()).isEqualTo(-32602);
+        assertThat(extraField.path("error").path("code").asInt()).isEqualTo(-32602);
+    }
+
+    @Test
+    void returnsAStructuredResultForAnInvalidSubmitReviewBaseUrl() {
+        JsonNode response =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":\"submit-1\",\"method\":\"prs/submitReview\","
+                                        + "\"params\":{\"githubBaseUrl\":\"http://github.com\",\"owner\":\"acme\","
+                                        + "\"repo\":\"widgets\",\"number\":42,\"reviewId\":\"7\",\"event\":\"APPROVE\",\"body\":\"\"}}")
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(response.path("id").asText()).isEqualTo("submit-1");
+        assertThat(response.path("result").path("status").asText()).isEqualTo("invalid_base_url");
+    }
+
+    @Test
+    void rejectsInvalidSubmitReviewParams() {
+        JsonNode missingReviewId =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":25,\"method\":\"prs/submitReview\","
+                                        + "\"params\":{\"githubBaseUrl\":\"https://github.com\",\"owner\":\"acme\","
+                                        + "\"repo\":\"widgets\",\"number\":1,\"event\":\"APPROVE\",\"body\":\"\"}}")
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(missingReviewId.path("error").path("code").asInt()).isEqualTo(-32602);
+    }
+
+    @Test
+    void returnsAStructuredResultForAnInvalidDeleteDraftReviewBaseUrl() {
+        JsonNode response =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":\"delete-1\",\"method\":\"prs/deleteDraftReview\","
+                                        + "\"params\":{\"githubBaseUrl\":\"http://github.com\",\"owner\":\"acme\","
+                                        + "\"repo\":\"widgets\",\"number\":42,\"reviewId\":\"7\"}}")
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(response.path("id").asText()).isEqualTo("delete-1");
+        assertThat(response.path("result").path("status").asText()).isEqualTo("invalid_base_url");
+    }
+
+    @Test
+    void rejectsInvalidDeleteDraftReviewParams() {
+        JsonNode missingReviewId =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":26,\"method\":\"prs/deleteDraftReview\","
+                                        + "\"params\":{\"githubBaseUrl\":\"https://github.com\",\"owner\":\"acme\","
+                                        + "\"repo\":\"widgets\",\"number\":1}}")
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(missingReviewId.path("error").path("code").asInt()).isEqualTo(-32602);
     }
 
     @Test

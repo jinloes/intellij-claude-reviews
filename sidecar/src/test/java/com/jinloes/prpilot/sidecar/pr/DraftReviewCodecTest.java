@@ -33,4 +33,84 @@ class DraftReviewCodecTest {
         assertThat(review.lineComments().get(0).line()).isEqualTo(3);
         assertThat(review.lineComments().get(0).type()).isEqualTo("issue");
     }
+
+    @Test
+    void encodeBodyRoundTripsThroughDecode() {
+        List<DraftReviewCodec.LineComment> comments =
+                List.of(
+                        new DraftReviewCodec.LineComment(
+                                "a.java",
+                                4,
+                                "issue",
+                                "fix this",
+                                "major",
+                                "correctness",
+                                "high",
+                                "because"),
+                        new DraftReviewCodec.LineComment(
+                                "", 0, "note", "general note", null, null, null, null));
+
+        String body = codec.encodeBody("overall summary", "REQUEST_CHANGES", comments);
+
+        assertThat(body).contains("<!-- claude-summary: overall summary -->");
+        assertThat(body).contains("<!-- claude-verdict: REQUEST_CHANGES -->");
+        assertThat(body).contains("**General Notes:**");
+        assertThat(body).contains("- general note");
+
+        DraftReviewCodec.DecodedReview decoded = codec.decode(body, List.of());
+        assertThat(decoded.summary()).isEqualTo("overall summary");
+        assertThat(decoded.verdict()).isEqualTo("REQUEST_CHANGES");
+        assertThat(decoded.importedFromGitHub()).isFalse();
+        assertThat(decoded.lineComments()).hasSize(2);
+        assertThat(decoded.lineComments().get(0).body()).isEqualTo("fix this");
+        assertThat(decoded.lineComments().get(0).severity()).isEqualTo("major");
+    }
+
+    @Test
+    void encodeBodyEscapesEmbeddedTagTerminator() {
+        String body = codec.encodeBody("has --> inside", "COMMENT", List.of());
+        assertThat(body).doesNotContain("summary: has --> inside -->");
+        assertThat(body).contains("has -- > inside");
+    }
+
+    @Test
+    void buildCommentArrayDedupesAndExcludesOrphansAndBlankEntries() {
+        DraftReviewCodec.LineComment orphan =
+                new DraftReviewCodec.LineComment(
+                        "b.java", 9, "note", "orphaned", null, null, null, null);
+        List<DraftReviewCodec.LineComment> comments =
+                List.of(
+                        new DraftReviewCodec.LineComment(
+                                "a/x.java", 1, "issue", "dup", null, null, null, null),
+                        new DraftReviewCodec.LineComment(
+                                "x.java", 1, "issue", "dup", null, null, null, null),
+                        orphan,
+                        new DraftReviewCodec.LineComment(
+                                "", 0, "note", "general", null, null, null, null));
+
+        var array = codec.buildCommentArray(comments, List.of(orphan));
+
+        assertThat(array).hasSize(1);
+        assertThat(array.get(0).path("path").asText()).isEqualTo("x.java");
+        assertThat(array.get(0).path("line").asInt()).isEqualTo(1);
+    }
+
+    @Test
+    void buildOrphanAndDroppedSectionsFormatDetachedComments() {
+        DraftReviewCodec.LineComment orphan =
+                new DraftReviewCodec.LineComment(
+                        "a.java", 5, "note", "no position", null, null, null, null);
+        String orphanSection = codec.buildOrphanSection(List.of(orphan));
+        assertThat(orphanSection)
+                .contains("**Comments not attached inline (invalid diff positions):**");
+        assertThat(orphanSection).contains("- `a.java:5`: no position");
+
+        ObjectMapper mapper = new ObjectMapper();
+        var dropped = mapper.createObjectNode();
+        dropped.put("path", "b.java");
+        dropped.put("line", 7);
+        dropped.put("body", "dropped comment");
+        String droppedSection = codec.buildDroppedSection(List.of(dropped));
+        assertThat(droppedSection).contains("- `b.java:7`: dropped comment");
+    }
 }

@@ -944,8 +944,8 @@ async function handleSaveDraft(state: ViewState, msg: Record<string, unknown>): 
 
     try {
         const token = await getToken(state);
-        const { reviewId, commentsDropped } = await github.saveDraftReview(
-            token, githubBaseUrl(), owner, repo, number, review, orphansFromMsg,
+        const { reviewId, commentsDropped } = await github.saveDraftReviewWithSidecar(
+            token, githubBaseUrl(), owner, repo, number, review, orphansFromMsg, sidecarClient ?? undefined,
         );
         if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
         state.pendingReviewId = reviewId;
@@ -978,9 +978,9 @@ async function handleSubmitReview(state: ViewState, msg: Record<string, unknown>
 
     try {
         const token = await getToken(state);
-        await github.submitReview(
+        await github.submitReviewWithSidecar(
             token, githubBaseUrl(), owner, repo, number,
-            reviewId, verdict, comment,
+            reviewId, verdict, comment, sidecarClient ?? undefined,
         );
         if (state.pendingReviewId === reviewId && state.pendingReviewKey === key) {
             state.pendingReviewId = null;
@@ -1012,8 +1012,8 @@ async function handleDeleteDraft(state: ViewState, msg: Record<string, unknown>)
 
     try {
         const token = await getToken(state);
-        await github.deleteDraftReview(
-            token, githubBaseUrl(), owner, repo, number, reviewId,
+        await github.deleteDraftReviewWithSidecar(
+            token, githubBaseUrl(), owner, repo, number, reviewId, sidecarClient ?? undefined,
         );
         if (state.pendingReviewId === reviewId && state.pendingReviewKey === key) {
             state.pendingReviewId = null;

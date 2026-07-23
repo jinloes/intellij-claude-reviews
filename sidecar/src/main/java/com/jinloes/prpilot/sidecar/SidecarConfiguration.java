@@ -2,6 +2,7 @@ package com.jinloes.prpilot.sidecar;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
+import com.jinloes.prpilot.sidecar.pr.DraftReviewMutationService;
 import com.jinloes.prpilot.sidecar.pr.DraftReviewService;
 import com.jinloes.prpilot.sidecar.pr.PrDetailService;
 import com.jinloes.prpilot.sidecar.pr.PrDiffService;
@@ -65,6 +66,11 @@ class SidecarConfiguration {
     }
 
     @Bean
+    DraftReviewMutationService draftReviewMutationService() {
+        return new DraftReviewMutationService();
+    }
+
+    @Bean
     StdioJsonRpcServer stdioJsonRpcServer(
             ObjectMapper objectMapper,
             StdioFrameCodec frameCodec,
@@ -76,7 +82,8 @@ class SidecarConfiguration {
             PrListService prListService,
             PrDetailService prDetailService,
             PrDiffService prDiffService,
-            DraftReviewService draftReviewService) {
+            DraftReviewService draftReviewService,
+            DraftReviewMutationService draftReviewMutationService) {
         return new StdioJsonRpcServer(
                 objectMapper,
                 frameCodec,
@@ -88,6 +95,7 @@ class SidecarConfiguration {
                 prListService,
                 prDetailService,
                 prDiffService,
-                draftReviewService);
+                draftReviewService,
+                draftReviewMutationService);
     }
 }

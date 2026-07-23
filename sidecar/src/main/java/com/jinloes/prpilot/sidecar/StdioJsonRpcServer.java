@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
+import com.jinloes.prpilot.sidecar.pr.DraftReviewMutationService;
 import com.jinloes.prpilot.sidecar.pr.DraftReviewService;
 import com.jinloes.prpilot.sidecar.pr.PrDetailService;
 import com.jinloes.prpilot.sidecar.pr.PrDiffService;
@@ -15,6 +16,8 @@ import com.jinloes.prpilot.sidecar.review.ReviewJsonParser;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 
@@ -32,6 +35,7 @@ final class StdioJsonRpcServer {
     private final PrDetailService prDetailService;
     private final PrDiffService prDiffService;
     private final DraftReviewService draftReviewService;
+    private final DraftReviewMutationService draftReviewMutationService;
 
     StdioJsonRpcServer(
             ObjectMapper objectMapper,
@@ -44,7 +48,8 @@ final class StdioJsonRpcServer {
             PrListService prListService,
             PrDetailService prDetailService,
             PrDiffService prDiffService,
-            DraftReviewService draftReviewService) {
+            DraftReviewService draftReviewService,
+            DraftReviewMutationService draftReviewMutationService) {
         this.objectMapper = Objects.requireNonNull(objectMapper);
         this.frameCodec = Objects.requireNonNull(frameCodec);
         this.bootstrapService = Objects.requireNonNull(bootstrapService);
@@ -56,6 +61,7 @@ final class StdioJsonRpcServer {
         this.prDetailService = Objects.requireNonNull(prDetailService);
         this.prDiffService = Objects.requireNonNull(prDiffService);
         this.draftReviewService = Objects.requireNonNull(draftReviewService);
+        this.draftReviewMutationService = Objects.requireNonNull(draftReviewMutationService);
     }
 
     void run(InputStream input, OutputStream output) {
@@ -101,6 +107,9 @@ final class StdioJsonRpcServer {
                         case "prs/getDetail" -> getPullRequestDetail(request);
                         case "prs/getDiff" -> getPullRequestDiff(request);
                         case "prs/getDraftReview" -> getDraftReview(request);
+                        case "prs/saveDraftReview" -> saveDraftReview(request);
+                        case "prs/submitReview" -> submitReview(request);
+                        case "prs/deleteDraftReview" -> deleteDraftReview(request);
                         default -> error(requestId(request), -32601, "Method not found");
                     };
         } catch (RuntimeException exception) {
@@ -246,6 +255,158 @@ final class StdioJsonRpcServer {
                         params.path("owner").textValue(),
                         params.path("repo").textValue(),
                         params.path("number").intValue()));
+    }
+
+    private ObjectNode saveDraftReview(JsonNode request) {
+        JsonNode params = request.get("params");
+        if (params == null
+                || !params.isObject()
+                || !hasOnlyFields(
+                        params,
+                        Set.of(
+                                "githubBaseUrl",
+                                "owner",
+                                "repo",
+                                "number",
+                                "summary",
+                                "verdict",
+                                "lineComments",
+                                "orphans"))
+                || !params.path("githubBaseUrl").isTextual()
+                || !params.path("owner").isTextual()
+                || !params.path("repo").isTextual()
+                || !params.path("number").isIntegralNumber()
+                || !params.path("number").canConvertToInt()
+                || !params.path("summary").isTextual()
+                || !params.path("verdict").isTextual()) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        List<DraftReviewMutationService.CommentInput> lineComments =
+                parseComments(params.path("lineComments"));
+        List<DraftReviewMutationService.CommentInput> orphans =
+                params.has("orphans") ? parseComments(params.path("orphans")) : List.of();
+        if (lineComments == null || orphans == null) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        return result(
+                requestId(request),
+                draftReviewMutationService.save(
+                        new DraftReviewMutationService.SaveParams(
+                                params.path("githubBaseUrl").textValue(),
+                                params.path("owner").textValue(),
+                                params.path("repo").textValue(),
+                                params.path("number").intValue(),
+                                params.path("summary").textValue(),
+                                params.path("verdict").textValue(),
+                                lineComments,
+                                orphans)));
+    }
+
+    private ObjectNode submitReview(JsonNode request) {
+        JsonNode params = request.get("params");
+        if (params == null
+                || !params.isObject()
+                || !hasOnlyFields(
+                        params,
+                        Set.of(
+                                "githubBaseUrl",
+                                "owner",
+                                "repo",
+                                "number",
+                                "reviewId",
+                                "event",
+                                "body"))
+                || !params.path("githubBaseUrl").isTextual()
+                || !params.path("owner").isTextual()
+                || !params.path("repo").isTextual()
+                || !params.path("number").isIntegralNumber()
+                || !params.path("number").canConvertToInt()
+                || !params.path("reviewId").isTextual()
+                || !params.path("event").isTextual()
+                || !params.path("body").isTextual()) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        return result(
+                requestId(request),
+                draftReviewMutationService.submit(
+                        new DraftReviewMutationService.SubmitParams(
+                                params.path("githubBaseUrl").textValue(),
+                                params.path("owner").textValue(),
+                                params.path("repo").textValue(),
+                                params.path("number").intValue(),
+                                params.path("reviewId").textValue(),
+                                params.path("event").textValue(),
+                                params.path("body").textValue())));
+    }
+
+    private ObjectNode deleteDraftReview(JsonNode request) {
+        JsonNode params = request.get("params");
+        if (params == null
+                || !params.isObject()
+                || !hasOnlyFields(
+                        params, Set.of("githubBaseUrl", "owner", "repo", "number", "reviewId"))
+                || !params.path("githubBaseUrl").isTextual()
+                || !params.path("owner").isTextual()
+                || !params.path("repo").isTextual()
+                || !params.path("number").isIntegralNumber()
+                || !params.path("number").canConvertToInt()
+                || !params.path("reviewId").isTextual()) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        return result(
+                requestId(request),
+                draftReviewMutationService.delete(
+                        new DraftReviewMutationService.DeleteParams(
+                                params.path("githubBaseUrl").textValue(),
+                                params.path("owner").textValue(),
+                                params.path("repo").textValue(),
+                                params.path("number").intValue(),
+                                params.path("reviewId").textValue())));
+    }
+
+    /**
+     * Parses a comment array into strict {@link DraftReviewMutationService.CommentInput}s, or
+     * returns {@code null} if the shape is invalid (missing required fields or wrong types).
+     */
+    private List<DraftReviewMutationService.CommentInput> parseComments(JsonNode array) {
+        if (!array.isArray()) return null;
+        List<DraftReviewMutationService.CommentInput> comments = new ArrayList<>();
+        for (JsonNode comment : array) {
+            if (!comment.isObject()
+                    || !hasOnlyFields(
+                            comment,
+                            Set.of(
+                                    "file",
+                                    "line",
+                                    "type",
+                                    "body",
+                                    "severity",
+                                    "category",
+                                    "confidence",
+                                    "rationale"))
+                    || !comment.path("file").isTextual()
+                    || !comment.path("line").isIntegralNumber()
+                    || !comment.path("line").canConvertToInt()
+                    || !comment.path("type").isTextual()
+                    || !comment.path("body").isTextual()
+                    || (comment.has("severity") && !comment.path("severity").isTextual())
+                    || (comment.has("category") && !comment.path("category").isTextual())
+                    || (comment.has("confidence") && !comment.path("confidence").isTextual())
+                    || (comment.has("rationale") && !comment.path("rationale").isTextual())) {
+                return null;
+            }
+            comments.add(
+                    new DraftReviewMutationService.CommentInput(
+                            comment.path("file").textValue(),
+                            comment.path("line").intValue(),
+                            comment.path("type").textValue(),
+                            comment.path("body").textValue(),
+                            optionalText(comment, "severity"),
+                            optionalText(comment, "category"),
+                            optionalText(comment, "confidence"),
+                            optionalText(comment, "rationale")));
+        }
+        return comments;
     }
 
     private boolean hasOnlyFields(JsonNode object, Set<String> allowedFields) {
