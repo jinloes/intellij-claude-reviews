@@ -88,6 +88,9 @@ sidecar/                                – Java 17, non-web Spring Boot process
       PrListService.java                 – Token-safe authenticated GitHub PR search with retry and truncation handling
       PrListResult.java                  – Structured list outcome DTO (status, limit metadata, PRs)
       PullRequestSummary.java            – Token-free PR list item DTO
+      PrDetailService.java               – Token-safe authenticated GitHub PR metadata lookup
+      PrDetailResult.java                – Structured PR detail outcome DTO
+      PrDetail.java                      – Token-free PR metadata and worktree head DTO
     github/
       GitHubAuthService.java              – Token-safe gh CLI and GitHub API authentication verification
       CheckAuthResult.java                – Stable authentication diagnosis DTO
@@ -107,6 +110,7 @@ sidecar/                                – Java 17, non-web Spring Boot process
     review/ReviewJsonParserTest.java
     pr/PrSearchQueryServiceTest.java
     pr/PrListServiceTest.java
+    pr/PrDetailServiceTest.java
     github/GitHubAuthServiceTest.java
     repo/RepoDetectorTest.java
     repo/RemoteUrlParserTest.java
@@ -198,10 +202,12 @@ The sidecar's `github/checkAuth` capability validates an HTTPS GitHub origin, ru
 
 The sidecar's `prs/list` capability owns its `gh auth token` lookup and GitHub `/search/issues` call; hosts never pass a token over JSON-RPC. It uses the canonical `PrSearchQueryService` rules, fetches 51 rows but returns at most 50 with an explicit `limited` flag, and returns token-free domain statuses (`not_installed`, `not_authenticated`, `invalid_base_url`, `rate_limited`, `network_error`, or `api_failed`) rather than JSON-RPC errors. JSON-RPC errors remain reserved for malformed parameters and protocol failures.
 
+The sidecar's `prs/getDetail` capability owns its `gh auth token` lookup and GitHub pull-request metadata request. It validates owner/repository path segments, maps malformed GitHub JSON to `api_failed`, and returns only title/body, merged status, and nullable head/base repository metadata needed for fork-aware worktrees. No token, HTTP response body, or raw exception becomes protocol output.
+
 ### Sidecar wiring (VS Code)
 The VS Code extension is the sidecar's first real caller: `sidecar.ts`'s `SidecarClient` lazily spawns `java -jar <jar>` and speaks the same bounded Content-Length-framed JSON-RPC as `StdioFrameCodec`/`StdioJsonRpcServer`. `extension.ts` owns one process-wide `SidecarClient` instance created in `activate()` and disposed in `deactivate()`/on extension deconstruction; it is passed into `github.searchPRs` so `pr/buildSearchQuery` builds the search query when the sidecar responds successfully, into `github.detectCurrentRepoAsync` so `repo/detect` resolves the current repo when the sidecar finds one, and into Settings so `github/checkAuth` verifies the configured host.
 
-The sidecar is an optional accelerant, never a hard dependency: every `SidecarClient` method resolves to `null` (never throws) on spawn failure, missing `java`, timeout, or a malformed response, and `github.searchPRs`, `github.detectCurrentRepoAsync`, and Settings fall back to their local implementations whenever that happens. Valid sidecar domain outcomes are not fallbacks: `prs/list` success supplies the list and truncation metadata directly, while its auth/API outcomes flow into the existing setup/error UI. `buildPRSearchQuery`/`PrSearchQueryService` and `detectCurrentRepo`/`RepoDetector` must therefore stay behaviorally compatible (the Java side is intentionally the stricter, linked-worktree-aware superset) — see the parity table in `AGENTS.md`.
+The sidecar is an optional accelerant, never a hard dependency: every `SidecarClient` method resolves to `null` (never throws) on spawn failure, missing `java`, timeout, or a malformed response, and `github.searchPRs`, `github.getPRDetailWithSidecar`, `github.detectCurrentRepoAsync`, and Settings fall back to their local implementations whenever that happens. Valid sidecar domain outcomes are not fallbacks: `prs/list` success supplies the list and truncation metadata directly, while its auth/API outcomes flow into the existing setup/error UI. `buildPRSearchQuery`/`PrSearchQueryService` and `detectCurrentRepo`/`RepoDetector` must therefore stay behaviorally compatible (the Java side is intentionally the stricter, linked-worktree-aware superset) — see the parity table in `AGENTS.md`.
 
 `resolveSidecarJarPath` mirrors `resolveWebviewDistPath`'s dev/packaged fallback: it prefers a jar staged at `vscode-extension/sidecar/pr-pilot-sidecar.jar` (produced by `scripts/stage-sidecar.mjs` from the Gradle `:sidecar:bootJar` output, matching the webview's `stage-webview.mjs` pattern) and falls back to the sibling `sidecar/build/libs/pr-pilot-sidecar.jar` during local development. The release pipeline runs `:sidecar:bootJar` before packaging so shipped `.vsix` builds bundle the jar.
 

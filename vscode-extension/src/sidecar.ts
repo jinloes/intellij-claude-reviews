@@ -40,6 +40,25 @@ export interface SidecarPrListResult {
     }>;
 }
 
+export interface SidecarPrDetailHead {
+    sha: string;
+    ref: string;
+    repoFullName: string | null;
+    cloneUrl: string | null;
+}
+
+export interface SidecarPrDetailResult {
+    status: 'ok' | 'not_installed' | 'not_authenticated' | 'invalid_base_url' | 'invalid_request' | 'rate_limited' | 'network_error' | 'api_failed';
+    message: string;
+    detail: {
+        merged: boolean;
+        title: string;
+        body: string;
+        head: SidecarPrDetailHead | null;
+        baseRepoFullName: string | null;
+    } | null;
+}
+
 const AUTH_STATUSES = new Set<SidecarGitHubAuthResult['status']>([
     'authenticated',
     'not_installed',
@@ -53,6 +72,17 @@ const PR_LIST_STATUSES = new Set<SidecarPrListResult['status']>([
     'not_installed',
     'not_authenticated',
     'invalid_base_url',
+    'rate_limited',
+    'network_error',
+    'api_failed',
+]);
+
+const PR_DETAIL_STATUSES = new Set<SidecarPrDetailResult['status']>([
+    'ok',
+    'not_installed',
+    'not_authenticated',
+    'invalid_base_url',
+    'invalid_request',
     'rate_limited',
     'network_error',
     'api_failed',
@@ -120,6 +150,60 @@ export function parsePrListResult(value: unknown): SidecarPrListResult | null {
         resultLimit: result.resultLimit,
         limited: result.limited,
         prs: prs as SidecarPrListResult['prs'],
+    };
+}
+
+/** Validates the token-free result shape returned by `prs/getDetail`. */
+export function parsePrDetailResult(value: unknown): SidecarPrDetailResult | null {
+    if (!value || typeof value !== 'object') return null;
+    const result = value as Record<string, unknown>;
+    if (typeof result.status !== 'string'
+        || !PR_DETAIL_STATUSES.has(result.status as SidecarPrDetailResult['status'])
+        || typeof result.message !== 'string'
+        || (result.detail !== null && typeof result.detail !== 'object')) {
+        return null;
+    }
+    if (result.detail === null) {
+        return result.status === 'ok' ? null : {
+            status: result.status as SidecarPrDetailResult['status'],
+            message: result.message,
+            detail: null,
+        };
+    }
+    const detail = result.detail as Record<string, unknown>;
+    if (typeof detail.merged !== 'boolean'
+        || typeof detail.title !== 'string'
+        || typeof detail.body !== 'string'
+        || (detail.baseRepoFullName !== null && typeof detail.baseRepoFullName !== 'string')) {
+        return null;
+    }
+    let head: SidecarPrDetailHead | null = null;
+    if (detail.head !== null) {
+        if (!detail.head || typeof detail.head !== 'object') return null;
+        const rawHead = detail.head as Record<string, unknown>;
+        if (typeof rawHead.sha !== 'string'
+            || typeof rawHead.ref !== 'string'
+            || (rawHead.repoFullName !== null && typeof rawHead.repoFullName !== 'string')
+            || (rawHead.cloneUrl !== null && typeof rawHead.cloneUrl !== 'string')) {
+            return null;
+        }
+        head = {
+            sha: rawHead.sha,
+            ref: rawHead.ref,
+            repoFullName: typeof rawHead.repoFullName === 'string' ? rawHead.repoFullName : null,
+            cloneUrl: typeof rawHead.cloneUrl === 'string' ? rawHead.cloneUrl : null,
+        };
+    }
+    return {
+        status: result.status as SidecarPrDetailResult['status'],
+        message: result.message,
+        detail: {
+            merged: detail.merged,
+            title: detail.title,
+            body: detail.body,
+            head,
+            baseRepoFullName: typeof detail.baseRepoFullName === 'string' ? detail.baseRepoFullName : null,
+        },
     };
 }
 
@@ -318,6 +402,29 @@ export class SidecarClient {
                 state,
                 searchScope,
                 ...(currentRepo ? { currentRepo } : {}),
+            }));
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Retrieves PR metadata through the sidecar without returning a GitHub token to the extension.
+     * Resolves to null only for transport or response-shape failures so callers retain local
+     * fallback behavior; valid domain failures are returned as-is.
+     */
+    async getPullRequestDetail(
+        githubBaseUrl: string,
+        owner: string,
+        repo: string,
+        number: number,
+    ): Promise<SidecarPrDetailResult | null> {
+        try {
+            return parsePrDetailResult(await this.request('prs/getDetail', {
+                githubBaseUrl,
+                owner,
+                repo,
+                number,
             }));
         } catch {
             return null;

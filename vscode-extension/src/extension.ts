@@ -746,7 +746,9 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
 
         const [diff, detail, draft] = await Promise.all([
             github.getPRDiff(token, base, owner, repo, number),
-            github.getPRDetail(token, base, owner, repo, number),
+            github.getPRDetailWithSidecar(
+                token, base, owner, repo, number, sidecarClient ?? undefined,
+            ),
             github.loadDraftReview(token, base, owner, repo, number),
         ]);
         const validationDiff = diff;

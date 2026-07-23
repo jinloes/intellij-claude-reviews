@@ -11,6 +11,8 @@ final class SidecarBootstrapService {
                 Map.of(
                         "githubAuth",
                         true,
+                        "prDetail",
+                        true,
                         "prList",
                         true,
                         "prSearchQuery",

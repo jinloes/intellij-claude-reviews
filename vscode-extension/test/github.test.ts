@@ -9,6 +9,7 @@ import {
   buildPRSearchQuery,
   detectCurrentRepo,
   detectCurrentRepoAsync,
+  getPRDetailWithSidecar,
   isRetriableNetworkError,
   isRetriableStatus,
   MAX_VALIDATION_DIFF_BYTES,
@@ -116,6 +117,57 @@ test('searchPRs surfaces valid sidecar domain failures without a local fallback'
       },
       async () => {
         throw new Error('local fallback must not run');
+      },
+    ),
+    /gh auth login/,
+  );
+});
+
+test('getPRDetailWithSidecar uses a valid sidecar detail without direct GitHub fallback', async () => {
+  const detail = await getPRDetailWithSidecar(
+    'unused-token',
+    'https://github.com',
+    'acme',
+    'widgets',
+    42,
+    {
+      getPullRequestDetail: async () => ({
+        status: 'ok',
+        message: 'Pull request details loaded.',
+        detail: {
+          merged: false,
+          title: 'Example',
+          body: 'Description',
+          head: { sha: 'abc', ref: 'feature', repoFullName: 'acme/widgets', cloneUrl: 'https://github.com/acme/widgets.git' },
+          baseRepoFullName: 'acme/widgets',
+        },
+      }),
+    },
+  );
+
+  assert.deepEqual(detail, {
+    merged: false,
+    title: 'Example',
+    body: 'Description',
+    head: { sha: 'abc', ref: 'feature', repo: { full_name: 'acme/widgets', clone_url: 'https://github.com/acme/widgets.git' } },
+    base: { repo: { full_name: 'acme/widgets' } },
+  });
+});
+
+test('getPRDetailWithSidecar surfaces valid domain failures', async () => {
+  await assert.rejects(
+    getPRDetailWithSidecar(
+      'unused-token',
+      'https://github.com',
+      'acme',
+      'widgets',
+      42,
+      {
+        getPullRequestDetail: async () => ({
+          status: 'not_authenticated',
+          message: "Run 'gh auth login' in a terminal for this GitHub host.",
+          detail: null,
+        }),
       },
     ),
     /gh auth login/,

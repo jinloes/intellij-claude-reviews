@@ -91,6 +91,25 @@ interface PrDetail {
     base: { repo: { full_name: string } | null } | null;
 }
 
+interface PrDetailSidecar {
+    getPullRequestDetail(
+        githubBaseUrl: string,
+        owner: string,
+        repo: string,
+        number: number,
+    ): Promise<{
+        status: string;
+        message: string;
+        detail: {
+            merged: boolean;
+            title: string;
+            body: string;
+            head: { sha: string; ref: string; repoFullName: string | null; cloneUrl: string | null } | null;
+            baseRepoFullName: string | null;
+        } | null;
+    } | null>;
+}
+
 interface SearchItem {
     title: string;
     html_url: string;
@@ -468,6 +487,39 @@ export async function getPRDetail(
 ): Promise<PrDetail> {
     const url = `${apiBase(githubBaseUrl)}/repos/${owner}/${repo}/pulls/${prNumber}`;
     return JSON.parse(await ghRequestWithRetry(token, url, {})) as PrDetail;
+}
+
+/**
+ * Uses the optional sidecar's token-safe PR-detail capability when available. A malformed or
+ * unavailable sidecar response falls back to the existing direct request; valid sidecar domain
+ * failures throw their safe message so the selection flow can report the failure to the user.
+ */
+export async function getPRDetailWithSidecar(
+    token: string,
+    githubBaseUrl: string,
+    owner: string,
+    repo: string,
+    prNumber: number,
+    sidecar?: PrDetailSidecar,
+): Promise<PrDetail> {
+    const result = await sidecar?.getPullRequestDetail(githubBaseUrl, owner, repo, prNumber);
+    if (!result) return getPRDetail(token, githubBaseUrl, owner, repo, prNumber);
+    if (result.status !== 'ok' || !result.detail) throw new Error(result.message);
+    return {
+        merged: result.detail.merged,
+        title: result.detail.title,
+        body: result.detail.body,
+        head: result.detail.head === null ? null : {
+            sha: result.detail.head.sha,
+            ref: result.detail.head.ref,
+            repo: result.detail.head.repoFullName === null || result.detail.head.cloneUrl === null
+                ? null
+                : { full_name: result.detail.head.repoFullName, clone_url: result.detail.head.cloneUrl },
+        },
+        base: result.detail.baseRepoFullName === null
+            ? null
+            : { repo: { full_name: result.detail.baseRepoFullName } },
+    };
 }
 
 /** Fetches the head branch name and fork status for a PR. Mirrors GitHubService.getPRHeadInfo. */

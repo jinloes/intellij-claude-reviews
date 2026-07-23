@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
+import com.jinloes.prpilot.sidecar.pr.PrDetailService;
 import com.jinloes.prpilot.sidecar.pr.PrListService;
 import com.jinloes.prpilot.sidecar.pr.PrSearchQueryService;
 import com.jinloes.prpilot.sidecar.repo.RepoDetector;
@@ -33,7 +34,8 @@ class StdioJsonRpcServerTest {
                         new PrSearchQueryService(),
                         new RepoDetector(),
                         new GitHubAuthService(),
-                        new PrListService());
+                        new PrListService(),
+                        new PrDetailService());
     }
 
     @Test
@@ -62,6 +64,8 @@ class StdioJsonRpcServerTest {
         assertThat(response.path("result").path("capabilities").path("githubAuth").asBoolean())
                 .isTrue();
         assertThat(response.path("result").path("capabilities").path("prList").asBoolean())
+                .isTrue();
+        assertThat(response.path("result").path("capabilities").path("prDetail").asBoolean())
                 .isTrue();
     }
 
@@ -231,6 +235,36 @@ class StdioJsonRpcServerTest {
 
         assertThat(missingBaseUrl.path("error").path("code").asInt()).isEqualTo(-32602);
         assertThat(nonTextField.path("error").path("code").asInt()).isEqualTo(-32602);
+    }
+
+    @Test
+    void returnsAStructuredResultForAnInvalidPrDetailBaseUrl() {
+        JsonNode response =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":\"detail-1\",\"method\":\"prs/getDetail\","
+                                        + "\"params\":{\"githubBaseUrl\":\"http://github.com\",\"owner\":\"acme\",\"repo\":\"widgets\",\"number\":42}}")
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(response.path("id").asText()).isEqualTo("detail-1");
+        assertThat(response.path("result").path("status").asText()).isEqualTo("invalid_base_url");
+        assertThat(response.path("result").path("detail").isNull()).isTrue();
+    }
+
+    @Test
+    void rejectsInvalidPrDetailParams() {
+        JsonNode missingNumber =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":18,\"method\":\"prs/getDetail\","
+                                        + "\"params\":{\"githubBaseUrl\":\"https://github.com\",\"owner\":\"acme\",\"repo\":\"widgets\"}}")
+                                .getBytes(StandardCharsets.UTF_8));
+        JsonNode nonIntegralNumber =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":19,\"method\":\"prs/getDetail\","
+                                        + "\"params\":{\"githubBaseUrl\":\"https://github.com\",\"owner\":\"acme\",\"repo\":\"widgets\",\"number\":1.5}}")
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(missingNumber.path("error").path("code").asInt()).isEqualTo(-32602);
+        assertThat(nonIntegralNumber.path("error").path("code").asInt()).isEqualTo(-32602);
     }
 
     @Test

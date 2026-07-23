@@ -6,6 +6,7 @@ import {
   encodeFrame,
   extractFrames,
   parseGitHubAuthResult,
+  parsePrDetailResult,
   parsePrListResult,
   resolveSidecarJarPath,
 } from '../src/sidecar';
@@ -117,6 +118,39 @@ test('parsePrListResult rejects malformed fields and unknown statuses', () => {
   assert.equal(parsePrListResult({ status: 'unknown', message: 'x', query: null, resultLimit: 50, limited: false, prs: [] }), null);
   assert.equal(parsePrListResult({ status: 'ok', message: 'x', query: null, resultLimit: 50, limited: false, prs: [{ number: '42' }] }), null);
   assert.equal(parsePrListResult({ status: 'ok', message: 'x', query: null, resultLimit: 50, limited: false }), null);
+});
+
+test('parsePrDetailResult accepts nullable repository metadata', () => {
+  assert.deepEqual(
+    parsePrDetailResult({
+      status: 'ok',
+      message: 'Pull request details loaded.',
+      detail: {
+        merged: false,
+        title: 'Example',
+        body: '',
+        head: { sha: 'abc', ref: 'feature', repoFullName: null, cloneUrl: null },
+        baseRepoFullName: null,
+      },
+    }),
+    {
+      status: 'ok',
+      message: 'Pull request details loaded.',
+      detail: {
+        merged: false,
+        title: 'Example',
+        body: '',
+        head: { sha: 'abc', ref: 'feature', repoFullName: null, cloneUrl: null },
+        baseRepoFullName: null,
+      },
+    },
+  );
+});
+
+test('parsePrDetailResult rejects malformed successful and unknown results', () => {
+  assert.equal(parsePrDetailResult({ status: 'unknown', message: 'x', detail: null }), null);
+  assert.equal(parsePrDetailResult({ status: 'ok', message: 'x', detail: null }), null);
+  assert.equal(parsePrDetailResult({ status: 'ok', message: 'x', detail: { merged: false } }), null);
 });
 
 test('resolveSidecarJarPath prefers the packaged jar staged alongside the extension', () => {
