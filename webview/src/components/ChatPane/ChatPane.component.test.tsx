@@ -85,5 +85,33 @@ describe('ChatPane', () => {
     expect(cefQuery).toHaveBeenCalledTimes(1)
     expect(onPendingMessageSent).toHaveBeenCalledTimes(1)
   })
+
+  it('renders a structured verify-comment response as a card instead of raw JSON', async () => {
+    Object.assign(window, { cefQuery: vi.fn() })
+    render(<ChatPane pr={pr} />)
+
+    act(() => {
+      const hostWindow = window as unknown as {
+        __handleMessage: (message: unknown) => void
+      }
+      hostWindow.__handleMessage({
+        protocolVersion: 1,
+        type: 'chatResponse',
+        prKey: 'acme/widget#42',
+        response: JSON.stringify({
+          verdict: 'invalid',
+          why: 'The diff shows the null check already exists at line 12.',
+          action: 'revise',
+          replacementComment: 'This check is redundant with the guard added above.',
+        }),
+      })
+    })
+
+    expect(await screen.findByText('Invalid')).toBeVisible()
+    expect(screen.getByText(/Suggested action: Revise/)).toBeVisible()
+    expect(screen.getByText('The diff shows the null check already exists at line 12.')).toBeVisible()
+    expect(screen.getByText('This check is redundant with the guard added above.')).toBeVisible()
+    expect(screen.queryByText(/"verdict":"invalid"/)).not.toBeInTheDocument()
+  })
 })
 
