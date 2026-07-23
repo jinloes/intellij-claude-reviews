@@ -3,17 +3,9 @@ import * as os from 'os';
 import {
     CopilotClient,
     RuntimeConnection,
-    type CopilotSession,
-    type PermissionHandler,
     type PermissionRequestResult,
 } from '@github/copilot-sdk';
-import type { ReviewResult, LineComment } from './models';
-import type { ChatMessage, PR } from './claude';
-import { buildPrompt, buildChatPrompt, buildFocusedChatPrompt, existsOnPath } from './claude';
-import { parseReview } from './review';
-
-export type { ReviewResult, LineComment, ChatMessage, PR };
-export { buildPrompt, buildChatPrompt, buildFocusedChatPrompt };
+import { existsOnPath } from './claude';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -23,7 +15,6 @@ export { buildPrompt, buildChatPrompt, buildFocusedChatPrompt };
  */
 export const DEFAULT_REASONING_EFFORT = 'medium';
 export const SDK_BOOT_TIMEOUT_MS = 60 * 1000;
-const REQUEST_TIMEOUT_MS = 30 * 60 * 1000;
 
 export function permissionDecision(kind: string, allowMcp: boolean): PermissionRequestResult {
     if (allowMcp && kind === 'mcp') {
@@ -86,17 +77,7 @@ export function normalizeReasoningEffort(effort: string): ReasoningEffort {
     }
 }
 
-// ── Best-effort review JSON extraction ────────────────────────────────────────
-
-function stringOrUndef(v: unknown): string | undefined {
-    return typeof v === 'string' ? v : undefined;
-}
-
-function asObj(v: unknown): Record<string, unknown> | undefined {
-    return typeof v === 'object' && v !== null && !Array.isArray(v)
-        ? (v as Record<string, unknown>)
-        : undefined;
-}
+// ── Timeout helper ─────────────────────────────────────────────────────────────
 
 export async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operation: string): Promise<T> {
     const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
@@ -125,23 +106,10 @@ function buildRuntimeEnv(): NodeJS.ProcessEnv {
     };
 }
 
-interface ActiveRun {
-    client: CopilotClient;
-    session?: CopilotSession;
-    cancelled: boolean;
-}
-
-let activeRuns = new Set<ActiveRun>();
-
-export function cancelCurrentRequest(): void {
-    const runs = activeRuns;
-    activeRuns = new Set<ActiveRun>();
-    for (const run of runs) {
-        run.cancelled = true;
-        void run.session?.abort().catch(() => undefined);
-        void run.client.forceStop().catch(() => undefined);
-    }
-}
+// Review/chat generation now runs sidecar-side (shared review-engine CopilotService), so this
+// module retains only model discovery (no RPC endpoint exists for that yet) and the small pure
+// helpers (permissionDecision, normalizeReasoningEffort, resolveReviewInheritMcp) still exercised
+// directly by tests and by extension.ts's provider-agnostic settings wiring.
 
 // ── Model discovery ───────────────────────────────────────────────────────────
 
@@ -208,177 +176,3 @@ export async function listModels(forceRefresh = false): Promise<string[]> {
     }
 }
 
-interface ProcessCallbacks {
-    onChunk?: (chunk: string) => void;
-    onTool?: (toolName: string) => void;
-}
-
-async function runSession(options: {
-    prompt: string;
-    model: string;
-    effort: string;
-    workingDir?: string;
-    inheritMcp?: boolean;
-    configDir?: string;
-    callbacks: ProcessCallbacks;
-}): Promise<string> {
-    const { prompt, model, effort, workingDir, inheritMcp, configDir, callbacks } = options;
-    const runtimeEnv = buildRuntimeEnv();
-    const client = new CopilotClient({
-        connection: RuntimeConnection.forStdio({ path: findCopilotBinary() }),
-        workingDirectory: workingDir || os.homedir(),
-        env: runtimeEnv,
-        mode: 'copilot-cli',
-    });
-    const run: ActiveRun = { client, cancelled: false };
-    activeRuns.add(run);
-
-    let session: CopilotSession | undefined;
-    const unsubscribes: Array<() => void> = [];
-    let finalMessage = '';
-    let sessionError = '';
-    const deltaBuffer: string[] = [];
-
-    try {
-        await withTimeout(client.start(), SDK_BOOT_TIMEOUT_MS, 'runtime startup');
-        const allowMcp = inheritMcp === true;
-        const permissionHandler: PermissionHandler = (request) => permissionDecision(request.kind, allowMcp);
-        session = await withTimeout(client.createSession({
-            model: model.trim() || undefined,
-            reasoningEffort: normalizeReasoningEffort(effort),
-            onPermissionRequest: permissionHandler,
-            streaming: true,
-            // When true, the SDK discovers MCP servers from the Copilot CLI config
-            // (~/.copilot/mcp-config.json) and any repo-local .mcp.json, so the review/chat
-            // session inherits the same tools (captain, workiq, github-mcp, …) as the CLI.
-            enableConfigDiscovery: allowMcp,
-            ...(configDir && configDir.trim() ? { configDir: configDir.trim() } : {}),
-        }), SDK_BOOT_TIMEOUT_MS, 'session creation');
-        run.session = session;
-
-        unsubscribes.push(session.on('assistant.message_delta', (event) => {
-            const delta = event.data.deltaContent;
-            if (delta && delta.length > 0) {
-                deltaBuffer.push(delta);
-                callbacks.onChunk?.(delta);
-            }
-        }));
-        unsubscribes.push(session.on('assistant.message', (event) => {
-            const content = event.data.content;
-            if (content && content.trim().length > 0) {
-                finalMessage = content;
-            }
-        }));
-        unsubscribes.push(session.on('tool.execution_start', (event) => {
-            const toolName = event.data.toolName;
-            if (toolName && toolName.trim().length > 0) {
-                callbacks.onTool?.(toolName);
-            }
-        }));
-        unsubscribes.push(session.on('session.error', (event) => {
-            const message = event.data.message;
-            if (!sessionError && message && message.trim().length > 0) {
-                sessionError = message;
-            }
-        }));
-
-        const response = await session.sendAndWait(prompt, REQUEST_TIMEOUT_MS);
-        if (!finalMessage && response?.data.content?.trim()) {
-            finalMessage = response.data.content;
-        }
-
-        const raw = finalMessage.trim() ? finalMessage : deltaBuffer.join('');
-        if (!raw.trim() && sessionError.trim()) {
-            throw new Error(sessionError);
-        }
-        return raw;
-    } catch (err) {
-        // ES2020 target lacks the Error(message, {cause}) overload; attach cause manually so
-        // `preserve-caught-error` is satisfied without bumping the language target.
-        if (run.cancelled) {
-            const cancelled: Error & { cause?: unknown } = new Error('copilot request cancelled');
-            cancelled.cause = err;
-            throw cancelled;
-        }
-        if (err instanceof Error) {
-            throw err;
-        }
-        const wrapped: Error & { cause?: unknown } = new Error(String(err));
-        wrapped.cause = err;
-        throw wrapped;
-    } finally {
-        unsubscribes.forEach((unsubscribe) => unsubscribe());
-        activeRuns.delete(run);
-        await session?.disconnect().catch(() => undefined);
-        if (run.cancelled) {
-            await client.forceStop().catch(() => undefined);
-        } else {
-            await client.stop().catch(() => undefined);
-        }
-    }
-}
-
-// ── Review ─────────────────────────────────────────────────────────────────────
-
-export async function reviewPR(options: {
-    prompt: string;
-    model: string;
-    effort: string;
-    workingDir?: string;
-    inheritMcp?: boolean;
-    configDir?: string;
-    onStatus: (status: string) => void;
-    onChunk: (kind: 'text' | 'thinking', chunk: string) => void;
-}): Promise<ReviewResult> {
-    const { prompt, model, effort, workingDir, inheritMcp, configDir, onStatus, onChunk } = options;
-    onStatus('Generating review…');
-    const raw = await runSession({
-        prompt,
-        model,
-        effort,
-        workingDir,
-        inheritMcp,
-        configDir,
-        callbacks: {
-            onChunk: (chunk) => onChunk('text', chunk),
-            onTool: (name) => onStatus(name),
-        },
-    });
-    if (!raw.trim()) {
-        throw new Error('copilot produced no output.');
-    }
-    onStatus('Parsing review…');
-    try {
-        return parseReview(raw);
-    } catch (e) {
-        // ES2020 target lacks the Error(message, {cause}) overload; attach cause manually so
-        // `preserve-caught-error` is satisfied without bumping the language target.
-        const wrapped: Error & { cause?: unknown } = new Error(
-            `Failed to parse review JSON from copilot output: ${e instanceof Error ? e.message : String(e)}`,
-        );
-        wrapped.cause = e;
-        throw wrapped;
-    }
-}
-
-// ── Chat ───────────────────────────────────────────────────────────────────────
-
-export async function chat(options: {
-    prompt: string;
-    effort: string;
-    workingDir?: string;
-    inheritMcp?: boolean;
-    configDir?: string;
-    onChunk: (chunk: string) => void;
-}): Promise<string> {
-    const result = await runSession({
-        prompt: options.prompt,
-        model: '',
-        effort: options.effort,
-        workingDir: options.workingDir,
-        inheritMcp: options.inheritMcp,
-        configDir: options.configDir,
-        callbacks: { onChunk: options.onChunk },
-    });
-    return result;
-}

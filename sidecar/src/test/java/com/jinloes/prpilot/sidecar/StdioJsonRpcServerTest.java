@@ -12,10 +12,14 @@ import com.jinloes.prpilot.sidecar.pr.PrDiffService;
 import com.jinloes.prpilot.sidecar.pr.PrListService;
 import com.jinloes.prpilot.sidecar.pr.PrSupplementalService;
 import com.jinloes.prpilot.sidecar.repo.RepoDetector;
+import com.jinloes.prpilot.sidecar.review.ReviewSessionService;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -23,6 +27,7 @@ import org.junit.jupiter.api.io.TempDir;
 class StdioJsonRpcServerTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final StdioFrameCodec frameCodec = new StdioFrameCodec();
+    private final ExecutorService reviewExecutor = Executors.newSingleThreadExecutor();
     private StdioJsonRpcServer server;
 
     @BeforeEach
@@ -39,7 +44,14 @@ class StdioJsonRpcServerTest {
                         new PrDiffService(),
                         new DraftReviewService(),
                         new DraftReviewMutationService(),
-                        new PrSupplementalService());
+                        new PrSupplementalService(),
+                        new ReviewSessionService(),
+                        reviewExecutor);
+    }
+
+    @AfterEach
+    void tearDown() {
+        reviewExecutor.shutdownNow();
     }
 
     @Test
@@ -78,6 +90,12 @@ class StdioJsonRpcServerTest {
         assertThat(response.path("result").path("capabilities").path("starredRepos").asBoolean())
                 .isTrue();
         assertThat(response.path("result").path("capabilities").path("existingReviews").asBoolean())
+                .isTrue();
+        assertThat(
+                        response.path("result")
+                                .path("capabilities")
+                                .path("reviewGeneration")
+                                .asBoolean())
                 .isTrue();
     }
 
@@ -359,5 +377,77 @@ class StdioJsonRpcServerTest {
                                 .getBytes(StandardCharsets.UTF_8));
 
         assertThat(response).isNull();
+    }
+
+    @Test
+    void reviewsGenerateReturnsNullSynchronouslyWithoutBlockingTheReadLoop() {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        server = serverWithOutput(output);
+        // Priming run() with empty input sets the server's output stream and returns immediately.
+        server.run(new ByteArrayInputStream(new byte[0]), output);
+
+        // handle() must dispatch to a background thread and return null immediately rather than
+        // blocking the read loop on the provider CLI (which this test does not depend on being
+        // installed, to stay deterministic across environments).
+        JsonNode syncResponse = invokeGenerateDirectly();
+        assertThat(syncResponse).isNull();
+    }
+
+    @Test
+    void reviewsGenerateRejectsMissingRequiredParams() {
+        JsonNode response =
+                server.handle(
+                        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"reviews/generate\",\"params\":{}}"
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(response.path("error").path("code").asInt()).isEqualTo(-32602);
+    }
+
+    @Test
+    void reviewsChatRejectsInvalidParams() {
+        JsonNode response =
+                server.handle(
+                        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"reviews/chat\",\"params\":\"nope\"}"
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(response.path("error").path("code").asInt()).isEqualTo(-32602);
+    }
+
+    @Test
+    void reviewsCancelIsSynchronousAndAlwaysSucceeds() {
+        JsonNode response =
+                server.handle(
+                        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"reviews/cancel\"}"
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(response.path("result").path("ok").asBoolean()).isTrue();
+    }
+
+    /** Re-runs the request with a fresh id (43) against a server whose output is captured. */
+    private JsonNode invokeGenerateDirectly() {
+        return server.handle(
+                ("{\"jsonrpc\":\"2.0\",\"id\":43,\"method\":\"reviews/generate\",\"params\":{"
+                                + "\"provider\":\"claude\",\"model\":\"\",\"effort\":\"\",\"inheritMcp\":false,"
+                                + "\"pr\":{\"title\":\"T\",\"htmlUrl\":\"\",\"owner\":\"o\",\"repo\":\"r\","
+                                + "\"number\":1,\"body\":\"\",\"author\":\"a\",\"createdAt\":\"2024-01-01\","
+                                + "\"isDraft\":false},\"diff\":\"\",\"knownPatterns\":\"\"}}")
+                        .getBytes(StandardCharsets.UTF_8));
+    }
+
+    private StdioJsonRpcServer serverWithOutput(ByteArrayOutputStream output) {
+        return new StdioJsonRpcServer(
+                objectMapper,
+                frameCodec,
+                new SidecarBootstrapService(),
+                new RepoDetector(),
+                new GitHubAuthService(),
+                new PrListService(),
+                new PrDetailService(),
+                new PrDiffService(),
+                new DraftReviewService(),
+                new DraftReviewMutationService(),
+                new PrSupplementalService(),
+                new ReviewSessionService(),
+                reviewExecutor);
     }
 }

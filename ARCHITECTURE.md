@@ -20,7 +20,7 @@ README.md                              – Root guide: setup, development, check
     ci.yml                           – Push/PR CI checks, Java 17 sidecar smoke test, and packaged-VSIX assertion
     release.yml                      – Tag-driven GitHub release pipeline; builds IntelliJ + VS Code artifacts and marks `v*-rc.*` tags as prereleases
 
-core/                                  – KMP module (jvm + js targets); Java services compiled as jvmMain
+core/                                  – KMP module (jvm + js targets)
   src/commonMain/kotlin/com/jinloes/prpilot/
     model/
       PullRequest.kt                 – @Serializable data class (title, number, owner, repo, author, etc.)
@@ -34,20 +34,26 @@ core/                                  – KMP module (jvm + js targets); Java s
     util/
       ProcessUtil.kt                 – expect object; findBinary(name, candidates); jvmMain actual uses java.io.File, jsMain actual uses Node.js fs
   src/jvmMain/kotlin/com/jinloes/prpilot/services/
-      ClaudeService.kt               – Shells out to `claude --print`; synchronous/blocking API
-      CopilotService.kt              – Uses the official Copilot Java SDK to drive local `copilot`; mirrors ClaudeService API
-      CopilotModelDiscovery.kt       – Runs `copilot help config` once per session and caches model list
-      GitWorktreeService.kt          – Creates/removes temporary git worktrees for PR branch reviews
       PendingReviewIndex.kt          – Local JSON index of saved drafts (~/.pr-pilot/pending-prs.json)
       SeenPRSet.kt                   – Local JSON set of notified PR IDs (~/.pr-pilot/seen-prs.json)
   src/jsMain/kotlin/com/jinloes/prpilot/
       util/ProcessUtil.kt            – JS actual uses Node fs.existsSync/statSync
 
-intellij-plugin/                       – IntelliJ plugin host; depends on :core and :github-engine
+review-engine/                         – Plain Java 17 library owning Claude/Copilot CLI invocation, prompt building, and review-JSON parsing; depends on :core for models only
+  src/main/java/com/jinloes/prpilot/review/
+    ClaudeService.java                – Shells out to `claude --print`; synchronous/blocking API; owns REVIEW_INSTRUCTIONS/CHAT_PERSONA prompt constants
+    CopilotService.java               – Uses the official Copilot Java SDK to drive local `copilot`; mirrors ClaudeService API
+    CopilotModelDiscovery.java        – Runs `copilot help config` once per session and caches model list
+    GitWorktreeService.java           – Creates/removes temporary git worktrees for PR branch reviews
+    BinaryLocator.java                – Shared CLI binary-path probing helper for ClaudeService/CopilotService
+    stream/                           – Jackson DTOs for Claude's stream-json event protocol
+  src/test/java/com/jinloes/prpilot/review/ – JUnit 5 + AssertJ tests mirroring the module's Java classes
+
+intellij-plugin/                       – IntelliJ plugin host; depends on :core, :github-engine, and :review-engine
   src/main/java/com/jinloes/prpilot/
     services/
       IntellijGitHubService.java
-      IntellijClaudeService.java
+      IntellijClaudeService.java       – Adapts review-engine's ClaudeService/CopilotService to IntelliJ threading (pooled I/O, EDT callbacks)
       UserFacingErrors.java           – Maps runtime/network exceptions to actionable UI copy
       PRNotificationService.java
       PRNotificationStartup.java
@@ -106,13 +112,15 @@ github-engine/                          – Plain Java 17 library containing hos
     repo/RepoDetectorTest.java
     repo/RemoteUrlParserTest.java
 
-sidecar/                                – Java 17, non-web Spring Boot/stdio JSON-RPC adapter over :github-engine; initialized during VS Code activation
+sidecar/                                – Java 17, non-web Spring Boot/stdio JSON-RPC adapter over :github-engine and :review-engine; initialized during VS Code activation
   src/main/java/com/jinloes/prpilot/sidecar/
     PrPilotSidecarApplication.java      – Non-web Boot entry point; owns stdio process lifecycle
     SidecarConfiguration.java           – Explicit Spring bean composition root
     StdioFrameCodec.java                – Bounded Content-Length UTF-8 framing for JSON-RPC over stdio
-    StdioJsonRpcServer.java             – JSON-RPC parameter validation, dispatch, and structured protocol errors
+    StdioJsonRpcServer.java             – JSON-RPC parameter validation, dispatch, structured protocol errors, and async review/chat request handling plus notification push
     SidecarBootstrapService.java        – Sidecar initialization capability response
+    review/
+      ReviewSessionService.java         – Orchestrates review-engine's ClaudeService/CopilotService on behalf of the JSON-RPC `reviews/*` methods
   src/main/resources/
     logback-spring.xml                  – Sends all sidecar logs to stderr; stdout is protocol-only
   src/test/java/com/jinloes/prpilot/sidecar/
@@ -150,9 +158,8 @@ vscode-extension/                      – VS Code extension host
     extension.ts                       – VS Code activation plus PR Pilot webview tab/view bridge
     webviewAssets.ts                   – Resolves packaged `webview-dist/` assets with a dev fallback to sibling `webview/dist`
     models.ts                          – Host-neutral PR/review view models; contains no GitHub transport
-    claude.ts
-    copilot.ts                         – Copilot SDK service (`@github/copilot-sdk`) with streaming/status forwarding
-    review.ts                          – Shared review-JSON extraction + schema validation (used by claude.ts + copilot.ts)
+    claude.ts                          – Prompt-building helpers (buildPrompt/buildChatPrompt/buildFocusedChatPrompt) and `claude` binary preflight; review/chat generation itself routes through sidecar.ts
+    copilot.ts                         – Copilot model discovery (`listModels`, still spawns the SDK locally — no sidecar RPC endpoint yet) and `copilot` binary preflight; review/chat generation itself routes through sidecar.ts
     worktree.ts                        – Creates/removes temporary git worktrees for PR branch reviews (mirrors GitWorktreeService.kt)
     settings.ts                        – Settings webview controller (panel lifecycle + config read/write); mirrors PluginSettingsConfigurable
     settingsView.ts                    – Pure settings-webview view logic (HTML, model-merge, escaping); no vscode import, unit-tested
@@ -171,7 +178,6 @@ vscode-extension/                      – VS Code extension host
     claude.test.ts
     copilot.test.ts
     sidecar.test.ts
-    review.test.ts
     userFacingError.test.ts
 ```
 
@@ -193,9 +199,14 @@ Webview development runs dev-only runtime accessibility scans via `@axe-core/rea
 CI runs full-page Playwright + axe scenarios (`npm run test:a11y`) using `playwright.a11y.config.ts` and fails on any reported violation. Deterministic screenshot scenarios use `playwright.visual.config.ts`; pseudo-localization is test-only and enabled with `?locale=pseudo` to expose narrow-layout overflow. Visual snapshots are platform-sensitive and remain a manual verification suite unless CI and canonical baselines are updated together.
 
 ### Module boundaries
-`core` is KMP and has zero IntelliJ dependencies. `github-engine` is a plain Java 17 library with no Spring or IDE APIs; both `intellij-plugin` and `sidecar` depend on it. `intellij-plugin` also depends on the JVM variant of `core`.
+`core` is KMP and has zero IntelliJ dependencies; it holds only shared models (`PullRequest`, `ReviewResult`, etc.), the diff parser, and the two local-file-index services (`PendingReviewIndex`, `SeenPRSet`). `github-engine` is a plain Java 17 library with no Spring or IDE APIs; both `intellij-plugin` and `sidecar` depend on it. `review-engine` is a plain Java 17 library owning Claude/Copilot CLI invocation, prompt building, and review-JSON parsing (`ClaudeService`, `CopilotService`, `CopilotModelDiscovery`, `GitWorktreeService`); both `intellij-plugin` and `sidecar` depend on it, so AI review generation has exactly one JVM implementation rather than being duplicated per host. `review-engine` depends on `core` only for shared models — it is JVM-only and does not need to compile to JS, unlike `core`. `intellij-plugin` also depends on the JVM variant of `core`.
 
-`sidecar` is a Java 17 Spring Boot application configured with `WebApplicationType.NONE`; it is not an HTTP server. Its protocol uses bounded `Content-Length`-framed UTF-8 JSON-RPC over standard input/output. Standard output must contain protocol frames only—diagnostics belong on standard error. GitHub, PR, repository, and review behavior belongs in `github-engine`; Spring remains only the sidecar composition and lifecycle layer.
+`sidecar` is a Java 17 Spring Boot application configured with `WebApplicationType.NONE`; it is not an HTTP server. Its protocol uses bounded `Content-Length`-framed UTF-8 JSON-RPC over standard input/output. Standard output must contain protocol frames only—diagnostics belong on standard error. GitHub, PR, repository, and review behavior belongs in `github-engine`/`review-engine`; Spring remains only the sidecar composition and lifecycle layer.
+
+### Sidecar streaming: async requests plus server-push notifications
+The base JSON-RPC loop in `StdioJsonRpcServer.run()` is still one blocking read → dispatch → optional single write per iteration, but `reviews/generate` and `reviews/chat` are the two methods that deviate: `generateReview`/`chatReview` submit the actual review-engine call to a dedicated `reviewExecutor` (a single-thread pool) and return `null` immediately, so the read loop stays free to accept a `reviews/cancel` request (or any other RPC) while a review is in flight. The eventual result is written asynchronously from the background thread once the provider CLI completes. Progress is reported via `reviews/status`/`reviews/chunk`/`reviews/chatChunk` — JSON-RPC notifications (no `id` field) carrying a `requestId` field that correlates them back to the originating request, sent from the background thread under the same `writeLock` used by the main loop so frames never interleave. `ReviewSessionService` tracks at most one active `ClaudeService`/`CopilotService` per sidecar process (mirroring IntelliJ's "only one has an active process at any time"), so `reviews/cancel` is synchronous and side-effect-free even with no active request.
+
+On the VS Code side, `SidecarClient` correlates notifications to their request via a `notificationHandlers` map keyed by the same numeric `id` used for the request/response pending map; `requestRaw` accepts an optional per-call timeout (`REVIEW_REQUEST_TIMEOUT_MS`, 35 minutes, since a real review/chat CLI invocation can legitimately run far longer than the default 60s RPC timeout) and optional notification handlers, cleaned up on both success and failure paths.
 
 The engine's repository detector reads local git metadata directly (no git process spawned) to resolve the owner/repo for a directory. `GitDirectoryResolver` understands linked-worktree `.git` files (a regular file containing `gitdir: <path>`, relative or absolute) in addition to a standard `.git` directory. `RemoteUrlParser` requires exactly two non-blank path segments (owner and repo), including for SCP-style URLs. Every non-`found` outcome (`not_git`, `config_missing`, `origin_missing`, `origin_url_malformed`, `gitdir_malformed`, `gitdir_unreadable`, etc.) is a typed, non-fatal `DetectStatus`; over JSON-RPC these are normal results, never protocol errors. `-32602` is reserved for malformed RPC params (missing/non-string `path`).
 
@@ -226,16 +237,16 @@ IntelliJ intentionally does not spawn the sidecar process: the plugin already ru
 Java callers must use generated getters/setters (`getX()`), not Kotlin property or record-style accessors. `DiffParser` access from Java is via `DiffParser.INSTANCE.*`. Keep JSON in `core` on kotlinx.serialization.
 
 ### expect/actual bridges
-`ProcessUtil` is an expect/actual bridge used by provider binary discovery.
+`ProcessUtil` is an expect/actual bridge in `core` used by the JS target's binary discovery path (webview code sharing). The JVM `review-engine` module has its own plain-Java `BinaryLocator` rather than calling into `core`'s JVM actual, since `review-engine` has no reason to depend on Kotlin/KMP tooling for a few lines of file-probing logic.
 
 ### Threading model
-`ClaudeService`/`CopilotService` are synchronous core services. IntelliJ adapters own threading (pooled thread for I/O, EDT for UI callbacks).
+`ClaudeService`/`CopilotService` (in `review-engine`) are synchronous services. IntelliJ's `IntellijClaudeService` adapter owns threading (pooled thread for I/O, EDT for UI callbacks); the sidecar's `StdioJsonRpcServer` owns threading for VS Code (single-thread `reviewExecutor` per the streaming design above, JSON-RPC notifications instead of a UI-toolkit callback).
 
 ### Provider toggle and prompt sharing
-Copilot and Claude share prompt builders/parsing (`ClaudeService` companion helpers). Do not fork prompt constants by provider unless absolutely required.
+Copilot and Claude share prompt builders/parsing (`ClaudeService` static helpers in `review-engine`). Do not fork prompt constants by provider unless absolutely required. Full-review and regular-chat prompts are built server-side (inside `ClaudeService`/`CopilotService`) from raw PR/diff/context fields; only the small focused-chat prompt (`buildFocusedChatPrompt`) is still built by the caller (`IntellijClaudeService.chatFocused` on IntelliJ, `extension.ts`'s `handleAskClaude` using `claude.ts`'s copy on VS Code) before being sent as a raw prompt, matching how a focused question carries no PR metadata or history.
 
 ### Copilot SDK runtime
-Both hosts use official Copilot SDKs (`com.github:copilot-sdk-java` and `@github/copilot-sdk`) to control local `copilot`. Stream `assistant.message_delta` to text chunks, surface `tool.execution_start` names as status, and parse final `assistant.message` JSON with delta fallback.
+Both the IntelliJ plugin and the sidecar use the official Java Copilot SDK (`com.github:copilot-sdk-java`, wrapped by `review-engine`'s `CopilotService`) to control local `copilot`. Stream `assistant.message_delta` to text chunks, surface `tool.execution_start` names as status, and parse final `assistant.message` JSON with delta fallback. VS Code's `copilot.ts` additionally uses the TypeScript SDK (`@github/copilot-sdk`) directly, but only for model discovery (`listModels`) — there is no sidecar RPC endpoint for model discovery yet, so that one path still spawns the CLI in the extension process.
 
 
 ### Provider capability isolation
@@ -247,7 +258,7 @@ Copilot review/chat sessions reject all SDK permission requests by default and d
 Persisted values are `none|low|medium|high|xhigh|max`; SDK accepts `low|medium|high|xhigh`. Normalize before session creation: `none -> low`, `max -> xhigh`, blank/unknown -> `medium`.
 
 ### Review JSON parsing is self-healing, not all-or-nothing
-`ClaudeService.parseReview` (shared by both the Claude CLI and Copilot SDK paths; mirrored in `vscode-extension/src/review.ts`) tolerates and repairs common model schema deviations instead of rejecting the entire review, which previously surfaced as "The model returned an invalid review format" for otherwise-good output. Unknown top-level/comment fields are ignored; an over-long `summary` is truncated to 800 chars; a comment `body` with embedded newlines is collapsed to one line and truncated to 300 chars; a low-confidence `"issue"` is downgraded to `"suggestion"` rather than failing the review; the final `verdict` is derived from (and corrected to match) the surviving comments rather than trusting the model's stated verdict. Only individually-malformed line comments (missing/blank required field, invalid enum value) are dropped — one bad comment no longer discards the other 19. A hard parse failure remains only for genuinely non-JSON output or a missing `summary`/non-object root, since there is nothing to salvage in that case.
+`ClaudeService.parseReview` (in `review-engine`, shared by both the Claude CLI and Copilot SDK paths on both hosts — IntelliJ calls it in-process, VS Code via the sidecar's `reviews/generate`) tolerates and repairs common model schema deviations instead of rejecting the entire review, which previously surfaced as "The model returned an invalid review format" for otherwise-good output. Unknown top-level/comment fields are ignored; an over-long `summary` is truncated to 800 chars; a comment `body` with embedded newlines is collapsed to one line and truncated to 300 chars; a low-confidence `"issue"` is downgraded to `"suggestion"` rather than failing the review; the final `verdict` is derived from (and corrected to match) the surviving comments rather than trusting the model's stated verdict. Only individually-malformed line comments (missing/blank required field, invalid enum value) are dropped — one bad comment no longer discards the other 19. A hard parse failure remains only for genuinely non-JSON output or a missing `summary`/non-object root, since there is nothing to salvage in that case.
 
 ### Copilot model discovery
 Both hosts discover the available Copilot model list at runtime and cache it for the session, falling back to a short hardcoded suggestion list on probe failure.
@@ -260,10 +271,10 @@ Both hosts discover the available Copilot model list at runtime and cache it for
 The shared PR list sends an explicit `searchScope` on `refreshPRs`: `currentRepo`, `reviewRequested`, `assigned`, or `authored`. `PrSearchQueryService` in `github-engine` builds the query for both hosts, and hosts return `listStatus` (`searchScope`, `currentRepo`, `resultLimit`, `limited`) with `prListLoaded` so the webview can explain what was searched and when additional PRs are hidden. To distinguish "exactly the limit" from "more exist", the search over-fetches one row beyond the display limit (`resultLimit` = 50, fetch 51): `limited` is true only when more than 50 match, and the list is sliced back to 50. `currentRepo` searches only the engine-detected repository; if no repo is detected it falls back to `author:@me`. Main-list discovery intentionally includes GitHub draft pull requests (the old `draft:false` filter was removed) so authored WIP PRs are discoverable; the shared PR DTO distinguishes `isDraft` (GitHub PR draft / `PR-DRAFT`) from `hasReviewDraft` (saved PR Pilot review draft / `REV-DRAFT`). Starred repositories are used only by optional notification polling, not by the main list's current-repo scope.
 
 ### Binary resolution
-Probe known hard-coded paths for `gh`, `claude`, and `copilot` before falling back to command name, because GUI-launched IntelliJ often has incomplete `PATH`.
+Probe known hard-coded paths for `gh`, `claude`, and `copilot` before falling back to command name, because GUI-launched IntelliJ often has incomplete `PATH`. `review-engine`'s `BinaryLocator` is the single JVM implementation of this probing logic (used by both `ClaudeService` and `CopilotService`, for both IntelliJ and the sidecar); `claude.ts`/`copilot.ts` keep an independent TypeScript copy for the same probing since the sidecar (Java) and the extension process (Node) are different runtimes — the sidecar is the one that actually spawns the CLI for VS Code, but the extension still preflight-checks binary availability locally before even asking the sidecar to start a review (see Provider preflight below).
 
 ### Provider preflight
-Before running a review, both hosts check that the configured provider's CLI (`claude`/`copilot`) is resolvable — a hard-coded candidate path exists, or the binary is found on `PATH` — and, if not, push a `reviewError` with actionable `provider_not_installed` copy instead of attempting a doomed spawn. This surfaces in-context in the review pane (which already offers a "Try Again") rather than as the full-pane PR-list setup screen. The selected-PR no-draft state also receives a `providerReadiness` bridge payload so the review pane can show `Claude ready` / `Copilot ready` (or setup-needed) status before the user presses Generate. Availability checks: `ProcessUtil.isBinaryAvailable` + `ClaudeService.isBinaryAvailable()`/`CopilotService.isBinaryAvailable()` (JVM); `claudeBinaryAvailable()`/`copilotBinaryAvailable()` + shared `existsOnPath` (`claude.ts`/`copilot.ts`). The shared `provider_not_installed` template wording is kept in sync across `UserFacingErrors.java` and `userFacingError.ts`.
+Before running a review, both hosts check that the configured provider's CLI (`claude`/`copilot`) is resolvable — a hard-coded candidate path exists, or the binary is found on `PATH` — and, if not, push a `reviewError` with actionable `provider_not_installed` copy instead of attempting a doomed spawn. This surfaces in-context in the review pane (which already offers a "Try Again") rather than as the full-pane PR-list setup screen. The selected-PR no-draft state also receives a `providerReadiness` bridge payload so the review pane can show `Claude ready` / `Copilot ready` (or setup-needed) status before the user presses Generate. Availability checks: `ProcessUtil.isBinaryAvailable` + `ClaudeService.isBinaryAvailable()`/`CopilotService.isBinaryAvailable()` (JVM, in `review-engine`); `claudeBinaryAvailable()`/`copilotBinaryAvailable()` + shared `existsOnPath` (`claude.ts`/`copilot.ts`) as a local VS Code preflight even though the actual CLI spawn happens in the sidecar process. The shared `provider_not_installed` template wording is kept in sync across `UserFacingErrors.java` and `userFacingError.ts`.
 
 ### Prompt-injection hardening
 When wrapping untrusted payloads in XML-like tags, escape matching closing tags inside payload to prevent tag breakout. Repository guidelines, PR metadata, descriptions, diffs, prior reviews, and chat context remain untrusted reference data even when tag escaping is applied; the latest `<user_message>` is the authorized request but cannot override persona or confidentiality constraints. Chat builders retain only ten history turns and bound each turn, PR context, focused context, and current request before provider execution. Provider capability isolation is the primary security boundary.
@@ -276,8 +287,8 @@ Hosts fetch and bound the GitHub diff before provider execution and embed it in 
 ### Worktree-based PR context
 When the PR's repo matches the open project/workspace and a git root is found, both hosts create a temporary git worktree checked out to the PR branch and reuse it for both review and chat. This gives the model accurate local file context (correct branch state) for type lookups and cross-file references across the full PR session. Cleanup runs when the active PR changes or the view is disposed. Falls back silently to the open project/workspace dir if worktree creation fails or the PR is from an unrelated repo. Fork PRs use `git fetch <clone_url> <branch>` + `FETCH_HEAD`.
 
-- **IntelliJ**: `WebviewPanel.resolvePrClaudeService` builds a per-PR `IntellijClaudeService` pointed at the worktree, using `GitWorktreeService` (jvmMain).
-- **VS Code**: `extension.ts` `resolveWorkingDir`/`clearWorktree` resolve the per-view worktree dir passed as `workingDir` to the review/chat CLIs, using `worktree.ts`. Chat reuses an existing worktree and never requests GitHub credentials directly.
+- **IntelliJ**: `WebviewPanel.resolvePrClaudeService` builds a per-PR `IntellijClaudeService` pointed at the worktree, using `review-engine`'s `GitWorktreeService`.
+- **VS Code**: `extension.ts` `resolveWorkingDir`/`clearWorktree` resolve the per-view worktree dir using `worktree.ts` and pass it as `projectDir` to the sidecar's `reviews/generate`/`reviews/chat`, which in turn hands it to `review-engine`'s `ClaudeService`/`CopilotService` as the process working directory. Chat reuses an existing worktree and never requests GitHub credentials directly.
 
 ### Cross-host parity
 When host-specific logic changes in IntelliJ or VS Code, update the paired implementation in the other host. The mapping table and enforcement workflow live in `AGENTS.md`.
@@ -309,7 +320,7 @@ PR-scoped lifecycle messages (`draftLoaded`, review generation/chunks/results/er
 Draft mutations are serialized per host view and bind the pending review ID to its full `prKey`. Selection revisions prevent late loads/saves/generation results from installing state after a PR switch; submit/delete reject IDs not owned by the active PR. Regeneration preserves the existing GitHub draft until a replacement is explicitly saved.
 
 ### Max-turns recovery for Claude
-If stream-json returns `error_max_turns` with `session_id`, auto-resume via `claude --resume <session_id> --max-turns 3` and nudge for final JSON.
+If stream-json returns `error_max_turns` with `session_id`, auto-resume via `claude --resume <session_id> --max-turns 3` and nudge for final JSON. `review-engine`'s `ClaudeService` is the single implementation of this behavior for both hosts (IntelliJ in-process, VS Code via the sidecar).
 
 ### Draft review storage semantics
 Inline comment metadata is encoded in review body HTML comment for resilient draft reload. Pending review creation omits `event`. On 422 for inline comments, fallback to body-first creation then per-comment POST. When a pending draft lacks usable hidden metadata, hosts fall back to GitHub API review comments and set `importedFromGitHub`; the webview warns that recovered review details may be incomplete and offers a **Re-anchor from current diff** action that re-runs `validateComments` to snap comments back to valid positions, clears the imported flag, and (via autosave) re-encodes proper hidden metadata to GitHub so the draft reloads cleanly next time.

@@ -21,7 +21,15 @@ Update docs as part of each coding task:
 
 ## IntelliJ <-> VS Code sync obligations
 
-**Feature parity is mandatory.** Every user-facing feature must work in both the IntelliJ plugin and the VS Code extension. When you add or change a feature in one host, implement the equivalent in the other host in the same change — do not ship a feature to only one host. If a true platform constraint makes parity impossible, document the gap and the reason in `ARCHITECTURE.md` "Key design decisions" and call it out explicitly in the PR description. Logic that belongs in shared code goes in `core` (`commonMain` when it must compile to JS for the extension; `jvmMain` only for JVM-only/IntelliJ code); host wiring is mirrored between `WebviewPanel.java`/`PRToolWindowFactory.java` and `vscode-extension/src/extension.ts`.
+**Feature parity is mandatory.** Every user-facing feature must work in both the IntelliJ plugin and the VS Code extension. When you add or change a feature in one host, implement the equivalent in the other host in the same change — do not ship a feature to only one host. If a true platform constraint makes parity impossible, document the gap and the reason in `ARCHITECTURE.md` "Key design decisions" and call it out explicitly in the PR description. Logic that belongs in shared code goes in `core` (`commonMain` when it must compile to JS for the extension; `jvmMain` only for JVM-only/IntelliJ code) or `review-engine`/`github-engine` (JVM-only, used by both IntelliJ directly and the sidecar for VS Code); host wiring is mirrored between `WebviewPanel.java`/`PRToolWindowFactory.java` and `vscode-extension/src/extension.ts`.
+
+AI review/chat generation (Claude CLI, Copilot SDK), prompt building, and review-JSON parsing have
+one implementation in `review-engine`, shared by IntelliJ (in-process via `IntellijClaudeService`)
+and VS Code (over the sidecar's `reviews/generate`/`reviews/chat`/`reviews/cancel` JSON-RPC methods).
+Do not reintroduce a duplicate CLI-spawning implementation in `vscode-extension/src/claude.ts` or
+`copilot.ts` — those files should stay limited to prompt-building helpers still needed client-side
+(`buildFocusedChatPrompt`), binary-availability preflight, and Copilot model discovery (no sidecar
+RPC endpoint for that yet).
 
 When logic changes in one host, update the parallel file in the other host:
 
@@ -31,20 +39,21 @@ mirror only the IntelliJ direct adapter and VS Code sidecar RPC wiring when capa
 
 | Changed file | Must also update |
 |---|---|
-| `ClaudeService.kt` prompt constants (`REVIEW_INSTRUCTIONS`, `CHAT_PERSONA`) | `vscode-extension/src/claude.ts` same constants |
-| `ClaudeService.kt` `buildPrompt`/`buildChatPrompt`/`buildFocusedChatPrompt` | `vscode-extension/src/claude.ts` same functions |
-| `ClaudeService.kt` stream-json review parsing | `vscode-extension/src/claude.ts` review event loop |
-| `GitWorktreeService.kt` worktree create/remove/find-root logic | `vscode-extension/src/worktree.ts` matching functions |
+| `review-engine/ClaudeService.java` prompt constants (`REVIEW_INSTRUCTIONS`, `CHAT_PERSONA`) | `vscode-extension/src/claude.ts` same constants |
+| `review-engine/ClaudeService.java` `buildPrompt`/`buildChatPrompt`/`buildFocusedChatPrompt` | `vscode-extension/src/claude.ts` same functions |
+| `review-engine/ClaudeService.java` `reviewPR`/`chat`/stream-json parsing/max-turns resume | `sidecar/review/ReviewSessionService.java` call sites (no separate VS Code implementation — it routes through the sidecar) |
+| `review-engine/GitWorktreeService.java` worktree create/remove/find-root logic | `vscode-extension/src/worktree.ts` matching functions |
 | `WebviewPanel.resolvePrClaudeService`/worktree lifecycle | `vscode-extension/src/extension.ts` `resolveWorkingDir`/`clearWorktree` |
 | `PRNotificationService` poll/source-labeling/merge logic | `vscode-extension/src/notifications.ts` + `extension.ts` `PRNotificationPoller.poll` |
-| `ClaudeService.findClaudeBinary` / `CopilotService.findCopilotBinary` | `vscode-extension/src/claude.ts` + `vscode-extension/src/copilot.ts` |
-| `CopilotService.kt` SDK session setup, stream events, effort normalization | `vscode-extension/src/copilot.ts` |
-| `CopilotModelDiscovery` model probing / `PluginSettingsComponent` model combo | `vscode-extension/src/copilot.ts` `listModels`/`filterModelIds` + `extension.ts` `selectCopilotModel` command |
+| `review-engine/BinaryLocator.java` | `vscode-extension/src/claude.ts` + `vscode-extension/src/copilot.ts` binary-probing candidates |
+| `review-engine/CopilotService.java` SDK session setup, stream events, effort normalization | `sidecar/review/ReviewSessionService.java` call sites |
+| `review-engine/CopilotModelDiscovery.java` model probing / `PluginSettingsComponent` model combo | `vscode-extension/src/copilot.ts` `listModels`/`filterModelIds` + `extension.ts` `selectCopilotModel` command |
 | `PluginSettingsComponent` settings UI (provider-aware model selector, effort, base URL) | `vscode-extension/src/settings.ts` + `settingsView.ts` settings webview |
-| `CopilotService.DEFAULT_REASONING_EFFORT` | `vscode-extension/src/copilot.ts` |
+| `review-engine/CopilotService.DEFAULT_REASONING_EFFORT` | `vscode-extension/src/copilot.ts` |
 | `webview/src/bridge/types.ts` message schemas | `WebviewPanel.java` and `vscode-extension/src/extension.ts` handlers |
 | `PluginSettings` adding new setting | `vscode-extension/package.json` config contribution + `vscode-extension/src/extension.ts` reader |
 | `github-engine` public capability/result changes | `IntellijGitHubService.java`, `sidecar/StdioJsonRpcServer.java`, and `vscode-extension/src/sidecar.ts` wiring |
+| `sidecar/StdioJsonRpcServer.java` `reviews/*` methods or notification shapes | `vscode-extension/src/sidecar.ts` `generateReview`/`chatReview`/`cancelReview` and notification dispatch |
 
 ## Testing conventions
 
@@ -61,6 +70,7 @@ Test framework and location rules:
 
 - Core tests: `core/src/jvmTest/kotlin/com/jinloes/prpilot/` using Kotest `FunSpec`.
 - IntelliJ plugin tests: `intellij-plugin/src/test/java/com/jinloes/prpilot/` using JUnit 5 + AssertJ.
+- `review-engine`/`github-engine`/`sidecar` tests: `<module>/src/test/java/com/jinloes/prpilot/` using JUnit 5 + AssertJ (same convention as `intellij-plugin`).
 - Group Kotest tests by `context("MethodName")`.
 - For temp directories in Kotest, use `beforeTest`/`afterTest` + `Files.createTempDirectory`.
 - Do not write tests to `~/.pr-pilot`; use temp dirs.
@@ -71,7 +81,7 @@ Test framework and location rules:
 ./gradlew spotlessApply
 ./gradlew spotlessCheck
 ./gradlew check
-./gradlew :core:jvmTest :intellij-plugin:unitTest
+./gradlew :core:jvmTest :review-engine:test :intellij-plugin:unitTest
 ```
 
 ```bash

@@ -18,7 +18,8 @@ final class SidecarBootstrapService {
                         Map.entry("draftReviewMutations", true),
                         Map.entry("prSearch", true),
                         Map.entry("starredRepos", true),
-                        Map.entry("existingReviews", true)));
+                        Map.entry("existingReviews", true),
+                        Map.entry("reviewGeneration", true)));
     }
 
     record InitializeResult(

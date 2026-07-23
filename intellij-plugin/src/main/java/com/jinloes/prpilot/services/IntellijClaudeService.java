@@ -5,6 +5,8 @@ import com.jinloes.prpilot.model.ChatMessage;
 import com.jinloes.prpilot.model.PRReviewRequest;
 import com.jinloes.prpilot.model.ReviewProvider;
 import com.jinloes.prpilot.model.ReviewResult;
+import com.jinloes.prpilot.review.ClaudeService;
+import com.jinloes.prpilot.review.CopilotService;
 import com.jinloes.prpilot.settings.PluginSettings;
 import java.util.List;
 import java.util.function.BiConsumer;

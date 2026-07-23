@@ -45,6 +45,7 @@ const initializeResult = {
     prSearch: true,
     starredRepos: true,
     existingReviews: true,
+    reviewGeneration: true,
   },
 };
 

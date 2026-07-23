@@ -50,9 +50,7 @@ kotlin {
 
         jvmMain {
             dependencies {
-                implementation 'com.github:copilot-sdk-java:1.0.6'
-                implementation 'org.apache.commons:commons-lang3:3.18.0'
-                implementation 'commons-io:commons-io:2.16.1'
+                implementation 'org.slf4j:slf4j-api:2.0.13'
             }
         }
 
@@ -60,7 +58,6 @@ kotlin {
             dependencies {
                 implementation 'io.kotest:kotest-runner-junit5:6.1.11'
                 implementation kotlin('reflect')
-                implementation 'io.mockk:mockk:1.13.12'
             }
         }
 

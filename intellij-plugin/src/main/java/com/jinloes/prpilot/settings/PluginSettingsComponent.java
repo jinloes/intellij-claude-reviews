@@ -8,7 +8,7 @@ import com.intellij.ui.components.JBTextField;
 import com.intellij.util.ui.FormBuilder;
 import com.intellij.util.ui.JBUI;
 import com.jinloes.prpilot.model.ReviewProvider;
-import com.jinloes.prpilot.services.CopilotModelDiscovery;
+import com.jinloes.prpilot.review.CopilotModelDiscovery;
 import com.jinloes.prpilot.services.PRNotificationService;
 import com.jinloes.prpilot.sidecar.github.CheckAuthResult;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;

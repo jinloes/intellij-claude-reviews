@@ -28,11 +28,9 @@ function provider(): Provider {
     return value === 'copilot' ? 'copilot' : 'claude';
 }
 
-function cancelActiveProvider(): void {
-    // Cancel both — only one has an active process at any time, but reading the provider
-    // setting here can race with a config change so we just send the signal to both.
-    claude.cancelCurrentRequest();
-    copilot.cancelCurrentRequest();
+async function cancelActiveProvider(): Promise<void> {
+    // Cancellation now happens on the sidecar side (it owns the active Claude/Copilot process).
+    await sidecarClient.cancelReview().catch(() => undefined);
 }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -376,7 +374,7 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
                     await handleGenerateReview(state, msg);
                     break;
                 case 'cancelReview':
-                    cancelActiveProvider();
+                    await cancelActiveProvider();
                     break;
                 case 'saveDraft':
                     await enqueueMutation(state, () => handleSaveDraft(state, msg));
@@ -861,17 +859,12 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
         const reviewsResult = await sidecarClient.getExistingReviews(base, owner, repo, number).catch(() => null);
         const existingReviews = reviewsResult?.status === 'ok' ? reviewsResult.summary : '';
 
-        const pr: claude.PR = {
-            number,
-            owner,
-            repo,
-            title: state.activePR?.title ?? '',
-            body: state.activePR?.body ?? '',
-        };
+        const title = state.activePR?.title ?? '';
+        const body = state.activePR?.body ?? '';
 
         const reviewDir = await resolveWorkingDir(
             state,
-            { number, owner, repo, title: pr.title, body: pr.body ?? '' },
+            { number, owner, repo, title, body },
             true,
             key,
         );
@@ -884,37 +877,44 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
             ? msg.customInstructions.trim()
             : reviewCustomInstructions();
 
-        const prompt = claude.buildPrompt({
-            pr,
-            diff,
-            existingReviews,
-            repoGuidelines: readRepoGuidelines(reviewDir),
-            priorReview: formatPriorReview(state.activeReviewResult),
-            focusAreas,
-            customInstructions,
-        });
-
-        const result = isCopilot
-            ? await copilot.reviewPR({
-                prompt,
+        // Prompt construction happens sidecar-side (shared review-engine ClaudeService/CopilotService);
+        // the extension only supplies raw PR/diff/context fields.
+        const result = await sidecarClient.generateReview(
+            {
+                provider: isCopilot ? 'copilot' : 'claude',
+                projectDir: reviewDir,
                 model: reviewModel(),
                 effort: reviewEffort(),
-                workingDir: reviewDir,
-                inheritMcp: copilot.resolveReviewInheritMcp(
-                    copilotInheritMcp(),
-                    copilotAutoEnableMcpOnReview(),
-                ),
-                configDir: copilotConfigDir(),
-                onStatus: (status) => push(state, { type: 'reviewGenerating', prKey: key, message: status }),
-                onChunk: (kind, chunk) => push(state, { type: 'reviewChunk', prKey: key, kind, chunk }),
-            })
-            : await claude.reviewPR({
-                prompt,
-                model: reviewModel(),
-                workingDir: reviewDir,
-                onStatus: (status) => push(state, { type: 'reviewGenerating', prKey: key, message: status }),
-                onChunk: (kind, chunk) => push(state, { type: 'reviewChunk', prKey: key, kind, chunk }),
-            });
+                inheritMcp: isCopilot
+                    ? copilot.resolveReviewInheritMcp(copilotInheritMcp(), copilotAutoEnableMcpOnReview())
+                    : false,
+                configDir: isCopilot ? copilotConfigDir() : undefined,
+                pr: {
+                    title,
+                    // htmlUrl/author/createdAt/isDraft aren't used by ClaudeService/CopilotService's
+                    // prompt building (see review-engine ClaudeService.buildPrompt) — ActivePR
+                    // doesn't track them, so placeholders are supplied to satisfy the sidecar's
+                    // PrParams shape without any loss of behavior.
+                    htmlUrl: '',
+                    owner,
+                    repo,
+                    number,
+                    body,
+                    author: '',
+                    createdAt: '',
+                    isDraft: false,
+                },
+                diff,
+                knownPatterns: '',
+                priorReview: formatPriorReview(state.activeReviewResult),
+                existingReviews,
+                repoGuidelines: readRepoGuidelines(reviewDir),
+                focusAreas,
+                customInstructions,
+            },
+            (status) => push(state, { type: 'reviewGenerating', prKey: key, message: status }),
+            (kind, chunk) => push(state, { type: 'reviewChunk', prKey: key, kind, chunk }),
+        );
 
         if (!result) throw new Error('Provider produced no output.');
         if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
@@ -1043,9 +1043,11 @@ async function handleAskClaude(state: ViewState, msg: Record<string, unknown>): 
     // Add user turn to history before sending
     history.push({ role: 'USER', content: question });
 
-    const prompt = context.trim()
-        ? claude.buildFocusedChatPrompt(context, question)
-        : claude.buildChatPrompt(buildPrContext(state), history.slice(0, -1), question);
+    // Focused chat builds its (small) prompt client-side, matching IntelliJ's
+    // IntellijClaudeService.chatFocused; regular chat sends raw context/history and lets the
+    // shared review-engine service build the full prompt server-side.
+    const focused = context.trim().length > 0;
+    const rawPrompt = focused ? claude.buildFocusedChatPrompt(context, question) : undefined;
 
     const isCopilot = provider() === 'copilot';
     try {
@@ -1054,20 +1056,19 @@ async function handleAskClaude(state: ViewState, msg: Record<string, unknown>): 
         const chatDir = state.activePR
             ? await resolveWorkingDir(state, state.activePR, false)
             : workingDir();
-        const response = isCopilot
-            ? await copilot.chat({
-                prompt,
+        const response = await sidecarClient.chatReview(
+            {
+                provider: isCopilot ? 'copilot' : 'claude',
+                projectDir: chatDir,
                 effort: reviewEffort(),
-                workingDir: chatDir,
-                inheritMcp: copilotInheritMcp(),
-                configDir: copilotConfigDir(),
-                onChunk: (chunk) => push(state, { type: 'chatChunk', prKey: key ?? undefined, chunk }),
-            })
-            : await claude.chat({
-                prompt,
-                workingDir: chatDir,
-                onChunk: (chunk) => push(state, { type: 'chatChunk', prKey: key ?? undefined, chunk }),
-            });
+                inheritMcp: isCopilot ? copilotInheritMcp() : false,
+                configDir: isCopilot ? copilotConfigDir() : undefined,
+                ...(focused
+                    ? { rawPrompt }
+                    : { prContext: buildPrContext(state), history: history.slice(0, -1), userMessage: question }),
+            },
+            (chunk) => push(state, { type: 'chatChunk', prKey: key ?? undefined, chunk }),
+        );
         history.push({ role: 'ASSISTANT', content: response });
         push(state, { type: 'chatResponse', prKey: key ?? undefined, response });
     } catch (err) {

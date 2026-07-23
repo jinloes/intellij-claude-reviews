@@ -12,13 +12,16 @@ import com.jinloes.prpilot.sidecar.pr.PrDiffService;
 import com.jinloes.prpilot.sidecar.pr.PrListService;
 import com.jinloes.prpilot.sidecar.pr.PrSupplementalService;
 import com.jinloes.prpilot.sidecar.repo.RepoDetector;
+import com.jinloes.prpilot.sidecar.review.ReviewSessionService;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
 
 final class StdioJsonRpcServer {
     private static final String JSON_RPC_VERSION = "2.0";
@@ -34,6 +37,10 @@ final class StdioJsonRpcServer {
     private final DraftReviewService draftReviewService;
     private final DraftReviewMutationService draftReviewMutationService;
     private final PrSupplementalService prSupplementalService;
+    private final ReviewSessionService reviewSessionService;
+    private final ExecutorService reviewExecutor;
+    private final Object writeLock = new Object();
+    private volatile OutputStream currentOutput;
 
     StdioJsonRpcServer(
             ObjectMapper objectMapper,
@@ -46,7 +53,9 @@ final class StdioJsonRpcServer {
             PrDiffService prDiffService,
             DraftReviewService draftReviewService,
             DraftReviewMutationService draftReviewMutationService,
-            PrSupplementalService prSupplementalService) {
+            PrSupplementalService prSupplementalService,
+            ReviewSessionService reviewSessionService,
+            ExecutorService reviewExecutor) {
         this.objectMapper = Objects.requireNonNull(objectMapper);
         this.frameCodec = Objects.requireNonNull(frameCodec);
         this.bootstrapService = Objects.requireNonNull(bootstrapService);
@@ -58,15 +67,18 @@ final class StdioJsonRpcServer {
         this.draftReviewService = Objects.requireNonNull(draftReviewService);
         this.draftReviewMutationService = Objects.requireNonNull(draftReviewMutationService);
         this.prSupplementalService = Objects.requireNonNull(prSupplementalService);
+        this.reviewSessionService = Objects.requireNonNull(reviewSessionService);
+        this.reviewExecutor = Objects.requireNonNull(reviewExecutor);
     }
 
     void run(InputStream input, OutputStream output) {
+        this.currentOutput = output;
         try {
             byte[] frame;
             while ((frame = frameCodec.readFrame(input)) != null) {
                 JsonNode response = handle(frame);
                 if (response != null) {
-                    frameCodec.writeFrame(output, objectMapper.writeValueAsBytes(response));
+                    send(response);
                 }
             }
         } catch (IOException exception) {
@@ -107,6 +119,9 @@ final class StdioJsonRpcServer {
                         case "prs/saveDraftReview" -> saveDraftReview(request);
                         case "prs/submitReview" -> submitReview(request);
                         case "prs/deleteDraftReview" -> deleteDraftReview(request);
+                        case "reviews/generate" -> generateReview(request);
+                        case "reviews/chat" -> chatReview(request);
+                        case "reviews/cancel" -> cancelReview(request);
                         default -> error(requestId(request), -32601, "Method not found");
                     };
         } catch (RuntimeException exception) {
@@ -114,6 +129,151 @@ final class StdioJsonRpcServer {
         }
 
         return notification ? null : response;
+    }
+
+    /**
+     * Kicks off review generation on {@link #reviewExecutor} and returns {@code null} immediately —
+     * the eventual response (and any {@code reviews/status}/{@code reviews/chunk} notifications)
+     * are written asynchronously from the background thread once the provider CLI completes, so the
+     * read loop stays free to accept a {@code reviews/cancel} request meanwhile.
+     */
+    private JsonNode generateReview(JsonNode request) {
+        JsonNode id = requestId(request);
+        ReviewSessionService.GenerateReviewParams params;
+        try {
+            params =
+                    objectMapper.treeToValue(
+                            request.get("params"), ReviewSessionService.GenerateReviewParams.class);
+        } catch (Exception exception) {
+            return error(id, -32602, "Invalid params");
+        }
+        if (params == null
+                || params.pr() == null
+                || params.provider() == null
+                || params.diff() == null
+                || params.knownPatterns() == null) {
+            return error(id, -32602, "Invalid params");
+        }
+        reviewExecutor.submit(
+                () -> {
+                    try {
+                        var result =
+                                reviewSessionService.generate(
+                                        params,
+                                        status ->
+                                                sendNotification(
+                                                        "reviews/status", statusParams(id, status)),
+                                        (kind, text) ->
+                                                sendNotification(
+                                                        "reviews/chunk",
+                                                        chunkParams(id, kind, text)));
+                        send(result(id, result));
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        send(error(id, -32000, "Review interrupted."));
+                    } catch (Exception exception) {
+                        send(error(id, -32000, safeMessage(exception)));
+                    }
+                });
+        return null;
+    }
+
+    /** Same async-dispatch pattern as {@link #generateReview}, for chat requests. */
+    private JsonNode chatReview(JsonNode request) {
+        JsonNode id = requestId(request);
+        ReviewSessionService.ChatParams params;
+        try {
+            params =
+                    objectMapper.treeToValue(
+                            request.get("params"), ReviewSessionService.ChatParams.class);
+        } catch (Exception exception) {
+            return error(id, -32602, "Invalid params");
+        }
+        if (params == null || params.provider() == null) {
+            return error(id, -32602, "Invalid params");
+        }
+        if (params.rawPrompt() == null && params.userMessage() == null) {
+            return error(id, -32602, "Invalid params");
+        }
+        reviewExecutor.submit(
+                () -> {
+                    try {
+                        var result =
+                                reviewSessionService.chat(
+                                        params,
+                                        text ->
+                                                sendNotification(
+                                                        "reviews/chatChunk",
+                                                        chatChunkParams(id, text)));
+                        send(result(id, result));
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        send(error(id, -32000, "Chat interrupted."));
+                    } catch (Exception exception) {
+                        send(error(id, -32000, safeMessage(exception)));
+                    }
+                });
+        return null;
+    }
+
+    /** Synchronous: cancelling only touches a flag/process reference, no CLI I/O. */
+    private ObjectNode cancelReview(JsonNode request) {
+        reviewSessionService.cancel();
+        return result(requestId(request), Map.of("ok", true));
+    }
+
+    private String safeMessage(Exception exception) {
+        String message = exception.getMessage();
+        return message == null ? exception.getClass().getSimpleName() : message;
+    }
+
+    private ObjectNode statusParams(JsonNode id, String message) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.set("requestId", id);
+        node.put("message", message);
+        return node;
+    }
+
+    private ObjectNode chunkParams(JsonNode id, String kind, String text) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.set("requestId", id);
+        node.put("kind", kind);
+        node.put("text", text);
+        return node;
+    }
+
+    private ObjectNode chatChunkParams(JsonNode id, String text) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.set("requestId", id);
+        node.put("text", text);
+        return node;
+    }
+
+    /** Sends a fire-and-forget JSON-RPC notification (no {@code id} field). */
+    private void sendNotification(String method, ObjectNode params) {
+        ObjectNode notification = objectMapper.createObjectNode();
+        notification.put("jsonrpc", JSON_RPC_VERSION);
+        notification.put("method", method);
+        notification.set("params", params);
+        send(notification);
+    }
+
+    /**
+     * Writes a frame to the shared stdout stream under {@link #writeLock} so the main read loop and
+     * background {@link #reviewExecutor} tasks never interleave partial frames. Failures are
+     * swallowed — a broken pipe here means the client already disconnected, which the main read
+     * loop will independently observe and exit on.
+     */
+    private void send(JsonNode node) {
+        OutputStream output = this.currentOutput;
+        if (output == null) return;
+        synchronized (writeLock) {
+            try {
+                frameCodec.writeFrame(output, objectMapper.writeValueAsBytes(node));
+            } catch (IOException exception) {
+                // Best effort; see method javadoc.
+            }
+        }
     }
 
     private ObjectNode detectRepo(JsonNode request) {

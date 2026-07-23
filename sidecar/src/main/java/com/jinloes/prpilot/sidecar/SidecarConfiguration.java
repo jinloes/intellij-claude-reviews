@@ -9,6 +9,9 @@ import com.jinloes.prpilot.sidecar.pr.PrDiffService;
 import com.jinloes.prpilot.sidecar.pr.PrListService;
 import com.jinloes.prpilot.sidecar.pr.PrSupplementalService;
 import com.jinloes.prpilot.sidecar.repo.RepoDetector;
+import com.jinloes.prpilot.sidecar.review.ReviewSessionService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -65,6 +68,27 @@ class SidecarConfiguration {
     }
 
     @Bean
+    ReviewSessionService reviewSessionService() {
+        return new ReviewSessionService();
+    }
+
+    /**
+     * Single background thread for provider CLI I/O: only one review or chat request is ever active
+     * per sidecar process (matching IntelliJ's in-process behavior), so a size-1 pool is sufficient
+     * — it just needs to be off the stdio read loop so {@code reviews/cancel} can be processed
+     * while a review is in flight.
+     */
+    @Bean(destroyMethod = "shutdownNow")
+    ExecutorService reviewExecutor() {
+        return Executors.newSingleThreadExecutor(
+                runnable -> {
+                    Thread thread = new Thread(runnable, "review-session");
+                    thread.setDaemon(true);
+                    return thread;
+                });
+    }
+
+    @Bean
     StdioJsonRpcServer stdioJsonRpcServer(
             ObjectMapper objectMapper,
             StdioFrameCodec frameCodec,
@@ -76,7 +100,9 @@ class SidecarConfiguration {
             PrDiffService prDiffService,
             DraftReviewService draftReviewService,
             DraftReviewMutationService draftReviewMutationService,
-            PrSupplementalService prSupplementalService) {
+            PrSupplementalService prSupplementalService,
+            ReviewSessionService reviewSessionService,
+            ExecutorService reviewExecutor) {
         return new StdioJsonRpcServer(
                 objectMapper,
                 frameCodec,
@@ -88,6 +114,8 @@ class SidecarConfiguration {
                 prDiffService,
                 draftReviewService,
                 draftReviewMutationService,
-                prSupplementalService);
+                prSupplementalService,
+                reviewSessionService,
+                reviewExecutor);
     }
 }

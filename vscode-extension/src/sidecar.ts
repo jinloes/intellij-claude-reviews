@@ -1,8 +1,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import type { ReviewResult, LineComment } from './models';
 
 const REQUEST_TIMEOUT_MS = 60_000;
+// Review/chat requests shell out to a provider CLI that can legitimately run for a long time
+// (ClaudeService allows up to 30 minutes for review generation, resumed sessions up to 10
+// minutes); a much longer timeout than the default RPC timeout is required here.
+const REVIEW_REQUEST_TIMEOUT_MS = 35 * 60 * 1000;
 const HEADER_TERMINATOR = '\r\n\r\n';
 const SIDECAR_PROTOCOL_VERSION = 1;
 const REQUIRED_CAPABILITIES = [
@@ -16,11 +21,20 @@ const REQUIRED_CAPABILITIES = [
     'prSearch',
     'starredRepos',
     'existingReviews',
+    'reviewGeneration',
 ] as const;
 
 interface PendingRequest {
     resolve: (value: unknown) => void;
     reject: (err: Error) => void;
+}
+
+/** Callbacks invoked as `reviews/status`, `reviews/chunk`, and `reviews/chatChunk` notifications
+ * arrive for a specific in-flight request, keyed by that request's JSON-RPC id. */
+interface NotificationHandlers {
+    onStatus?: (message: string) => void;
+    onChunk?: (kind: 'text' | 'thinking', text: string) => void;
+    onChatChunk?: (text: string) => void;
 }
 
 interface SidecarRpcResponse {
@@ -157,6 +171,97 @@ export interface SidecarDraftReviewMutationResult {
     message: string;
     reviewId: string | null;
     commentsDropped: boolean;
+}
+
+// ── Review generation / chat ───────────────────────────────────────────────────
+
+export type ReviewProvider = 'claude' | 'copilot';
+
+export interface SidecarPrInput {
+    title: string;
+    htmlUrl: string;
+    owner: string;
+    repo: string;
+    number: number;
+    body: string;
+    author: string;
+    createdAt: string;
+    isDraft: boolean;
+}
+
+export interface SidecarGenerateReviewParams {
+    provider: ReviewProvider;
+    projectDir?: string;
+    model: string;
+    effort: string;
+    inheritMcp: boolean;
+    configDir?: string;
+    pr: SidecarPrInput;
+    diff: string;
+    knownPatterns: string;
+    priorReview?: string;
+    existingReviews?: string;
+    repoGuidelines?: string;
+    focusAreas?: string;
+    customInstructions?: string;
+}
+
+export interface SidecarChatMessage {
+    role: 'USER' | 'ASSISTANT';
+    content: string;
+}
+
+export interface SidecarChatParams {
+    provider: ReviewProvider;
+    projectDir?: string;
+    effort: string;
+    inheritMcp: boolean;
+    configDir?: string;
+    prContext?: string;
+    history?: SidecarChatMessage[];
+    userMessage?: string;
+    rawPrompt?: string;
+}
+
+/** Validates the shape returned by `reviews/generate`. */
+export function parseReviewResult(value: unknown): ReviewResult | null {
+    if (!value || typeof value !== 'object') return null;
+    const result = value as Record<string, unknown>;
+    if (typeof result.summary !== 'string' || typeof result.verdict !== 'string' || !Array.isArray(result.lineComments)) {
+        return null;
+    }
+    const lineComments = result.lineComments.map((entry) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const comment = entry as Record<string, unknown>;
+        if (typeof comment.file !== 'string' || !Number.isInteger(comment.line)
+            || typeof comment.type !== 'string' || typeof comment.body !== 'string') {
+            return null;
+        }
+        const parsed: LineComment = {
+            file: comment.file,
+            line: comment.line as number,
+            type: comment.type as LineComment['type'],
+            body: comment.body,
+            severity: typeof comment.severity === 'string' ? (comment.severity as LineComment['severity']) : undefined,
+            category: typeof comment.category === 'string' ? (comment.category as LineComment['category']) : undefined,
+            confidence: typeof comment.confidence === 'string' ? (comment.confidence as LineComment['confidence']) : undefined,
+            rationale: typeof comment.rationale === 'string' ? comment.rationale : undefined,
+        };
+        return parsed;
+    });
+    if (lineComments.some((comment) => comment === null)) return null;
+    return {
+        summary: result.summary,
+        verdict: result.verdict as ReviewResult['verdict'],
+        lineComments: lineComments as LineComment[],
+    };
+}
+
+/** Validates the shape returned by `reviews/chat`. */
+export function parseChatResult(value: unknown): string | null {
+    if (!value || typeof value !== 'object') return null;
+    const result = value as Record<string, unknown>;
+    return typeof result.content === 'string' ? result.content : null;
 }
 
 const AUTH_STATUSES = new Set<SidecarGitHubAuthResult['status']>([
@@ -543,6 +648,7 @@ export class SidecarClient {
     private disposed = false;
     private nextId = 1;
     private readonly pending = new Map<number, PendingRequest>();
+    private readonly notificationHandlers = new Map<number, NotificationHandlers>();
     private buffer: Buffer = Buffer.alloc(0);
     private stderr = '';
 
@@ -641,9 +747,9 @@ export class SidecarClient {
     }
 
     private handleMessage(body: string): void {
-        let message: SidecarRpcResponse;
+        let message: SidecarRpcResponse & { method?: string; params?: unknown };
         try {
-            message = JSON.parse(body) as SidecarRpcResponse;
+            message = JSON.parse(body) as SidecarRpcResponse & { method?: string; params?: unknown };
         } catch {
             const failure = new Error('PR Pilot Java sidecar sent malformed JSON.');
             this.startupFailure = failure;
@@ -651,16 +757,37 @@ export class SidecarClient {
             this.stopChild();
             return;
         }
-        if (typeof message.id !== 'number') return;
+        if (typeof message.id !== 'number') {
+            // A JSON-RPC notification (no id) — route reviews/status, reviews/chunk, and
+            // reviews/chatChunk to the handlers registered for their correlated request.
+            if (typeof message.method === 'string') this.dispatchNotification(message.method, message.params);
+            return;
+        }
         const pending = this.pending.get(message.id);
         if (!pending) return;
         this.pending.delete(message.id);
+        this.notificationHandlers.delete(message.id);
         if (message.jsonrpc !== '2.0' || (message.error === undefined) === (message.result === undefined)) {
             pending.reject(new Error('PR Pilot Java sidecar returned a malformed JSON-RPC response.'));
         } else if (message.error) {
             pending.reject(new Error(message.error.message ?? 'Sidecar error'));
         } else {
             pending.resolve(message.result);
+        }
+    }
+
+    private dispatchNotification(method: string, params: unknown): void {
+        const p = params as Record<string, unknown> | undefined;
+        const requestId = typeof p?.requestId === 'number' ? p.requestId : undefined;
+        if (requestId === undefined) return;
+        const handlers = this.notificationHandlers.get(requestId);
+        if (!handlers) return;
+        if (method === 'reviews/status' && typeof p?.message === 'string') {
+            handlers.onStatus?.(p.message);
+        } else if (method === 'reviews/chunk' && typeof p?.kind === 'string' && typeof p?.text === 'string') {
+            handlers.onChunk?.(p.kind === 'thinking' ? 'thinking' : 'text', p.text);
+        } else if (method === 'reviews/chatChunk' && typeof p?.text === 'string') {
+            handlers.onChatChunk?.(p.text);
         }
     }
 
@@ -674,10 +801,16 @@ export class SidecarClient {
         return this.requestRaw(method, params);
     }
 
-    private requestRaw(method: string, params: unknown): Promise<unknown> {
+    private requestRaw(
+        method: string,
+        params: unknown,
+        options?: { timeoutMs?: number; notificationHandlers?: NotificationHandlers },
+    ): Promise<unknown> {
         const child = this.child;
         if (!child) return Promise.reject(this.startupFailure ?? new Error('PR Pilot Java sidecar is not running.'));
         const id = this.nextId++;
+        const timeoutMs = options?.timeoutMs ?? this.requestTimeoutMs;
+        if (options?.notificationHandlers) this.notificationHandlers.set(id, options.notificationHandlers);
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
                 const failure = new Error(
@@ -686,19 +819,61 @@ export class SidecarClient {
                 this.startupFailure = failure;
                 this.failAllPending(failure);
                 this.stopChild();
-            }, this.requestTimeoutMs);
+            }, timeoutMs);
             this.pending.set(id, {
-                resolve: (value) => { clearTimeout(timer); resolve(value); },
-                reject: (err) => { clearTimeout(timer); reject(err); },
+                resolve: (value) => { clearTimeout(timer); this.notificationHandlers.delete(id); resolve(value); },
+                reject: (err) => { clearTimeout(timer); this.notificationHandlers.delete(id); reject(err); },
             });
             child.stdin.write(encodeFrame(JSON.stringify({ jsonrpc: '2.0', id, method, params })), (err) => {
                 if (err) {
                     clearTimeout(timer);
                     this.pending.delete(id);
+                    this.notificationHandlers.delete(id);
                     reject(err);
                 }
             });
         });
+    }
+
+    /**
+     * Generates a PR review via the shared {@code review-engine} Claude/Copilot services, routed
+     * through the sidecar over JSON-RPC instead of spawning the provider CLI in the extension
+     * process. `onStatus`/`onChunk` are driven by `reviews/status`/`reviews/chunk` notifications
+     * correlated to this request's id.
+     */
+    async generateReview(
+        params: SidecarGenerateReviewParams,
+        onStatus: (message: string) => void,
+        onChunk: (kind: 'text' | 'thinking', text: string) => void,
+    ): Promise<ReviewResult> {
+        await this.initialize();
+        const value = await this.requestRaw('reviews/generate', params, {
+            timeoutMs: REVIEW_REQUEST_TIMEOUT_MS,
+            notificationHandlers: { onStatus, onChunk },
+        });
+        return this.parseResult('review generation', parseReviewResult, value);
+    }
+
+    /**
+     * Answers a chat question via the shared {@code review-engine} services, routed through the
+     * sidecar. `onChunk` is driven by `reviews/chatChunk` notifications correlated to this
+     * request's id.
+     */
+    async chatReview(params: SidecarChatParams, onChunk: (text: string) => void): Promise<string> {
+        await this.initialize();
+        const value = await this.requestRaw('reviews/chat', params, {
+            timeoutMs: REVIEW_REQUEST_TIMEOUT_MS,
+            notificationHandlers: { onChatChunk: onChunk },
+        });
+        const result = parseChatResult(value);
+        if (result === null) throw this.invalidResponse('chat response');
+        return result;
+    }
+
+    /** Cancels whichever review/chat request is currently in flight on the sidecar; a no-op if none is active. */
+    async cancelReview(): Promise<void> {
+        if (!this.child) return;
+        await this.request('reviews/cancel', {});
     }
 
     /** Returns null only when the shared detector reports that no repository was found. */
