@@ -50,7 +50,7 @@ core/                                  – KMP module (jvm + js targets); Java s
       services/UrlEncode.kt          – JS actual uses encodeURIComponent
       util/ProcessUtil.kt            – JS actual uses Node fs.existsSync/statSync
 
-intellij-plugin/                       – IntelliJ plugin host; depends on :core
+intellij-plugin/                       – IntelliJ plugin host; depends on :core and :github-engine
   src/main/java/com/jinloes/prpilot/
     services/
       IntellijGitHubService.java
@@ -71,13 +71,8 @@ intellij-plugin/                       – IntelliJ plugin host; depends on :cor
       WebviewDtos.java               – package-private DTO records serialized to webview bridge
       RepoDetector.java
 
-sidecar/                                – Java 17, non-web Spring Boot process for shared host orchestration; spawned on demand by the VS Code extension over stdio JSON-RPC (see "Sidecar wiring (VS Code)")
+github-engine/                          – Plain Java 17 library containing host-neutral GitHub, PR, repository, and review behavior; no Spring or IDE APIs
   src/main/java/com/jinloes/prpilot/sidecar/
-    PrPilotSidecarApplication.java      – Non-web Boot entry point; owns stdio process lifecycle
-    SidecarConfiguration.java           – Explicit Spring bean composition root
-    StdioFrameCodec.java                – Bounded Content-Length UTF-8 framing for JSON-RPC over stdio
-    StdioJsonRpcServer.java             – Initial JSON-RPC dispatcher and structured protocol errors
-    SidecarBootstrapService.java        – Sidecar initialization capability response
     review/
       ReviewJsonParser.java             – Pure strict provider-review JSON extraction and validation engine
       ReviewResult.java                 – Sidecar review result DTO
@@ -109,11 +104,7 @@ sidecar/                                – Java 17, non-web Spring Boot process
       RepositoryId.java                  – owner/repo DTO
       DetectResult.java                  – Typed detect() outcome (status + optional RepositoryId)
       DetectStatus.java                  – Non-fatal detection outcomes (found, not_git, origin_missing, etc.)
-  src/main/resources/
-    logback-spring.xml                  – Sends all sidecar logs to stderr; stdout is protocol-only
   src/test/java/com/jinloes/prpilot/sidecar/
-    StdioFrameCodecTest.java
-    StdioJsonRpcServerTest.java
     review/ReviewJsonParserTest.java
     pr/PrSearchQueryServiceTest.java
     pr/PrListServiceTest.java
@@ -124,6 +115,19 @@ sidecar/                                – Java 17, non-web Spring Boot process
     pr/DraftReviewMutationServiceTest.java
     repo/RepoDetectorTest.java
     repo/RemoteUrlParserTest.java
+
+sidecar/                                – Java 17, non-web Spring Boot/stdio JSON-RPC adapter over :github-engine; spawned on demand by the VS Code extension
+  src/main/java/com/jinloes/prpilot/sidecar/
+    PrPilotSidecarApplication.java      – Non-web Boot entry point; owns stdio process lifecycle
+    SidecarConfiguration.java           – Explicit Spring bean composition root
+    StdioFrameCodec.java                – Bounded Content-Length UTF-8 framing for JSON-RPC over stdio
+    StdioJsonRpcServer.java             – JSON-RPC parameter validation, dispatch, and structured protocol errors
+    SidecarBootstrapService.java        – Sidecar initialization capability response
+  src/main/resources/
+    logback-spring.xml                  – Sends all sidecar logs to stderr; stdout is protocol-only
+  src/test/java/com/jinloes/prpilot/sidecar/
+    StdioFrameCodecTest.java
+    StdioJsonRpcServerTest.java
 
 webview/                               – Vite + React + TypeScript webview
   a11y/
@@ -198,9 +202,9 @@ Webview development runs dev-only runtime accessibility scans via `@axe-core/rea
 CI runs full-page Playwright + axe scenarios (`npm run test:a11y`) using `playwright.a11y.config.ts` and fails on any reported violation. Deterministic screenshot scenarios use `playwright.visual.config.ts`; pseudo-localization is test-only and enabled with `?locale=pseudo` to expose narrow-layout overflow. Visual snapshots are platform-sensitive and remain a manual verification suite unless CI and canonical baselines are updated together.
 
 ### Module boundaries
-`core` is KMP and has zero IntelliJ dependencies. `intellij-plugin` depends on JVM variant of `core`. Keep Java sources in `core/src/main/java` and `core/src/test/java` (do not move to `src/jvmMain/java`).
+`core` is KMP and has zero IntelliJ dependencies. `github-engine` is a plain Java 17 library with no Spring or IDE APIs; both `intellij-plugin` and `sidecar` depend on it. `intellij-plugin` also depends on the JVM variant of `core`. Keep Java sources in `core/src/main/java` and `core/src/test/java` (do not move to `src/jvmMain/java`).
 
-`sidecar` is a Java 17 Spring Boot application configured with `WebApplicationType.NONE`; it is not an HTTP server. Its protocol uses bounded `Content-Length`-framed UTF-8 JSON-RPC over standard input/output. Standard output must contain protocol frames only—diagnostics belong on standard error. Keep the service engine independent of Spring and IDE APIs; Spring remains the sidecar composition and lifecycle layer.
+`sidecar` is a Java 17 Spring Boot application configured with `WebApplicationType.NONE`; it is not an HTTP server. Its protocol uses bounded `Content-Length`-framed UTF-8 JSON-RPC over standard input/output. Standard output must contain protocol frames only—diagnostics belong on standard error. GitHub, PR, repository, and review behavior belongs in `github-engine`; Spring remains only the sidecar composition and lifecycle layer.
 
 The sidecar's `review/parse` capability is a pure Java implementation of the strict provider-review contract. It accepts raw provider output, tolerates the current outer prose/markdown-fence format, and returns either a validated review or an `invalid_review_json` domain result. Validation failures must not include or log raw provider output. Invalid JSON-RPC parameters remain protocol errors; malformed provider review content is an expected domain result.
 
@@ -214,7 +218,7 @@ The sidecar's `prs/list` capability owns its `gh auth token` lookup and GitHub `
 
 The sidecar's `prs/getDetail` capability owns its `gh auth token` lookup and GitHub pull-request metadata request. It validates owner/repository path segments, maps malformed GitHub JSON to `api_failed`, and returns only title/body, merged status, and nullable head/base repository metadata needed for fork-aware worktrees. No token, HTTP response body, or raw exception becomes protocol output.
 
-The sidecar's `prs/getDiff` currently supports review mode only (250,001-byte bounded streaming). Validation-mode diffs (the up-to-1,000,000-character diff used only for inline-comment position validation and draft anchoring) intentionally remain host-local and are not planned for migration: the current 1 MiB JSON-RPC payload limit cannot safely carry that contract after JSON escaping, and — as of this writing — the VS Code extension's `getPRDiffFull` has no caller at all (only IntelliJ's in-process `WebviewPanel` uses it, which never spawns the sidecar), so there is no consumer that would benefit from porting it.
+The sidecar's `prs/getDiff` supports both review mode (250,000-byte limit with a visible truncation marker) and validation mode (1,000,000-byte limit without a marker, used for inline-comment position validation and draft anchoring). The stdio JSON-RPC frame ceiling is 8 MiB in both Java and TypeScript so an escaped validation diff remains bounded while fitting safely in a response.
 
 The sidecar's `prs/getDraftReview` capability owns its `gh auth token` lookup and the GitHub pending-review lookup (`GET .../pulls/{number}/reviews` filtered to `state == PENDING`, plus that review's inline comments). `DraftReviewCodec` decodes the PR Pilot `claude-verdict`/`claude-summary`/`claude-comments` HTML-comment tags embedded in the review body, falling back to raw GitHub inline comments (with an `importedFromGitHub` flag) when those tags are absent or malformed. `none` (no pending review exists) is a normal domain result, not a failure; other token-free domain statuses (`invalid_request`, `invalid_base_url`, `not_installed`, `not_authenticated`, `rate_limited`, `network_error`, `api_failed`) are returned the same way `prs/getDetail` does. No token is ever logged, serialized, or included in an error message.
 

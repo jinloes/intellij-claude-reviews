@@ -23,6 +23,13 @@ test('encodeFrame writes a bounded Content-Length header followed by the UTF-8 b
   assert.equal(text, `Content-Length: ${body.length}\r\n\r\n{"message":"héllo"}`);
 });
 
+test('encodeFrame rejects payloads larger than the protocol limit', () => {
+  assert.throws(
+    () => encodeFrame('x'.repeat(8 * 1024 * 1024 + 1)),
+    /exceeds the maximum size/,
+  );
+});
+
 test('extractFrames decodes a single complete frame and leaves no remainder', () => {
   const frame = encodeFrame('{"a":1}');
   const seen: string[] = [];
@@ -53,6 +60,16 @@ test('extractFrames discards an unparseable header instead of looping forever', 
   const garbage = Buffer.from('Content-Type: application/json\r\n\r\n{}', 'ascii');
   const seen: string[] = [];
   const remaining = extractFrames(garbage, (body) => seen.push(body));
+  assert.deepEqual(seen, []);
+  assert.equal(remaining.length, 0);
+});
+
+test('extractFrames discards frames larger than the protocol limit', () => {
+  const oversizedHeader = Buffer.from(`Content-Length: ${8 * 1024 * 1024 + 1}\r\n\r\n`, 'ascii');
+  const seen: string[] = [];
+
+  const remaining = extractFrames(oversizedHeader, (body) => seen.push(body));
+
   assert.deepEqual(seen, []);
   assert.equal(remaining.length, 0);
 });

@@ -15,6 +15,7 @@ import java.util.regex.Pattern;
 /** Retrieves a byte-bounded review diff without exposing GitHub credentials outside the sidecar. */
 public final class PrDiffService {
     static final int REVIEW_LIMIT_BYTES = 250_000;
+    static final int VALIDATION_LIMIT_BYTES = 1_000_000;
     private static final String TRUNCATION_MARKER = "\n\n[... diff truncated at 250 KB ...]";
     private static final Duration TIMEOUT = Duration.ofSeconds(15);
     private static final Pattern SEGMENT = Pattern.compile("[A-Za-z0-9_.-]+");
@@ -34,7 +35,7 @@ public final class PrDiffService {
         if (params.number() <= 0
                 || !valid(params.owner())
                 || !valid(params.repo())
-                || !"review".equals(params.mode())) {
+                || !("review".equals(params.mode()) || "validation".equals(params.mode()))) {
             return PrDiffResult.failure("invalid_request", "Pull request diff request is invalid.");
         }
         Base base = Base.from(params.githubBaseUrl());
@@ -47,12 +48,18 @@ public final class PrDiffService {
         if (token.status() != GitHubAuthService.TokenStatus.RESOLVED)
             return PrDiffResult.failure(
                     "not_authenticated", "Run 'gh auth login' in a terminal for this GitHub host.");
+        int limitBytes =
+                "validation".equals(params.mode()) ? VALIDATION_LIMIT_BYTES : REVIEW_LIMIT_BYTES;
         Response response =
                 diffClient.get(
-                        base.api(), token.token(), params.owner(), params.repo(), params.number());
+                        base.api(),
+                        token.token(),
+                        params.owner(),
+                        params.repo(),
+                        params.number(),
+                        limitBytes);
         return switch (response.status()) {
-            case OK ->
-                    PrDiffResult.success(response.diff(), response.truncated(), REVIEW_LIMIT_BYTES);
+            case OK -> PrDiffResult.success(response.diff(), response.truncated(), limitBytes);
             case UNAUTHENTICATED ->
                     PrDiffResult.failure(
                             "not_authenticated",
@@ -71,7 +78,8 @@ public final class PrDiffService {
             String githubBaseUrl, String owner, String repo, int number, String mode) {}
 
     interface DiffClient {
-        Response get(String api, String token, String owner, String repo, int number);
+        Response get(
+                String api, String token, String owner, String repo, int number, int limitBytes);
     }
 
     record Response(Status status, String diff, boolean truncated) {
@@ -95,7 +103,8 @@ public final class PrDiffService {
     private static final class HttpDiffClient implements DiffClient {
         private final HttpClient client = HttpClient.newBuilder().connectTimeout(TIMEOUT).build();
 
-        public Response get(String api, String token, String owner, String repo, int number) {
+        public Response get(
+                String api, String token, String owner, String repo, int number, int limitBytes) {
             try {
                 HttpRequest request =
                         HttpRequest.newBuilder()
@@ -118,7 +127,7 @@ public final class PrDiffService {
                 if (response.statusCode() < 200 || response.statusCode() >= 300)
                     return Response.of(Status.API);
                 try (InputStream input = response.body()) {
-                    return read(input);
+                    return read(input, limitBytes);
                 }
             } catch (IOException e) {
                 return Response.of(Status.NETWORK);
@@ -128,16 +137,15 @@ public final class PrDiffService {
             }
         }
 
-        private Response read(InputStream input) throws IOException {
-            byte[] bytes = input.readNBytes(REVIEW_LIMIT_BYTES + 1);
-            boolean truncated = bytes.length > REVIEW_LIMIT_BYTES;
+        private Response read(InputStream input, int limitBytes) throws IOException {
+            byte[] bytes = input.readNBytes(limitBytes + 1);
+            boolean truncated = bytes.length > limitBytes;
             String diff =
                     new String(
-                            bytes,
-                            0,
-                            Math.min(bytes.length, REVIEW_LIMIT_BYTES),
-                            StandardCharsets.UTF_8);
-            return Response.ok(truncated ? diff + TRUNCATION_MARKER : diff, truncated);
+                            bytes, 0, Math.min(bytes.length, limitBytes), StandardCharsets.UTF_8);
+            boolean reviewMode = limitBytes == REVIEW_LIMIT_BYTES;
+            return Response.ok(
+                    truncated && reviewMode ? diff + TRUNCATION_MARKER : diff, truncated);
         }
     }
 

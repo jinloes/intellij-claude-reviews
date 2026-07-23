@@ -50,17 +50,6 @@ public final class IntellijGitHubService {
         return core().getPRDiffFull(token, owner, repo, prNumber);
     }
 
-    public String getPendingReviewId(String token, String owner, String repo, int number)
-            throws IOException, InterruptedException {
-        return core().getPendingReviewId(token, owner, repo, number);
-    }
-
-    public GitHubService.SaveDraftResult saveDraftReview(
-            String token, String owner, String repo, int number, ReviewResult review)
-            throws IOException, InterruptedException {
-        return core().saveDraftReview(token, owner, repo, number, review);
-    }
-
     public GitHubService.SaveDraftResult saveDraftReview(
             String token,
             String owner,

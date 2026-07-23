@@ -9,7 +9,7 @@ import java.util.Locale;
 
 final class StdioFrameCodec {
     static final int MAX_HEADER_BYTES = 8 * 1024;
-    static final int MAX_MESSAGE_BYTES = 1024 * 1024;
+    static final int MAX_MESSAGE_BYTES = 8 * 1024 * 1024;
 
     byte[] readFrame(InputStream input) throws IOException {
         byte[] header = readHeader(input);

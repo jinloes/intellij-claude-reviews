@@ -385,6 +385,7 @@ export function parseDraftReviewMutationResult(value: unknown): SidecarDraftRevi
  * without spawning a real process. */
 export function encodeFrame(payload: string): Buffer {
     const body = Buffer.from(payload, 'utf8');
+    if (body.length > 8 * 1024 * 1024) throw new Error('JSON-RPC payload exceeds the maximum size');
     return Buffer.concat([Buffer.from(`Content-Length: ${body.length}${HEADER_TERMINATOR}`, 'ascii'), body]);
 }
 
@@ -403,6 +404,7 @@ export function extractFrames(buffer: Uint8Array, onFrame: (body: string) => voi
             return Buffer.alloc(0);
         }
         const length = parseInt(match[1], 10);
+        if (length > 8 * 1024 * 1024) return Buffer.alloc(0);
         const bodyStart = headerEnd + HEADER_TERMINATOR.length;
         if (remaining.length < bodyStart + length) return remaining;
         onFrame(remaining.subarray(bodyStart, bodyStart + length).toString('utf8'));
@@ -604,8 +606,14 @@ export class SidecarClient {
         }
     }
 
-    async getPullRequestDiff(githubBaseUrl: string, owner: string, repo: string, number: number): Promise<SidecarPrDiffResult | null> {
-        try { return parsePrDiffResult(await this.request('prs/getDiff', { githubBaseUrl, owner, repo, number, mode: 'review' })); }
+    async getPullRequestDiff(
+        githubBaseUrl: string,
+        owner: string,
+        repo: string,
+        number: number,
+        mode: 'review' | 'validation' = 'review',
+    ): Promise<SidecarPrDiffResult | null> {
+        try { return parsePrDiffResult(await this.request('prs/getDiff', { githubBaseUrl, owner, repo, number, mode })); }
         catch { return null; }
     }
 

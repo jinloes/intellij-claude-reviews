@@ -20,6 +20,7 @@ It helps you discover PRs, generate AI-assisted reviews (Claude or Copilot), edi
 
 - `core/` - Kotlin Multiplatform shared logic (JVM + JS)
 - `intellij-plugin/` - IntelliJ host integration
+- `sidecar/` - Java sidecar used by the VS Code extension for shared GitHub operations
 - `vscode-extension/` - VS Code host integration
 - `webview/` - Shared React webview UI
 - `.github/workflows/release.yml` - Tag-driven release workflow for both plugin artifacts
@@ -67,9 +68,11 @@ npm run test:unit
 
 ### Package VS Code extension (`.vsix`)
 
-This stages the shared webview assets (`webview/dist`) into `vscode-extension/webview-dist` before packaging.
+This builds and stages the Java sidecar and shared webview assets before packaging.
 
 ```bash
+./gradlew :sidecar:bootJar
+
 cd webview
 npm ci
 npm run build

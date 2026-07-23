@@ -21,6 +21,7 @@ compileJava {
 }
 
 dependencies {
+    implementation project(':github-engine')
     implementation 'org.springframework.boot:spring-boot-starter'
     implementation 'org.springframework.boot:spring-boot-starter-json'
 
