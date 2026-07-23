@@ -5,6 +5,7 @@ import * as path from 'path';
 import {
   encodeFrame,
   extractFrames,
+  parseDraftReviewResult,
   parseGitHubAuthResult,
   parsePrDetailResult,
   parsePrDiffResult,
@@ -158,6 +159,66 @@ test('parsePrDiffResult accepts only complete successful review diffs', () => {
   assert.deepEqual(parsePrDiffResult({ status: 'ok', message: 'Pull request diff loaded.', diff: 'diff', truncated: false, limitBytes: 250000 }),
     { status: 'ok', message: 'Pull request diff loaded.', diff: 'diff', truncated: false, limitBytes: 250000 });
   assert.equal(parsePrDiffResult({ status: 'ok', message: 'x', diff: null, truncated: false, limitBytes: 250000 }), null);
+});
+
+test('parseDraftReviewResult accepts a decoded pending review', () => {
+  assert.deepEqual(
+    parseDraftReviewResult({
+      status: 'ok',
+      message: 'Pending review draft loaded.',
+      id: '7',
+      commitId: 'sha',
+      review: {
+        summary: 'Looks good',
+        verdict: 'APPROVE',
+        lineComments: [{
+          file: 'a.ts',
+          line: 10,
+          type: 'note',
+          body: 'nit',
+          severity: null,
+          category: null,
+          confidence: null,
+          rationale: null,
+        }],
+        importedFromGitHub: false,
+      },
+    }),
+    {
+      status: 'ok',
+      message: 'Pending review draft loaded.',
+      id: '7',
+      commitId: 'sha',
+      review: {
+        summary: 'Looks good',
+        verdict: 'APPROVE',
+        lineComments: [{
+          file: 'a.ts',
+          line: 10,
+          type: 'note',
+          body: 'nit',
+          severity: null,
+          category: null,
+          confidence: null,
+          rationale: null,
+        }],
+        importedFromGitHub: false,
+      },
+    },
+  );
+});
+
+test('parseDraftReviewResult accepts a token-free none result without a review', () => {
+  assert.deepEqual(
+    parseDraftReviewResult({ status: 'none', message: 'No pending review draft.', id: null, commitId: null, review: null }),
+    { status: 'none', message: 'No pending review draft.', id: null, commitId: null, review: null },
+  );
+});
+
+test('parseDraftReviewResult rejects malformed successful and unknown results', () => {
+  assert.equal(parseDraftReviewResult({ status: 'unknown', message: 'x', id: null, commitId: null, review: null }), null);
+  assert.equal(parseDraftReviewResult({ status: 'ok', message: 'x', id: null, commitId: null, review: null }), null);
+  assert.equal(parseDraftReviewResult({ status: 'ok', message: 'x', id: '1', commitId: null, review: { summary: 's' } }), null);
 });
 
 test('resolveSidecarJarPath prefers the packaged jar staged alongside the extension', () => {

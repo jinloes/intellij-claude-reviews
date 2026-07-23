@@ -12,6 +12,7 @@ import {
   getPRDetailWithSidecar,
   isRetriableNetworkError,
   isRetriableStatus,
+  loadDraftReviewWithSidecar,
   MAX_VALIDATION_DIFF_BYTES,
   normalizeGithubBaseUrl,
   searchPRs,
@@ -167,6 +168,102 @@ test('getPRDetailWithSidecar surfaces valid domain failures', async () => {
           status: 'not_authenticated',
           message: "Run 'gh auth login' in a terminal for this GitHub host.",
           detail: null,
+        }),
+      },
+    ),
+    /gh auth login/,
+  );
+});
+
+test('loadDraftReviewWithSidecar decodes a valid sidecar draft without direct GitHub fallback', async () => {
+  const draft = await loadDraftReviewWithSidecar(
+    'unused-token',
+    'https://github.com',
+    'acme',
+    'widgets',
+    42,
+    {
+      getDraftReview: async () => ({
+        status: 'ok',
+        message: 'Pending review draft loaded.',
+        id: '7',
+        commitId: 'sha',
+        review: {
+          summary: 'Looks good',
+          verdict: 'APPROVE',
+          lineComments: [{
+            file: 'a.ts',
+            line: 10,
+            type: 'note',
+            body: 'nit',
+            severity: null,
+            category: null,
+            confidence: null,
+            rationale: null,
+          }],
+          importedFromGitHub: false,
+        },
+      }),
+    },
+  );
+
+  assert.deepEqual(draft, {
+    id: '7',
+    commitId: 'sha',
+    result: {
+      summary: 'Looks good',
+      verdict: 'APPROVE',
+      lineComments: [{
+        file: 'a.ts',
+        line: 10,
+        type: 'note',
+        body: 'nit',
+        severity: undefined,
+        category: undefined,
+        confidence: undefined,
+        rationale: undefined,
+      }],
+    },
+    importedFromGitHub: false,
+  });
+});
+
+test('loadDraftReviewWithSidecar returns null when the sidecar reports no pending review', async () => {
+  const draft = await loadDraftReviewWithSidecar(
+    'unused-token',
+    'https://github.com',
+    'acme',
+    'widgets',
+    42,
+    {
+      getDraftReview: async () => ({
+        status: 'none',
+        message: 'No pending review draft.',
+        id: null,
+        commitId: null,
+        review: null,
+      }),
+    },
+  );
+
+  assert.equal(draft, null);
+});
+
+test('loadDraftReviewWithSidecar surfaces valid domain failures', async () => {
+  await assert.rejects(
+    loadDraftReviewWithSidecar(
+      'unused-token',
+      'https://github.com',
+      'acme',
+      'widgets',
+      42,
+      {
+        getDraftReview: async () => ({
+          status: 'not_authenticated',
+          message: "Run 'gh auth login' in a terminal for this GitHub host.",
+          id: null,
+          commitId: null,
+          review: null,
         }),
       },
     ),

@@ -22,6 +22,8 @@ final class SidecarBootstrapService {
                         "reviewParse",
                         true,
                         "repoDetect",
+                        true,
+                        "draftReview",
                         true));
     }
 

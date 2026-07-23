@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
+import com.jinloes.prpilot.sidecar.pr.DraftReviewService;
 import com.jinloes.prpilot.sidecar.pr.PrDetailService;
 import com.jinloes.prpilot.sidecar.pr.PrDiffService;
 import com.jinloes.prpilot.sidecar.pr.PrListService;
@@ -30,6 +31,7 @@ final class StdioJsonRpcServer {
     private final PrListService prListService;
     private final PrDetailService prDetailService;
     private final PrDiffService prDiffService;
+    private final DraftReviewService draftReviewService;
 
     StdioJsonRpcServer(
             ObjectMapper objectMapper,
@@ -41,7 +43,8 @@ final class StdioJsonRpcServer {
             GitHubAuthService gitHubAuthService,
             PrListService prListService,
             PrDetailService prDetailService,
-            PrDiffService prDiffService) {
+            PrDiffService prDiffService,
+            DraftReviewService draftReviewService) {
         this.objectMapper = Objects.requireNonNull(objectMapper);
         this.frameCodec = Objects.requireNonNull(frameCodec);
         this.bootstrapService = Objects.requireNonNull(bootstrapService);
@@ -52,6 +55,7 @@ final class StdioJsonRpcServer {
         this.prListService = Objects.requireNonNull(prListService);
         this.prDetailService = Objects.requireNonNull(prDetailService);
         this.prDiffService = Objects.requireNonNull(prDiffService);
+        this.draftReviewService = Objects.requireNonNull(draftReviewService);
     }
 
     void run(InputStream input, OutputStream output) {
@@ -96,6 +100,7 @@ final class StdioJsonRpcServer {
                         case "prs/list" -> listPullRequests(request);
                         case "prs/getDetail" -> getPullRequestDetail(request);
                         case "prs/getDiff" -> getPullRequestDiff(request);
+                        case "prs/getDraftReview" -> getDraftReview(request);
                         default -> error(requestId(request), -32601, "Method not found");
                     };
         } catch (RuntimeException exception) {
@@ -220,6 +225,27 @@ final class StdioJsonRpcServer {
                                 params.path("repo").textValue(),
                                 params.path("number").intValue(),
                                 params.path("mode").textValue())));
+    }
+
+    private ObjectNode getDraftReview(JsonNode request) {
+        JsonNode params = request.get("params");
+        if (params == null
+                || !params.isObject()
+                || !hasOnlyFields(params, Set.of("githubBaseUrl", "owner", "repo", "number"))
+                || !params.path("githubBaseUrl").isTextual()
+                || !params.path("owner").isTextual()
+                || !params.path("repo").isTextual()
+                || !params.path("number").isIntegralNumber()
+                || !params.path("number").canConvertToInt()) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        return result(
+                requestId(request),
+                draftReviewService.load(
+                        params.path("githubBaseUrl").textValue(),
+                        params.path("owner").textValue(),
+                        params.path("repo").textValue(),
+                        params.path("number").intValue()));
     }
 
     private boolean hasOnlyFields(JsonNode object, Set<String> allowedFields) {

@@ -93,6 +93,9 @@ sidecar/                                – Java 17, non-web Spring Boot process
       PrDetail.java                      – Token-free PR metadata and worktree head DTO
       PrDiffService.java                 – Token-safe byte-bounded review diff retrieval
       PrDiffResult.java                  – Structured bounded review diff outcome DTO
+      DraftReviewService.java            – Token-safe pending-review lookup and decoding orchestration
+      DraftReviewResult.java             – Structured token-free pending-review outcome DTO
+      DraftReviewCodec.java              – Decodes PR Pilot review metadata tags, falling back to raw GitHub inline comments
     github/
       GitHubAuthService.java              – Token-safe gh CLI and GitHub API authentication verification
       CheckAuthResult.java                – Stable authentication diagnosis DTO
@@ -114,6 +117,8 @@ sidecar/                                – Java 17, non-web Spring Boot process
     pr/PrListServiceTest.java
     pr/PrDetailServiceTest.java
     github/GitHubAuthServiceTest.java
+    pr/DraftReviewCodecTest.java
+    pr/DraftReviewServiceTest.java
     repo/RepoDetectorTest.java
     repo/RemoteUrlParserTest.java
 
@@ -158,7 +163,7 @@ vscode-extension/                      – VS Code extension host
     notifications.ts                   – Pure background-notification helpers (source labeling, dedupe/merge with review-requested precedence); no vscode import, unit-tested
     userFacingError.ts                 – Maps host/provider errors to user-actionable copy
     workspace.ts                       – Resolves the VS Code workspace dir, including dev-host target repo override
-    sidecar.ts                         – Best-effort JSON-RPC client for the optional Java sidecar process; always falls back to local TS logic
+    sidecar.ts                         – Best-effort JSON-RPC client for the optional Java sidecar process (PR search/detail/diff/draft-review/repo-detect/auth-check today); always falls back to local TS logic
   shared/
     user-facing-errors.yaml            – Shared message templates consumed by both hosts
   scripts/
@@ -208,10 +213,12 @@ The sidecar's `prs/getDetail` capability owns its `gh auth token` lookup and Git
 
 The sidecar's `prs/getDiff` currently supports review mode only. It streams at most 250,001 bytes, returning a 250 KB UTF-8 review diff and truncation marker when needed; validation diffs remain host-local because the current 1 MiB JSON-RPC payload limit cannot safely carry the existing 1,000,000-character validation contract after JSON escaping.
 
+The sidecar's `prs/getDraftReview` capability owns its `gh auth token` lookup and the GitHub pending-review lookup (`GET .../pulls/{number}/reviews` filtered to `state == PENDING`, plus that review's inline comments). `DraftReviewCodec` decodes the PR Pilot `claude-verdict`/`claude-summary`/`claude-comments` HTML-comment tags embedded in the review body, falling back to raw GitHub inline comments (with an `importedFromGitHub` flag) when those tags are absent or malformed. `none` (no pending review exists) is a normal domain result, not a failure; other token-free domain statuses (`invalid_request`, `invalid_base_url`, `not_installed`, `not_authenticated`, `rate_limited`, `network_error`, `api_failed`) are returned the same way `prs/getDetail` does. No token is ever logged, serialized, or included in an error message.
+
 ### Sidecar wiring (VS Code)
 The VS Code extension is the sidecar's first real caller: `sidecar.ts`'s `SidecarClient` lazily spawns `java -jar <jar>` and speaks the same bounded Content-Length-framed JSON-RPC as `StdioFrameCodec`/`StdioJsonRpcServer`. `extension.ts` owns one process-wide `SidecarClient` instance created in `activate()` and disposed in `deactivate()`/on extension deconstruction; it is passed into `github.searchPRs` so `pr/buildSearchQuery` builds the search query when the sidecar responds successfully, into `github.detectCurrentRepoAsync` so `repo/detect` resolves the current repo when the sidecar finds one, and into Settings so `github/checkAuth` verifies the configured host.
 
-The sidecar is an optional accelerant, never a hard dependency: every `SidecarClient` method resolves to `null` (never throws) on spawn failure, missing `java`, timeout, or a malformed response, and `github.searchPRs`, `github.getPRDetailWithSidecar`, `github.detectCurrentRepoAsync`, and Settings fall back to their local implementations whenever that happens. Valid sidecar domain outcomes are not fallbacks: `prs/list` success supplies the list and truncation metadata directly, while its auth/API outcomes flow into the existing setup/error UI. `buildPRSearchQuery`/`PrSearchQueryService` and `detectCurrentRepo`/`RepoDetector` must therefore stay behaviorally compatible (the Java side is intentionally the stricter, linked-worktree-aware superset) — see the parity table in `AGENTS.md`.
+The sidecar is an optional accelerant, never a hard dependency: every `SidecarClient` method resolves to `null` (never throws) on spawn failure, missing `java`, timeout, or a malformed response, and `github.searchPRs`, `github.getPRDetailWithSidecar`, `github.loadDraftReviewWithSidecar`, `github.detectCurrentRepoAsync`, and Settings fall back to their local implementations whenever that happens. Valid sidecar domain outcomes are not fallbacks: `prs/list` success supplies the list and truncation metadata directly, a `prs/getDraftReview` `none` result maps to the same `null` the local implementation returns when no pending review exists, and other auth/API outcomes flow into the existing setup/error UI. `buildPRSearchQuery`/`PrSearchQueryService` and `detectCurrentRepo`/`RepoDetector` must therefore stay behaviorally compatible (the Java side is intentionally the stricter, linked-worktree-aware superset) — see the parity table in `AGENTS.md`.
 
 `resolveSidecarJarPath` mirrors `resolveWebviewDistPath`'s dev/packaged fallback: it prefers a jar staged at `vscode-extension/sidecar/pr-pilot-sidecar.jar` (produced by `scripts/stage-sidecar.mjs` from the Gradle `:sidecar:bootJar` output, matching the webview's `stage-webview.mjs` pattern) and falls back to the sibling `sidecar/build/libs/pr-pilot-sidecar.jar` during local development. The release pipeline runs `:sidecar:bootJar` before packaging so shipped `.vsix` builds bundle the jar.
 

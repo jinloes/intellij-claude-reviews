@@ -110,6 +110,35 @@ interface PrDetailSidecar {
     } | null>;
 }
 
+interface DraftReviewSidecar {
+    getDraftReview(
+        githubBaseUrl: string,
+        owner: string,
+        repo: string,
+        number: number,
+    ): Promise<{
+        status: string;
+        message: string;
+        id: string | null;
+        commitId: string | null;
+        review: {
+            summary: string;
+            verdict: string;
+            lineComments: Array<{
+                file: string;
+                line: number;
+                type: string;
+                body: string;
+                severity: string | null;
+                category: string | null;
+                confidence: string | null;
+                rationale: string | null;
+            }>;
+            importedFromGitHub: boolean;
+        } | null;
+    } | null>;
+}
+
 interface SearchItem {
     title: string;
     html_url: string;
@@ -750,6 +779,45 @@ export async function loadDraftReview(
         result: decodeReview(body, ghComments),
         importedFromGitHub: !hasUsableEmbeddedComments(body),
         commitId: review.commit_id?.trim() ?? '',
+    };
+}
+
+/**
+ * Uses the optional sidecar's token-safe draft-review capability when available. A malformed or
+ * unavailable sidecar response falls back to the existing direct request; valid sidecar `none`
+ * results are returned as `null` (matching local behavior when no pending review exists), and
+ * other valid domain failures throw their safe message so the caller can report the failure.
+ */
+export async function loadDraftReviewWithSidecar(
+    token: string,
+    githubBaseUrl: string,
+    owner: string,
+    repo: string,
+    number: number,
+    sidecar?: DraftReviewSidecar,
+): Promise<{ id: string; result: ReviewResult; importedFromGitHub: boolean; commitId: string } | null> {
+    const result = await sidecar?.getDraftReview(githubBaseUrl, owner, repo, number);
+    if (!result) return loadDraftReview(token, githubBaseUrl, owner, repo, number);
+    if (result.status === 'none') return null;
+    if (result.status !== 'ok' || !result.review || !result.id) throw new Error(result.message);
+    return {
+        id: result.id,
+        commitId: result.commitId ?? '',
+        result: {
+            summary: result.review.summary,
+            verdict: result.review.verdict as ReviewResult['verdict'],
+            lineComments: result.review.lineComments.map((comment) => ({
+                file: comment.file,
+                line: comment.line,
+                type: comment.type as LineComment['type'],
+                body: comment.body,
+                severity: (comment.severity ?? undefined) as Severity | undefined,
+                category: (comment.category ?? undefined) as Category | undefined,
+                confidence: (comment.confidence ?? undefined) as Confidence | undefined,
+                rationale: comment.rationale ?? undefined,
+            })),
+        },
+        importedFromGitHub: result.review.importedFromGitHub,
     };
 }
 

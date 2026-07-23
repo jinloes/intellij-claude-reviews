@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
+import com.jinloes.prpilot.sidecar.pr.DraftReviewService;
 import com.jinloes.prpilot.sidecar.pr.PrDetailService;
 import com.jinloes.prpilot.sidecar.pr.PrDiffService;
 import com.jinloes.prpilot.sidecar.pr.PrListService;
@@ -37,7 +38,8 @@ class StdioJsonRpcServerTest {
                         new GitHubAuthService(),
                         new PrListService(),
                         new PrDetailService(),
-                        new PrDiffService());
+                        new PrDiffService(),
+                        new DraftReviewService());
     }
 
     @Test
@@ -267,6 +269,36 @@ class StdioJsonRpcServerTest {
 
         assertThat(missingNumber.path("error").path("code").asInt()).isEqualTo(-32602);
         assertThat(nonIntegralNumber.path("error").path("code").asInt()).isEqualTo(-32602);
+    }
+
+    @Test
+    void returnsAStructuredResultForAnInvalidDraftReviewBaseUrl() {
+        JsonNode response =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":\"draft-1\",\"method\":\"prs/getDraftReview\","
+                                        + "\"params\":{\"githubBaseUrl\":\"http://github.com\",\"owner\":\"acme\",\"repo\":\"widgets\",\"number\":42}}")
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(response.path("id").asText()).isEqualTo("draft-1");
+        assertThat(response.path("result").path("status").asText()).isEqualTo("invalid_base_url");
+        assertThat(response.path("result").path("review").isNull()).isTrue();
+    }
+
+    @Test
+    void rejectsInvalidDraftReviewParams() {
+        JsonNode missingNumber =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"prs/getDraftReview\","
+                                        + "\"params\":{\"githubBaseUrl\":\"https://github.com\",\"owner\":\"acme\",\"repo\":\"widgets\"}}")
+                                .getBytes(StandardCharsets.UTF_8));
+        JsonNode extraField =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"prs/getDraftReview\","
+                                        + "\"params\":{\"githubBaseUrl\":\"https://github.com\",\"owner\":\"acme\",\"repo\":\"widgets\",\"number\":1,\"extra\":\"x\"}}")
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(missingNumber.path("error").path("code").asInt()).isEqualTo(-32602);
+        assertThat(extraField.path("error").path("code").asInt()).isEqualTo(-32602);
     }
 
     @Test

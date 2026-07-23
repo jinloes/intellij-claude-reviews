@@ -749,7 +749,7 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
             github.getPRDetailWithSidecar(
                 token, base, owner, repo, number, sidecarClient ?? undefined,
             ),
-            github.loadDraftReview(token, base, owner, repo, number),
+            github.loadDraftReviewWithSidecar(token, base, owner, repo, number, sidecarClient ?? undefined),
         ]);
         const validationDiff = diff;
 

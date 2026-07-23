@@ -67,6 +67,30 @@ export interface SidecarPrDetailResult {
     } | null;
 }
 
+export interface SidecarLineComment {
+    file: string;
+    line: number;
+    type: string;
+    body: string;
+    severity: string | null;
+    category: string | null;
+    confidence: string | null;
+    rationale: string | null;
+}
+
+export interface SidecarDraftReviewResult {
+    status: 'ok' | 'none' | 'not_installed' | 'not_authenticated' | 'invalid_base_url' | 'invalid_request' | 'rate_limited' | 'network_error' | 'api_failed';
+    message: string;
+    id: string | null;
+    commitId: string | null;
+    review: {
+        summary: string;
+        verdict: string;
+        lineComments: SidecarLineComment[];
+        importedFromGitHub: boolean;
+    } | null;
+}
+
 const AUTH_STATUSES = new Set<SidecarGitHubAuthResult['status']>([
     'authenticated',
     'not_installed',
@@ -96,6 +120,18 @@ const PR_DETAIL_STATUSES = new Set<SidecarPrDetailResult['status']>([
     'api_failed',
 ]);
 const PR_DIFF_STATUSES = new Set<SidecarPrDiffResult['status']>(PR_DETAIL_STATUSES);
+
+const DRAFT_REVIEW_STATUSES = new Set<SidecarDraftReviewResult['status']>([
+    'ok',
+    'none',
+    'not_installed',
+    'not_authenticated',
+    'invalid_base_url',
+    'invalid_request',
+    'rate_limited',
+    'network_error',
+    'api_failed',
+]);
 
 /** Validates the token-free result shape returned by `github/checkAuth`. */
 export function parseGitHubAuthResult(value: unknown): SidecarGitHubAuthResult | null {
@@ -225,6 +261,73 @@ export function parsePrDiffResult(value: unknown): SidecarPrDiffResult | null {
     if ((result.status === 'ok') !== (typeof result.diff === 'string')) return null;
     return { status: result.status as SidecarPrDiffResult['status'], message: result.message,
         diff: typeof result.diff === 'string' ? result.diff : null, truncated: result.truncated, limitBytes: result.limitBytes };
+}
+
+/** Validates the token-free result shape returned by `prs/getDraftReview`. */
+export function parseDraftReviewResult(value: unknown): SidecarDraftReviewResult | null {
+    if (!value || typeof value !== 'object') return null;
+    const result = value as Record<string, unknown>;
+    if (typeof result.status !== 'string'
+        || !DRAFT_REVIEW_STATUSES.has(result.status as SidecarDraftReviewResult['status'])
+        || typeof result.message !== 'string'
+        || (result.id !== null && typeof result.id !== 'string')
+        || (result.commitId !== null && typeof result.commitId !== 'string')
+        || (result.review !== null && typeof result.review !== 'object')) {
+        return null;
+    }
+    if (result.review === null) {
+        return result.status === 'ok' ? null : {
+            status: result.status as SidecarDraftReviewResult['status'],
+            message: result.message,
+            id: typeof result.id === 'string' ? result.id : null,
+            commitId: typeof result.commitId === 'string' ? result.commitId : null,
+            review: null,
+        };
+    }
+    const review = result.review as Record<string, unknown>;
+    if (typeof review.summary !== 'string'
+        || typeof review.verdict !== 'string'
+        || typeof review.importedFromGitHub !== 'boolean'
+        || !Array.isArray(review.lineComments)) {
+        return null;
+    }
+    const lineComments = review.lineComments.map((entry) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const comment = entry as Record<string, unknown>;
+        if (typeof comment.file !== 'string'
+            || !Number.isInteger(comment.line)
+            || typeof comment.type !== 'string'
+            || typeof comment.body !== 'string'
+            || (comment.severity !== null && typeof comment.severity !== 'string')
+            || (comment.category !== null && typeof comment.category !== 'string')
+            || (comment.confidence !== null && typeof comment.confidence !== 'string')
+            || (comment.rationale !== null && typeof comment.rationale !== 'string')) {
+            return null;
+        }
+        return {
+            file: comment.file,
+            line: comment.line,
+            type: comment.type,
+            body: comment.body,
+            severity: typeof comment.severity === 'string' ? comment.severity : null,
+            category: typeof comment.category === 'string' ? comment.category : null,
+            confidence: typeof comment.confidence === 'string' ? comment.confidence : null,
+            rationale: typeof comment.rationale === 'string' ? comment.rationale : null,
+        };
+    });
+    if (lineComments.some((comment) => comment === null)) return null;
+    return {
+        status: result.status as SidecarDraftReviewResult['status'],
+        message: result.message,
+        id: typeof result.id === 'string' ? result.id : null,
+        commitId: typeof result.commitId === 'string' ? result.commitId : null,
+        review: {
+            summary: review.summary,
+            verdict: review.verdict,
+            lineComments: lineComments as SidecarLineComment[],
+            importedFromGitHub: review.importedFromGitHub,
+        },
+    };
 }
 
 /** Encodes a JSON-RPC payload with the same bounded Content-Length framing the sidecar's
@@ -454,6 +557,30 @@ export class SidecarClient {
     async getPullRequestDiff(githubBaseUrl: string, owner: string, repo: string, number: number): Promise<SidecarPrDiffResult | null> {
         try { return parsePrDiffResult(await this.request('prs/getDiff', { githubBaseUrl, owner, repo, number, mode: 'review' })); }
         catch { return null; }
+    }
+
+    /**
+     * Loads the PENDING review draft (if any) for a PR through the sidecar without returning a
+     * GitHub token to the extension. Resolves to null only for transport or response-shape
+     * failures so callers retain local fallback behavior; valid domain outcomes (including
+     * `none`, meaning no draft exists) are returned as-is.
+     */
+    async getDraftReview(
+        githubBaseUrl: string,
+        owner: string,
+        repo: string,
+        number: number,
+    ): Promise<SidecarDraftReviewResult | null> {
+        try {
+            return parseDraftReviewResult(await this.request('prs/getDraftReview', {
+                githubBaseUrl,
+                owner,
+                repo,
+                number,
+            }));
+        } catch {
+            return null;
+        }
     }
 
     dispose(): void {
