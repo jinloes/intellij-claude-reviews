@@ -11,6 +11,7 @@ import com.jinloes.prpilot.sidecar.pr.PrDetailService;
 import com.jinloes.prpilot.sidecar.pr.PrDiffService;
 import com.jinloes.prpilot.sidecar.pr.PrListService;
 import com.jinloes.prpilot.sidecar.pr.PrSearchQueryService;
+import com.jinloes.prpilot.sidecar.pr.PrSupplementalService;
 import com.jinloes.prpilot.sidecar.repo.RepoDetector;
 import com.jinloes.prpilot.sidecar.review.ReviewJsonParser;
 import java.io.ByteArrayInputStream;
@@ -41,7 +42,8 @@ class StdioJsonRpcServerTest {
                         new PrDetailService(),
                         new PrDiffService(),
                         new DraftReviewService(),
-                        new DraftReviewMutationService());
+                        new DraftReviewMutationService(),
+                        new PrSupplementalService());
     }
 
     @Test
@@ -78,6 +80,12 @@ class StdioJsonRpcServerTest {
                                 .path("capabilities")
                                 .path("draftReviewMutations")
                                 .asBoolean())
+                .isTrue();
+        assertThat(response.path("result").path("capabilities").path("prSearch").asBoolean())
+                .isTrue();
+        assertThat(response.path("result").path("capabilities").path("starredRepos").asBoolean())
+                .isTrue();
+        assertThat(response.path("result").path("capabilities").path("existingReviews").asBoolean())
                 .isTrue();
     }
 

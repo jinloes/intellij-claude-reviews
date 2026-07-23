@@ -8,6 +8,7 @@ import com.jinloes.prpilot.sidecar.pr.PrDetailService;
 import com.jinloes.prpilot.sidecar.pr.PrDiffService;
 import com.jinloes.prpilot.sidecar.pr.PrListService;
 import com.jinloes.prpilot.sidecar.pr.PrSearchQueryService;
+import com.jinloes.prpilot.sidecar.pr.PrSupplementalService;
 import com.jinloes.prpilot.sidecar.repo.RepoDetector;
 import com.jinloes.prpilot.sidecar.review.ReviewJsonParser;
 import org.springframework.context.annotation.Bean;
@@ -71,6 +72,11 @@ class SidecarConfiguration {
     }
 
     @Bean
+    PrSupplementalService prSupplementalService() {
+        return new PrSupplementalService();
+    }
+
+    @Bean
     StdioJsonRpcServer stdioJsonRpcServer(
             ObjectMapper objectMapper,
             StdioFrameCodec frameCodec,
@@ -83,7 +89,8 @@ class SidecarConfiguration {
             PrDetailService prDetailService,
             PrDiffService prDiffService,
             DraftReviewService draftReviewService,
-            DraftReviewMutationService draftReviewMutationService) {
+            DraftReviewMutationService draftReviewMutationService,
+            PrSupplementalService prSupplementalService) {
         return new StdioJsonRpcServer(
                 objectMapper,
                 frameCodec,
@@ -96,6 +103,7 @@ class SidecarConfiguration {
                 prDetailService,
                 prDiffService,
                 draftReviewService,
-                draftReviewMutationService);
+                draftReviewMutationService,
+                prSupplementalService);
     }
 }

@@ -7,12 +7,28 @@ import {
   extractFrames,
   parseDraftReviewMutationResult,
   parseDraftReviewResult,
+  parseExistingReviewsResult,
   parseGitHubAuthResult,
   parsePrDetailResult,
   parsePrDiffResult,
   parsePrListResult,
+  parsePrSearchResult,
+  parseStarredReposResult,
   resolveSidecarJarPath,
 } from '../src/sidecar';
+
+test('supplemental GitHub parsers accept valid token-free results', () => {
+  const pr = { number: 1, title: 'Fix', owner: 'acme', repo: 'widgets', author: 'octo', createdAt: '', htmlUrl: 'https://example/pr/1', isDraft: false };
+  assert.deepEqual(parsePrSearchResult({ status: 'ok', message: 'ok', resultLimit: 50, limited: false, prs: [pr] })?.prs, [pr]);
+  assert.deepEqual(parseStarredReposResult({ status: 'ok', message: 'ok', resultLimit: 200, limited: false, repositories: ['acme/widgets'] })?.repositories, ['acme/widgets']);
+  assert.equal(parseExistingReviewsResult({ status: 'ok', message: 'ok', summary: 'Review by @octo' })?.summary, 'Review by @octo');
+});
+
+test('supplemental GitHub parsers reject malformed results', () => {
+  assert.equal(parsePrSearchResult({ status: 'ok', message: 'ok', resultLimit: 50, limited: false, prs: [{}] }), null);
+  assert.equal(parseStarredReposResult({ status: 'ok', message: 'ok', resultLimit: 200, limited: false, repositories: [42] }), null);
+  assert.equal(parseExistingReviewsResult({ status: 'unknown', message: 'bad', summary: '' }), null);
+});
 
 const extensionRoot = path.resolve('/workspace/pr-pilot/vscode-extension');
 

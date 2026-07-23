@@ -8,25 +8,19 @@ final class SidecarBootstrapService {
                 "pr-pilot-sidecar",
                 "0.1.0",
                 1,
-                Map.of(
-                        "githubAuth",
-                        true,
-                        "prDetail",
-                        true,
-                        "prDiff",
-                        true,
-                        "prList",
-                        true,
-                        "prSearchQuery",
-                        true,
-                        "reviewParse",
-                        true,
-                        "repoDetect",
-                        true,
-                        "draftReview",
-                        true,
-                        "draftReviewMutations",
-                        true));
+                Map.ofEntries(
+                        Map.entry("githubAuth", true),
+                        Map.entry("prDetail", true),
+                        Map.entry("prDiff", true),
+                        Map.entry("prList", true),
+                        Map.entry("prSearchQuery", true),
+                        Map.entry("reviewParse", true),
+                        Map.entry("repoDetect", true),
+                        Map.entry("draftReview", true),
+                        Map.entry("draftReviewMutations", true),
+                        Map.entry("prSearch", true),
+                        Map.entry("starredRepos", true),
+                        Map.entry("existingReviews", true)));
     }
 
     record InitializeResult(

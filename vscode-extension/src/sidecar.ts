@@ -40,6 +40,28 @@ export interface SidecarPrListResult {
     }>;
 }
 
+export interface SidecarPrSearchResult {
+    status: SidecarPrListResult['status'] | 'invalid_request';
+    message: string;
+    resultLimit: number;
+    limited: boolean;
+    prs: SidecarPrListResult['prs'];
+}
+
+export interface SidecarStarredReposResult {
+    status: SidecarPrListResult['status'];
+    message: string;
+    resultLimit: number;
+    limited: boolean;
+    repositories: string[];
+}
+
+export interface SidecarExistingReviewsResult {
+    status: SidecarPrDetailResult['status'];
+    message: string;
+    summary: string;
+}
+
 export interface SidecarPrDetailHead {
     sha: string;
     ref: string;
@@ -126,6 +148,10 @@ const PR_LIST_STATUSES = new Set<SidecarPrListResult['status']>([
     'rate_limited',
     'network_error',
     'api_failed',
+]);
+const PR_SEARCH_STATUSES = new Set<SidecarPrSearchResult['status']>([
+    ...PR_LIST_STATUSES,
+    'invalid_request',
 ]);
 
 const PR_DETAIL_STATUSES = new Set<SidecarPrDetailResult['status']>([
@@ -225,6 +251,58 @@ export function parsePrListResult(value: unknown): SidecarPrListResult | null {
         resultLimit: result.resultLimit,
         limited: result.limited,
         prs: prs as SidecarPrListResult['prs'],
+    };
+}
+
+export function parsePrSearchResult(value: unknown): SidecarPrSearchResult | null {
+    if (!value || typeof value !== 'object') return null;
+    const result = value as Record<string, unknown>;
+    if (typeof result.status !== 'string'
+        || !PR_SEARCH_STATUSES.has(result.status as SidecarPrSearchResult['status'])) return null;
+    const parsed = parsePrListResult({
+        ...result,
+        status: result.status === 'invalid_request' ? 'api_failed' : result.status,
+        query: null,
+    });
+    return parsed === null ? null : {
+        status: result.status as SidecarPrSearchResult['status'],
+        message: parsed.message,
+        resultLimit: parsed.resultLimit,
+        limited: parsed.limited,
+        prs: parsed.prs,
+    };
+}
+
+export function parseStarredReposResult(value: unknown): SidecarStarredReposResult | null {
+    if (!value || typeof value !== 'object') return null;
+    const result = value as Record<string, unknown>;
+    if (typeof result.status !== 'string'
+        || !PR_LIST_STATUSES.has(result.status as SidecarStarredReposResult['status'])
+        || typeof result.message !== 'string'
+        || typeof result.resultLimit !== 'number'
+        || typeof result.limited !== 'boolean'
+        || !Array.isArray(result.repositories)
+        || result.repositories.some((repository) => typeof repository !== 'string')) return null;
+    return {
+        status: result.status as SidecarStarredReposResult['status'],
+        message: result.message,
+        resultLimit: result.resultLimit,
+        limited: result.limited,
+        repositories: result.repositories as string[],
+    };
+}
+
+export function parseExistingReviewsResult(value: unknown): SidecarExistingReviewsResult | null {
+    if (!value || typeof value !== 'object') return null;
+    const result = value as Record<string, unknown>;
+    if (typeof result.status !== 'string'
+        || !PR_DETAIL_STATUSES.has(result.status as SidecarExistingReviewsResult['status'])
+        || typeof result.message !== 'string'
+        || typeof result.summary !== 'string') return null;
+    return {
+        status: result.status as SidecarExistingReviewsResult['status'],
+        message: result.message,
+        summary: result.summary,
     };
 }
 
@@ -583,6 +661,26 @@ export class SidecarClient {
         }
     }
 
+    async searchPullRequests(
+        githubBaseUrl: string,
+        query: string,
+        limit: number,
+    ): Promise<SidecarPrSearchResult | null> {
+        try {
+            return parsePrSearchResult(await this.request('prs/search', { githubBaseUrl, query, limit }));
+        } catch {
+            return null;
+        }
+    }
+
+    async listStarredRepositories(githubBaseUrl: string): Promise<SidecarStarredReposResult | null> {
+        try {
+            return parseStarredReposResult(await this.request('repos/listStarred', { githubBaseUrl }));
+        } catch {
+            return null;
+        }
+    }
+
     /**
      * Retrieves PR metadata through the sidecar without returning a GitHub token to the extension.
      * Resolves to null only for transport or response-shape failures so callers retain local
@@ -615,6 +713,24 @@ export class SidecarClient {
     ): Promise<SidecarPrDiffResult | null> {
         try { return parsePrDiffResult(await this.request('prs/getDiff', { githubBaseUrl, owner, repo, number, mode })); }
         catch { return null; }
+    }
+
+    async getExistingReviews(
+        githubBaseUrl: string,
+        owner: string,
+        repo: string,
+        number: number,
+    ): Promise<SidecarExistingReviewsResult | null> {
+        try {
+            return parseExistingReviewsResult(await this.request('prs/getExistingReviews', {
+                githubBaseUrl,
+                owner,
+                repo,
+                number,
+            }));
+        } catch {
+            return null;
+        }
     }
 
     /**

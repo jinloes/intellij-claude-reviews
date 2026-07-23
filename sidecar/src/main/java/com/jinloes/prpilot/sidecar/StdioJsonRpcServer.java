@@ -11,6 +11,7 @@ import com.jinloes.prpilot.sidecar.pr.PrDetailService;
 import com.jinloes.prpilot.sidecar.pr.PrDiffService;
 import com.jinloes.prpilot.sidecar.pr.PrListService;
 import com.jinloes.prpilot.sidecar.pr.PrSearchQueryService;
+import com.jinloes.prpilot.sidecar.pr.PrSupplementalService;
 import com.jinloes.prpilot.sidecar.repo.RepoDetector;
 import com.jinloes.prpilot.sidecar.review.ReviewJsonParser;
 import java.io.IOException;
@@ -36,6 +37,7 @@ final class StdioJsonRpcServer {
     private final PrDiffService prDiffService;
     private final DraftReviewService draftReviewService;
     private final DraftReviewMutationService draftReviewMutationService;
+    private final PrSupplementalService prSupplementalService;
 
     StdioJsonRpcServer(
             ObjectMapper objectMapper,
@@ -49,7 +51,8 @@ final class StdioJsonRpcServer {
             PrDetailService prDetailService,
             PrDiffService prDiffService,
             DraftReviewService draftReviewService,
-            DraftReviewMutationService draftReviewMutationService) {
+            DraftReviewMutationService draftReviewMutationService,
+            PrSupplementalService prSupplementalService) {
         this.objectMapper = Objects.requireNonNull(objectMapper);
         this.frameCodec = Objects.requireNonNull(frameCodec);
         this.bootstrapService = Objects.requireNonNull(bootstrapService);
@@ -62,6 +65,7 @@ final class StdioJsonRpcServer {
         this.prDiffService = Objects.requireNonNull(prDiffService);
         this.draftReviewService = Objects.requireNonNull(draftReviewService);
         this.draftReviewMutationService = Objects.requireNonNull(draftReviewMutationService);
+        this.prSupplementalService = Objects.requireNonNull(prSupplementalService);
     }
 
     void run(InputStream input, OutputStream output) {
@@ -104,8 +108,11 @@ final class StdioJsonRpcServer {
                         case "repo/detect" -> detectRepo(request);
                         case "github/checkAuth" -> checkGitHubAuth(request);
                         case "prs/list" -> listPullRequests(request);
+                        case "prs/search" -> searchPullRequests(request);
+                        case "repos/listStarred" -> listStarredRepositories(request);
                         case "prs/getDetail" -> getPullRequestDetail(request);
                         case "prs/getDiff" -> getPullRequestDiff(request);
+                        case "prs/getExistingReviews" -> getExistingReviews(request);
                         case "prs/getDraftReview" -> getDraftReview(request);
                         case "prs/saveDraftReview" -> saveDraftReview(request);
                         case "prs/submitReview" -> submitReview(request);
@@ -234,6 +241,61 @@ final class StdioJsonRpcServer {
                                 params.path("repo").textValue(),
                                 params.path("number").intValue(),
                                 params.path("mode").textValue())));
+    }
+
+    private ObjectNode searchPullRequests(JsonNode request) {
+        JsonNode params = request.get("params");
+        if (params == null
+                || !params.isObject()
+                || !hasOnlyFields(params, Set.of("githubBaseUrl", "query", "limit"))
+                || !params.path("githubBaseUrl").isTextual()
+                || !params.path("query").isTextual()
+                || !params.path("limit").isIntegralNumber()
+                || !params.path("limit").canConvertToInt()) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        return result(
+                requestId(request),
+                prSupplementalService.search(
+                        new PrSupplementalService.SearchParams(
+                                params.path("githubBaseUrl").textValue(),
+                                params.path("query").textValue(),
+                                params.path("limit").intValue())));
+    }
+
+    private ObjectNode listStarredRepositories(JsonNode request) {
+        JsonNode params = request.get("params");
+        if (params == null
+                || !params.isObject()
+                || params.size() != 1
+                || !params.path("githubBaseUrl").isTextual()) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        return result(
+                requestId(request),
+                prSupplementalService.starred(params.path("githubBaseUrl").textValue()));
+    }
+
+    private ObjectNode getExistingReviews(JsonNode request) {
+        JsonNode params = request.get("params");
+        if (params == null
+                || !params.isObject()
+                || !hasOnlyFields(params, Set.of("githubBaseUrl", "owner", "repo", "number"))
+                || !params.path("githubBaseUrl").isTextual()
+                || !params.path("owner").isTextual()
+                || !params.path("repo").isTextual()
+                || !params.path("number").isIntegralNumber()
+                || !params.path("number").canConvertToInt()) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        return result(
+                requestId(request),
+                prSupplementalService.existingReviews(
+                        new PrSupplementalService.IdentityParams(
+                                params.path("githubBaseUrl").textValue(),
+                                params.path("owner").textValue(),
+                                params.path("repo").textValue(),
+                                params.path("number").intValue())));
     }
 
     private ObjectNode getDraftReview(JsonNode request) {
