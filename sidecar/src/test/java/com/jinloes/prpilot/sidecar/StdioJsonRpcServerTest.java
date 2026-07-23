@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
+import com.jinloes.prpilot.sidecar.pr.PrListService;
 import com.jinloes.prpilot.sidecar.pr.PrSearchQueryService;
 import com.jinloes.prpilot.sidecar.repo.RepoDetector;
 import com.jinloes.prpilot.sidecar.review.ReviewJsonParser;
@@ -31,7 +32,8 @@ class StdioJsonRpcServerTest {
                         new ReviewJsonParser(objectMapper),
                         new PrSearchQueryService(),
                         new RepoDetector(),
-                        new GitHubAuthService());
+                        new GitHubAuthService(),
+                        new PrListService());
     }
 
     @Test
@@ -58,6 +60,8 @@ class StdioJsonRpcServerTest {
         assertThat(response.path("result").path("capabilities").path("prSearchQuery").asBoolean())
                 .isTrue();
         assertThat(response.path("result").path("capabilities").path("githubAuth").asBoolean())
+                .isTrue();
+        assertThat(response.path("result").path("capabilities").path("prList").asBoolean())
                 .isTrue();
     }
 
@@ -197,6 +201,36 @@ class StdioJsonRpcServerTest {
 
         assertThat(missingField.path("error").path("code").asInt()).isEqualTo(-32602);
         assertThat(extraField.path("error").path("code").asInt()).isEqualTo(-32602);
+    }
+
+    @Test
+    void returnsAStructuredResultForAnInvalidPrListBaseUrl() {
+        JsonNode response =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":\"list-1\",\"method\":\"prs/list\","
+                                        + "\"params\":{\"githubBaseUrl\":\"http://github.com\"}}")
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(response.path("id").asText()).isEqualTo("list-1");
+        assertThat(response.path("result").path("status").asText()).isEqualTo("invalid_base_url");
+        assertThat(response.path("result").path("prs").isArray()).isTrue();
+        assertThat(response.path("result").path("prs")).isEmpty();
+    }
+
+    @Test
+    void rejectsInvalidPrListParams() {
+        JsonNode missingBaseUrl =
+                server.handle(
+                        "{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"prs/list\",\"params\":{}}"
+                                .getBytes(StandardCharsets.UTF_8));
+        JsonNode nonTextField =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"prs/list\","
+                                        + "\"params\":{\"githubBaseUrl\":\"https://github.com\",\"state\":true}}")
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(missingBaseUrl.path("error").path("code").asInt()).isEqualTo(-32602);
+        assertThat(nonTextField.path("error").path("code").asInt()).isEqualTo(-32602);
     }
 
     @Test

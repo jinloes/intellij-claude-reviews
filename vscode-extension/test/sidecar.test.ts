@@ -2,7 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as path from 'path';
 
-import { encodeFrame, extractFrames, parseGitHubAuthResult, resolveSidecarJarPath } from '../src/sidecar';
+import {
+  encodeFrame,
+  extractFrames,
+  parseGitHubAuthResult,
+  parsePrListResult,
+  resolveSidecarJarPath,
+} from '../src/sidecar';
 
 const extensionRoot = path.resolve('/workspace/pr-pilot/vscode-extension');
 
@@ -66,6 +72,51 @@ test('parseGitHubAuthResult rejects malformed or unknown authentication results'
   assert.equal(parseGitHubAuthResult({ status: 'unknown', username: null, message: 'x' }), null);
   assert.equal(parseGitHubAuthResult({ status: 'authenticated', username: 1, message: 'x' }), null);
   assert.equal(parseGitHubAuthResult({ status: 'authenticated', username: null }), null);
+});
+
+test('parsePrListResult accepts token-free pull request list results', () => {
+  assert.deepEqual(
+    parsePrListResult({
+      status: 'ok',
+      message: 'Pull requests loaded.',
+      query: 'is:pr is:open author:@me',
+      resultLimit: 50,
+      limited: false,
+      prs: [{
+        number: 42,
+        title: 'Example',
+        owner: 'acme',
+        repo: 'widgets',
+        author: 'octocat',
+        createdAt: '2026-01-01T00:00:00Z',
+        htmlUrl: 'https://github.com/acme/widgets/pull/42',
+        isDraft: false,
+      }],
+    }),
+    {
+      status: 'ok',
+      message: 'Pull requests loaded.',
+      query: 'is:pr is:open author:@me',
+      resultLimit: 50,
+      limited: false,
+      prs: [{
+        number: 42,
+        title: 'Example',
+        owner: 'acme',
+        repo: 'widgets',
+        author: 'octocat',
+        createdAt: '2026-01-01T00:00:00Z',
+        htmlUrl: 'https://github.com/acme/widgets/pull/42',
+        isDraft: false,
+      }],
+    },
+  );
+});
+
+test('parsePrListResult rejects malformed fields and unknown statuses', () => {
+  assert.equal(parsePrListResult({ status: 'unknown', message: 'x', query: null, resultLimit: 50, limited: false, prs: [] }), null);
+  assert.equal(parsePrListResult({ status: 'ok', message: 'x', query: null, resultLimit: 50, limited: false, prs: [{ number: '42' }] }), null);
+  assert.equal(parsePrListResult({ status: 'ok', message: 'x', query: null, resultLimit: 50, limited: false }), null);
 });
 
 test('resolveSidecarJarPath prefers the packaged jar staged alongside the extension', () => {

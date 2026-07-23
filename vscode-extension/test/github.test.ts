@@ -13,6 +13,7 @@ import {
   isRetriableStatus,
   MAX_VALIDATION_DIFF_BYTES,
   normalizeGithubBaseUrl,
+  searchPRs,
 } from '../src/github';
 
 test('buildPRSearchQuery uses current repo when scope is currentRepo', () => {
@@ -47,6 +48,77 @@ test('buildPRSearchQuery supports authored scope', () => {
   assert.equal(
     buildPRSearchQuery('all', 'authored'),
     'is:pr author:@me',
+  );
+});
+
+test('searchPRs uses the sidecar result without resolving a local token', async () => {
+  const result = await searchPRs(
+    'https://github.com',
+    'open',
+    'currentRepo',
+    'acme/widgets',
+    {
+      buildSearchQuery: async () => null,
+      listPullRequests: async () => ({
+        status: 'ok',
+        message: 'Pull requests loaded.',
+        query: 'is:pr is:open repo:acme/widgets',
+        resultLimit: 50,
+        limited: true,
+        prs: [{
+          number: 42,
+          title: 'Example',
+          owner: 'acme',
+          repo: 'widgets',
+          author: 'octocat',
+          createdAt: '2026-01-01T00:00:00Z',
+          htmlUrl: 'https://github.com/acme/widgets/pull/42',
+          isDraft: false,
+        }],
+      }),
+    },
+    async () => {
+      throw new Error('local token must not be resolved');
+    },
+  );
+
+  assert.equal(result.limited, true);
+  assert.deepEqual(result.prs, [{
+    number: 42,
+    title: 'Example',
+    owner: 'acme',
+    repo: 'widgets',
+    author: 'octocat',
+    createdAt: '2026-01-01T00:00:00Z',
+    htmlUrl: 'https://github.com/acme/widgets/pull/42',
+    isDraft: false,
+    hasReviewDraft: false,
+  }]);
+});
+
+test('searchPRs surfaces valid sidecar domain failures without a local fallback', async () => {
+  await assert.rejects(
+    searchPRs(
+      'https://github.com',
+      'open',
+      'authored',
+      undefined,
+      {
+        buildSearchQuery: async () => null,
+        listPullRequests: async () => ({
+          status: 'not_authenticated',
+          message: "Run 'gh auth login' in a terminal for this GitHub host.",
+          query: null,
+          resultLimit: 50,
+          limited: false,
+          prs: [],
+        }),
+      },
+      async () => {
+        throw new Error('local fallback must not run');
+      },
+    ),
+    /gh auth login/,
   );
 });
 

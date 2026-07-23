@@ -668,7 +668,6 @@ async function getToken(state: ViewState): Promise<string> {
 
 async function handleRefreshPRs(state: ViewState, msg: Record<string, unknown>): Promise<void> {
     try {
-        const token = await getToken(state);
         if (typeof msg.state === 'string') state.prStateFilter = msg.state;
         if (typeof msg.searchScope === 'string') {
             state.searchScope = normalizeSearchScope(msg.searchScope);
@@ -680,16 +679,14 @@ async function handleRefreshPRs(state: ViewState, msg: Record<string, unknown>):
 
         const currentRepo = await github.detectCurrentRepoAsync(workingDir() || process.cwd(), sidecarClient ?? undefined);
         const found = await github.searchPRs(
-            token,
             githubBaseUrl(),
             state.prStateFilter,
             state.searchScope,
             currentRepo ?? undefined,
             sidecarClient ?? undefined,
+            getToken.bind(null, state),
         );
-        // searchPRs over-fetches by one to distinguish "exactly the limit" from "more exist".
-        const limited = found.length > github.PR_SEARCH_LIMIT;
-        const prs = (limited ? found.slice(0, github.PR_SEARCH_LIMIT) : found).map((pr) => {
+        const prs = found.prs.map((pr) => {
             if (!state.activePR || !state.pendingReviewId) return pr;
             return pr.number === state.activePR.number && pr.owner === state.activePR.owner && pr.repo === state.activePR.repo
                 ? { ...pr, hasReviewDraft: true }
@@ -704,7 +701,7 @@ async function handleRefreshPRs(state: ViewState, msg: Record<string, unknown>):
                 searchScope: state.searchScope,
                 currentRepo: currentRepo ?? undefined,
                 resultLimit: github.PR_SEARCH_LIMIT,
-                limited,
+                limited: found.limited,
             },
         });
     } catch (err) {

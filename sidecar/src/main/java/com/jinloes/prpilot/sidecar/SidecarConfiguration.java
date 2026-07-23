@@ -2,6 +2,7 @@ package com.jinloes.prpilot.sidecar;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
+import com.jinloes.prpilot.sidecar.pr.PrListService;
 import com.jinloes.prpilot.sidecar.pr.PrSearchQueryService;
 import com.jinloes.prpilot.sidecar.repo.RepoDetector;
 import com.jinloes.prpilot.sidecar.review.ReviewJsonParser;
@@ -41,6 +42,11 @@ class SidecarConfiguration {
     }
 
     @Bean
+    PrListService prListService() {
+        return new PrListService();
+    }
+
+    @Bean
     StdioJsonRpcServer stdioJsonRpcServer(
             ObjectMapper objectMapper,
             StdioFrameCodec frameCodec,
@@ -48,7 +54,8 @@ class SidecarConfiguration {
             ReviewJsonParser reviewJsonParser,
             PrSearchQueryService prSearchQueryService,
             RepoDetector repoDetector,
-            GitHubAuthService gitHubAuthService) {
+            GitHubAuthService gitHubAuthService,
+            PrListService prListService) {
         return new StdioJsonRpcServer(
                 objectMapper,
                 frameCodec,
@@ -56,6 +63,7 @@ class SidecarConfiguration {
                 reviewJsonParser,
                 prSearchQueryService,
                 repoDetector,
-                gitHubAuthService);
+                gitHubAuthService,
+                prListService);
     }
 }

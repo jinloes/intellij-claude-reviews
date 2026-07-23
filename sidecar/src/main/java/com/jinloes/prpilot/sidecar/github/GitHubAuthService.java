@@ -58,7 +58,7 @@ public final class GitHubAuthService {
         };
     }
 
-    interface TokenResolver {
+    public interface TokenResolver {
         TokenResolution resolve(String hostnameArgument);
     }
 
@@ -66,21 +66,21 @@ public final class GitHubAuthService {
         UserResolution lookup(String apiBaseUrl, String token);
     }
 
-    record TokenResolution(TokenStatus status, String token) {
-        static TokenResolution resolved(String token) {
+    public record TokenResolution(TokenStatus status, String token) {
+        public static TokenResolution resolved(String token) {
             return new TokenResolution(TokenStatus.RESOLVED, token);
         }
 
-        static TokenResolution notInstalled() {
+        public static TokenResolution notInstalled() {
             return new TokenResolution(TokenStatus.NOT_INSTALLED, null);
         }
 
-        static TokenResolution notAuthenticated() {
+        public static TokenResolution notAuthenticated() {
             return new TokenResolution(TokenStatus.NOT_AUTHENTICATED, null);
         }
     }
 
-    enum TokenStatus {
+    public enum TokenStatus {
         RESOLVED,
         NOT_INSTALLED,
         NOT_AUTHENTICATED
@@ -106,7 +106,7 @@ public final class GitHubAuthService {
         API_FAILED
     }
 
-    private static final class ProcessTokenResolver implements TokenResolver {
+    public static final class ProcessTokenResolver implements TokenResolver {
         private static final List<Path> GH_CANDIDATES =
                 List.of(
                         Path.of("/opt/homebrew/bin/gh"),

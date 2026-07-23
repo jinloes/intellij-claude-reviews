@@ -22,12 +22,40 @@ export interface SidecarGitHubAuthResult {
     message: string;
 }
 
+export interface SidecarPrListResult {
+    status: 'ok' | 'not_installed' | 'not_authenticated' | 'invalid_base_url' | 'rate_limited' | 'network_error' | 'api_failed';
+    message: string;
+    query: string | null;
+    resultLimit: number;
+    limited: boolean;
+    prs: Array<{
+        number: number;
+        title: string;
+        owner: string;
+        repo: string;
+        author: string;
+        createdAt: string;
+        htmlUrl: string;
+        isDraft: boolean;
+    }>;
+}
+
 const AUTH_STATUSES = new Set<SidecarGitHubAuthResult['status']>([
     'authenticated',
     'not_installed',
     'not_authenticated',
     'api_failed',
     'invalid_base_url',
+]);
+
+const PR_LIST_STATUSES = new Set<SidecarPrListResult['status']>([
+    'ok',
+    'not_installed',
+    'not_authenticated',
+    'invalid_base_url',
+    'rate_limited',
+    'network_error',
+    'api_failed',
 ]);
 
 /** Validates the token-free result shape returned by `github/checkAuth`. */
@@ -43,6 +71,55 @@ export function parseGitHubAuthResult(value: unknown): SidecarGitHubAuthResult |
         status: result.status as SidecarGitHubAuthResult['status'],
         username: typeof result.username === 'string' ? result.username : null,
         message: result.message,
+    };
+}
+
+/** Validates the token-free result shape returned by `prs/list`. */
+export function parsePrListResult(value: unknown): SidecarPrListResult | null {
+    if (!value || typeof value !== 'object') return null;
+    const result = value as Record<string, unknown>;
+    if (typeof result.status !== 'string' || !PR_LIST_STATUSES.has(result.status as SidecarPrListResult['status'])) {
+        return null;
+    }
+    if (typeof result.message !== 'string'
+        || (result.query !== null && typeof result.query !== 'string')
+        || typeof result.resultLimit !== 'number'
+        || typeof result.limited !== 'boolean'
+        || !Array.isArray(result.prs)) {
+        return null;
+    }
+    const prs = result.prs.map((value) => {
+        if (!value || typeof value !== 'object') return null;
+        const pr = value as Record<string, unknown>;
+        if (!Number.isInteger(pr.number)
+            || typeof pr.title !== 'string'
+            || typeof pr.owner !== 'string'
+            || typeof pr.repo !== 'string'
+            || typeof pr.author !== 'string'
+            || typeof pr.createdAt !== 'string'
+            || typeof pr.htmlUrl !== 'string'
+            || typeof pr.isDraft !== 'boolean') {
+            return null;
+        }
+        return {
+            number: pr.number,
+            title: pr.title,
+            owner: pr.owner,
+            repo: pr.repo,
+            author: pr.author,
+            createdAt: pr.createdAt,
+            htmlUrl: pr.htmlUrl,
+            isDraft: pr.isDraft,
+        };
+    });
+    if (prs.some((pr) => pr === null)) return null;
+    return {
+        status: result.status as SidecarPrListResult['status'],
+        message: result.message,
+        query: typeof result.query === 'string' ? result.query : null,
+        resultLimit: result.resultLimit,
+        limited: result.limited,
+        prs: prs as SidecarPrListResult['prs'],
     };
 }
 
@@ -219,6 +296,29 @@ export class SidecarClient {
     async checkGitHubAuth(githubBaseUrl: string): Promise<SidecarGitHubAuthResult | null> {
         try {
             return parseGitHubAuthResult(await this.request('github/checkAuth', { githubBaseUrl }));
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Lists pull requests through the sidecar without returning a GitHub token to the extension.
+     * Resolves to null only on transport or response-shape failures, leaving callers free to use
+     * the local TypeScript implementation; valid domain failures are returned as-is.
+     */
+    async listPullRequests(
+        githubBaseUrl: string,
+        state: string,
+        searchScope: string,
+        currentRepo?: string,
+    ): Promise<SidecarPrListResult | null> {
+        try {
+            return parsePrListResult(await this.request('prs/list', {
+                githubBaseUrl,
+                state,
+                searchScope,
+                ...(currentRepo ? { currentRepo } : {}),
+            }));
         } catch {
             return null;
         }

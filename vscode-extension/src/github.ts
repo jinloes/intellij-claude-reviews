@@ -277,21 +277,77 @@ export interface SearchQuerySidecar {
     buildSearchQuery(state: string, searchScope: string, currentRepo?: string): Promise<string | null>;
 }
 
+export interface SidecarPullRequest {
+    number: number;
+    title: string;
+    owner: string;
+    repo: string;
+    author: string;
+    createdAt: string;
+    htmlUrl: string;
+    isDraft: boolean;
+}
+
+export interface SidecarPrListResult {
+    status: 'ok' | 'not_installed' | 'not_authenticated' | 'invalid_base_url' | 'rate_limited' | 'network_error' | 'api_failed';
+    message: string;
+    query: string | null;
+    resultLimit: number;
+    limited: boolean;
+    prs: SidecarPullRequest[];
+}
+
+export interface PrListSidecar {
+    listPullRequests(
+        githubBaseUrl: string,
+        state: string,
+        searchScope: string,
+        currentRepo?: string,
+    ): Promise<SidecarPrListResult | null>;
+}
+
+export interface PRSearchResult {
+    prs: PR[];
+    limited: boolean;
+}
+
 export async function searchPRs(
-    token: string,
     githubBaseUrl: string,
     state: string,
     searchScope: PRSearchScope,
     currentRepo?: string,
-    sidecar?: SearchQuerySidecar,
-): Promise<PR[]> {
+    sidecar?: PrListSidecar & SearchQuerySidecar,
+    resolveTokenForFallback: (githubBaseUrl: string) => Promise<string> = resolveToken,
+): Promise<PRSearchResult> {
+    const sidecarResult = await sidecar?.listPullRequests(
+        githubBaseUrl,
+        state,
+        searchScope,
+        currentRepo,
+    );
+    if (sidecarResult) {
+        if (sidecarResult.status !== 'ok') throw new Error(sidecarResult.message);
+        return {
+            prs: sidecarResult.prs.map((pr) => ({ ...pr, hasReviewDraft: false })),
+            limited: sidecarResult.limited,
+        };
+    }
     // The sidecar's pr/buildSearchQuery mirrors buildPRSearchQuery exactly (see
     // PrSearchQueryService); when unavailable or it fails for any reason, fall back to the
     // local implementation so PR search never depends on the sidecar process.
     const q = (await sidecar?.buildSearchQuery(state, searchScope, currentRepo))
         ?? buildPRSearchQuery(state, searchScope, currentRepo);
     // Over-fetch by one so the caller can tell "exactly the limit" from "more exist".
-    return searchPRsByQuery(token, githubBaseUrl, q, PR_SEARCH_LIMIT + 1);
+    const found = await searchPRsByQuery(
+        await resolveTokenForFallback(githubBaseUrl),
+        githubBaseUrl,
+        q,
+        PR_SEARCH_LIMIT + 1,
+    );
+    return {
+        prs: found.slice(0, PR_SEARCH_LIMIT),
+        limited: found.length > PR_SEARCH_LIMIT,
+    };
 }
 
 export async function searchPRsByQuery(
