@@ -205,6 +205,26 @@ function mutateComments(
   return { ...prev, result: updated } as PaneState
 }
 
+// If the host doesn't answer a saveDraft/submitReview/deleteDraft request within this
+// window, something went wrong on the host side (dropped message, crashed process, stuck
+// mutation queue, etc.) — recover instead of leaving the button spinner stuck forever.
+const MUTATION_WATCHDOG_MS = 45_000
+
+function clearWatchdog(ref: { current: ReturnType<typeof setTimeout> | null }) {
+  if (ref.current !== null) {
+    clearTimeout(ref.current)
+    ref.current = null
+  }
+}
+
+function armWatchdog(ref: { current: ReturnType<typeof setTimeout> | null }, onTimeout: () => void) {
+  clearWatchdog(ref)
+  ref.current = setTimeout(() => {
+    ref.current = null
+    onTimeout()
+  }, MUTATION_WATCHDOG_MS)
+}
+
 const VERDICT_COLOR: Record<ReviewResult['verdict'], string> = {
   APPROVE: 'text-status-approve',
   REQUEST_CHANGES: 'text-status-changes',
@@ -325,10 +345,26 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     orphans: LineComment[]
     snapshot: string
   } | null>(null)
+  // Watchdog timers: if the host never answers a saveDraft/submitReview/deleteDraft
+  // message (dropped message, crashed sidecar, wedged mutation queue, etc.), these fire
+  // and recover the UI instead of leaving the button spinner stuck forever.
+  const saveWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const submitWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const deleteWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const clearAllWatchdogs = useCallback(() => {
+    clearWatchdog(saveWatchdogRef)
+    clearWatchdog(submitWatchdogRef)
+    clearWatchdog(deleteWatchdogRef)
+  }, [])
 
   useEffect(() => {
     currentPrRef.current = pr
   }, [pr])
+
+  // Clear any in-flight mutation watchdogs on unmount so they never fire setState
+  // against an unmounted component.
+  useEffect(() => clearAllWatchdogs, [clearAllWatchdogs])
 
   useEffect(() => {
     setState({ kind: pr ? 'draftLoading' : 'idle' })
@@ -353,7 +389,8 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
       clearTimeout(autosaveTimerRef.current)
       autosaveTimerRef.current = null
     }
-  }, [pr])
+    clearAllWatchdogs()
+  }, [pr, clearAllWatchdogs])
 
   useEffect(() => {
     const dirty = state.kind === 'reviewUnsaved' || state.kind === 'saveError'
@@ -562,6 +599,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
           break
 
         case 'draftSaved': {
+          clearWatchdog(saveWatchdogRef)
           setSaving(false)
           if (msg.commentsDropped && !lastSaveWasAutoRef.current) {
             toast.warning('Some comments were dropped', {
@@ -591,6 +629,21 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
           if (pending && submitPr) {
             pendingSubmit.current = null
             setSubmitting(true)
+            armWatchdog(submitWatchdogRef, () => {
+              setSubmitting(false)
+              setState((prev) => ({
+                kind: 'submitError',
+                message: 'The host did not respond in time. Check your connection and try again.',
+                result: prev.kind === 'draftPresent' || prev.kind === 'reviewUnsaved' ? prev.result : null,
+                diff: prev.kind === 'draftPresent' ? (prev.diff ?? '') : prev.kind === 'reviewUnsaved' ? prev.diff : '',
+                validationDiff:
+                  prev.kind === 'draftPresent'
+                    ? (prev.validationDiff ?? prev.diff ?? '')
+                    : prev.kind === 'reviewUnsaved'
+                      ? prev.validationDiff
+                      : '',
+              }))
+            })
             sendToHost({
               type: 'submitReview',
               number: submitPr.number,
@@ -604,6 +657,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
         }
 
         case 'draftSaveError':
+          clearWatchdog(saveWatchdogRef)
           setSaving(false)
           // The optimistic snapshot set when dispatching the save is no longer
           // valid — clear it so the review is treated as unsaved (dirty) again.
@@ -625,11 +679,13 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
           break
 
         case 'reviewSubmitted':
+          clearWatchdog(submitWatchdogRef)
           setSubmitting(false)
           setState({ kind: 'submitted' })
           break
 
         case 'reviewSubmitError':
+          clearWatchdog(submitWatchdogRef)
           setSubmitting(false)
           setState((prev) => ({
             kind: 'submitError',
@@ -646,11 +702,13 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
           break
 
         case 'draftDeleted':
+          clearWatchdog(deleteWatchdogRef)
           setDeleting(false)
           setState({ kind: 'noDraft' })
           break
 
         case 'draftDeleteError':
+          clearWatchdog(deleteWatchdogRef)
           setDeleting(false)
           setState({ kind: 'error', message: msg.message })
           break
@@ -742,6 +800,24 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
         autosaveTimerRef.current = null
       }
       setSaving(true)
+      armWatchdog(saveWatchdogRef, () => {
+        setSaving(false)
+        lastSavedSnapshotRef.current = null
+        lastSaveWasAutoRef.current = false
+        pendingSubmit.current = null
+        setState((prev) => ({
+          kind: 'saveError',
+          message: 'The host did not respond in time. Check your connection and try again.',
+          result: prev.kind === 'reviewUnsaved' || prev.kind === 'draftPresent' ? prev.result : null,
+          diff: prev.kind === 'reviewUnsaved' ? prev.diff : prev.kind === 'draftPresent' ? (prev.diff ?? '') : '',
+          validationDiff:
+            prev.kind === 'reviewUnsaved'
+              ? prev.validationDiff
+              : prev.kind === 'draftPresent'
+                ? (prev.validationDiff ?? prev.diff ?? '')
+                : '',
+        }))
+      })
       sendToHost({
         type: 'saveDraft',
         number: targetPr.number,
@@ -962,6 +1038,10 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
 
   function handleDelete() {
     setDeleting(true)
+    armWatchdog(deleteWatchdogRef, () => {
+      setDeleting(false)
+      setState({ kind: 'error', message: 'The host did not respond in time. Check your connection and try again.' })
+    })
     sendToHost({ type: 'deleteDraft', number: currentPr.number, owner: currentPr.owner, repo: currentPr.repo })
   }
 
@@ -995,6 +1075,21 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
       return
     }
     setSubmitting(true)
+    armWatchdog(submitWatchdogRef, () => {
+      setSubmitting(false)
+      setState((prev) => ({
+        kind: 'submitError',
+        message: 'The host did not respond in time. Check your connection and try again.',
+        result: prev.kind === 'draftPresent' || prev.kind === 'reviewUnsaved' ? prev.result : null,
+        diff: prev.kind === 'draftPresent' ? (prev.diff ?? '') : prev.kind === 'reviewUnsaved' ? prev.diff : '',
+        validationDiff:
+          prev.kind === 'draftPresent'
+            ? (prev.validationDiff ?? prev.diff ?? '')
+            : prev.kind === 'reviewUnsaved'
+              ? prev.validationDiff
+              : '',
+      }))
+    })
     sendToHost({ type: 'submitReview', number: currentPr.number, owner: currentPr.owner, repo: currentPr.repo, verdict, comment })
   }
 
