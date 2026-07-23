@@ -1,6 +1,7 @@
 package com.jinloes.prpilot.services
 
 import com.jinloes.prpilot.model.ChatMessage
+import com.jinloes.prpilot.model.LineComment
 import com.jinloes.prpilot.model.PRReviewRequest
 import com.jinloes.prpilot.model.ReviewResult
 import com.jinloes.prpilot.services.stream.ContentBlock
@@ -9,6 +10,7 @@ import com.jinloes.prpilot.util.ProcessUtil
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
@@ -741,9 +743,26 @@ open class ClaudeService @JvmOverloads constructor(projectDir: String? = null) {
             )
         }
 
+        private const val MAX_SUMMARY_CHARS = 800
+        private const val MAX_BODY_CHARS = 300
+        private const val MAX_RATIONALE_CHARS = 200
+        private const val MAX_LINE_COMMENTS = 20
+        private val VALID_TYPES = setOf("issue", "suggestion", "note")
+        private val VALID_SEVERITIES = setOf("blocker", "major", "minor", "nit")
+        private val VALID_CATEGORIES = setOf("correctness", "security", "performance", "tests", "maintainability")
+        private val VALID_CONFIDENCES = setOf("low", "medium", "high")
+        private val VALID_VERDICTS = setOf("APPROVE", "REQUEST_CHANGES", "COMMENT")
+
         /**
          * Extracts a JSON object from the raw claude output (which may include markdown fences or
-         * leading/trailing prose) and deserialises it.
+         * leading/trailing prose) and builds a [ReviewResult] from it.
+         *
+         * Individual malformed line comments are dropped (and a low-confidence "issue" is
+         * downgraded to "suggestion") rather than failing the entire review — capable models
+         * occasionally emit one non-conforming comment among otherwise-valid output, and rejecting
+         * the whole review in that case throws away 19 good comments to punish 1 bad one. The
+         * top-level shape (an object with a string "summary" and an array "lineComments") is still
+         * a hard requirement, since there is nothing to salvage without it.
          */
         internal fun parseReview(raw: String): ReviewResult {
             var json = raw.trim()
@@ -762,78 +781,79 @@ open class ClaudeService @JvmOverloads constructor(projectDir: String? = null) {
                 json = json.substring(start, end + 1)
             }
 
-            validateReviewJson(json)
-            return JSON.decodeFromString<ReviewResult>(json)
-        }
-
-        private fun validateReviewJson(json: String) {
             val root = JSON.parseToJsonElement(json) as? JsonObject
                 ?: throw IllegalArgumentException("review JSON is not an object")
-            require(root.keys == setOf("summary", "lineComments", "verdict")) {
-                "review JSON has unexpected or missing top-level fields"
-            }
-            val summary = root["summary"]?.jsonPrimitive?.contentOrNull
-                ?: throw IllegalArgumentException("review JSON missing string summary")
-            require(summary.length <= 800) { "review summary exceeds 800 characters" }
-            val verdict = root["verdict"]?.jsonPrimitive?.contentOrNull
-                ?: throw IllegalArgumentException("review JSON missing string verdict")
-            require(verdict in setOf("APPROVE", "REQUEST_CHANGES", "COMMENT")) {
-                "review JSON has invalid verdict"
-            }
-            val comments = root["lineComments"] as? JsonArray
-                ?: throw IllegalArgumentException("review JSON missing lineComments array")
-            require(comments.size <= 20) { "review JSON has more than 20 line comments" }
 
-            var hasIssue = false
-            comments.forEach { element ->
-                val comment = element as? JsonObject
-                    ?: throw IllegalArgumentException("review JSON line comment is not an object")
-                val type = comment.requiredString("type")
-                val expectedFields = if (type == "note") {
-                    setOf("file", "line", "type", "severity", "category", "confidence", "body")
-                } else {
-                    setOf("file", "line", "type", "severity", "category", "confidence", "rationale", "body")
-                }
-                require(comment.keys == expectedFields) { "review JSON line comment has invalid fields" }
-                require(comment.requiredString("file").isNotBlank()) { "review JSON line comment has blank file" }
-                val line = comment["line"]?.jsonPrimitive
-                require(line != null && !line.isString && (line.intOrNull ?: 0) > 0) {
-                    "review JSON line comment has invalid line"
-                }
-                require(type in setOf("issue", "suggestion", "note")) { "review JSON line comment has invalid type" }
-                require(comment.requiredString("severity") in setOf("blocker", "major", "minor", "nit")) {
-                    "review JSON line comment has invalid severity"
-                }
-                require(comment.requiredString("category") in setOf("correctness", "security", "performance", "tests", "maintainability")) {
-                    "review JSON line comment has invalid category"
-                }
-                val confidence = comment.requiredString("confidence")
-                require(confidence in setOf("low", "medium", "high")) {
-                    "review JSON line comment has invalid confidence"
-                }
-                require(!(type == "issue" && confidence == "low")) {
-                    "review JSON cannot contain a low-confidence issue"
-                }
-                val body = comment.requiredString("body")
-                require(body.isNotBlank() && body.length <= 300 && '\n' !in body && '\r' !in body) {
-                    "review JSON line comment has invalid body"
-                }
-                if (type != "note") {
-                    val rationale = comment.requiredString("rationale")
-                    require(rationale.isNotBlank() && rationale.length <= 200) {
-                        "review JSON line comment has invalid rationale"
-                    }
-                }
-                hasIssue = hasIssue || type == "issue"
+            var summary = root["summary"]?.jsonPrimitive?.contentOrNull
+                ?: throw IllegalArgumentException("review JSON missing string summary")
+            if (summary.length > MAX_SUMMARY_CHARS) {
+                summary = summary.take(MAX_SUMMARY_CHARS)
             }
-            require((verdict == "REQUEST_CHANGES") == hasIssue) {
-                "review verdict does not match issue comments"
+
+            val requestedVerdict = root["verdict"]?.jsonPrimitive?.contentOrNull
+                ?.takeIf { it in VALID_VERDICTS }
+
+            val rawComments = root["lineComments"] as? JsonArray ?: JsonArray(emptyList())
+            val comments = mutableListOf<LineComment>()
+            for (element in rawComments) {
+                if (comments.size >= MAX_LINE_COMMENTS) break
+                val comment = repairLineComment(element) ?: continue
+                comments += comment
             }
+
+            val hasIssue = comments.any { it.getType() == "issue" }
+            val verdict = when {
+                requestedVerdict == "REQUEST_CHANGES" && !hasIssue -> "COMMENT"
+                requestedVerdict != "REQUEST_CHANGES" && hasIssue -> "REQUEST_CHANGES"
+                requestedVerdict != null -> requestedVerdict
+                hasIssue -> "REQUEST_CHANGES"
+                else -> "COMMENT"
+            }
+
+            return ReviewResult(summary, verdict, comments)
         }
 
-        private fun JsonObject.requiredString(key: String): String =
-            this[key]?.jsonPrimitive?.let { primitive ->
-                if (primitive.isString) primitive.contentOrNull else null
-            } ?: throw IllegalArgumentException("review JSON missing string $key")
+        /**
+         * Validates and normalizes a single line comment element, returning `null` (and logging
+         * at debug level) when the comment is unsalvageable. A low-confidence "issue" is
+         * downgraded to "suggestion" instead of being dropped, matching the auto-repair already
+         * offered to users in the review-quality UI.
+         */
+        private fun repairLineComment(element: JsonElement): LineComment? {
+            val comment = element as? JsonObject ?: return dropComment("non-object line comment")
+            val file = comment.optionalString("file")?.takeIf { it.isNotBlank() } ?: return dropComment("blank/missing file")
+            val line = comment["line"]?.jsonPrimitive?.let { if (!it.isString) it.intOrNull else null }
+                ?.takeIf { it > 0 } ?: return dropComment("invalid line")
+            val type = comment.optionalString("type")?.takeIf { it in VALID_TYPES } ?: return dropComment("invalid type")
+            var body = comment.optionalString("body")?.replace(Regex("[\\r\\n]+"), " ")?.trim()
+                ?.takeIf { it.isNotBlank() } ?: return dropComment("blank/missing body")
+            if (body.length > MAX_BODY_CHARS) body = body.take(MAX_BODY_CHARS)
+            val severity = comment.optionalString("severity")?.takeIf { it in VALID_SEVERITIES }
+                ?: return dropComment("invalid severity")
+            val category = comment.optionalString("category")?.takeIf { it in VALID_CATEGORIES }
+                ?: return dropComment("invalid category")
+            val confidence = comment.optionalString("confidence")?.takeIf { it in VALID_CONFIDENCES }
+                ?: return dropComment("invalid confidence")
+            val effectiveType = if (type == "issue" && confidence == "low") "suggestion" else type
+            var rationale = comment.optionalString("rationale")
+            if (effectiveType != "note") {
+                rationale = rationale?.takeIf { it.isNotBlank() } ?: return dropComment("missing rationale")
+                if (rationale.length > MAX_RATIONALE_CHARS) rationale = rationale.take(MAX_RATIONALE_CHARS)
+            }
+            val result = LineComment(file, line, effectiveType, body)
+            result.setSeverity(severity)
+            result.setCategory(category)
+            result.setConfidence(confidence)
+            result.setRationale(rationale)
+            return result
+        }
+
+        private fun dropComment(reason: String): LineComment? {
+            log.debug("Dropping malformed review line comment: {}", reason)
+            return null
+        }
+
+        private fun JsonObject.optionalString(key: String): String? =
+            this[key]?.jsonPrimitive?.let { primitive -> if (primitive.isString) primitive.contentOrNull else null }
     }
 }

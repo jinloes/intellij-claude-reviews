@@ -23,26 +23,33 @@ export interface ReviewQualityReport {
 interface DiffFileStat {
   path: string
   changedLines: number
+  diff: string
 }
 
 function parseDiffFileStats(diff: string): DiffFileStat[] {
-  const rows = diff.split(/\r?\n/)
-  const stats = new Map<string, number>()
-  let currentFile = ''
+  const starts = [...diff.matchAll(/^diff --git /gm)].map((match) => match.index)
+  const sections = starts.length === 0
+    ? [diff]
+    : starts.map((start, index) => diff.slice(start, starts[index + 1] ?? diff.length))
 
-  for (const row of rows) {
-    if (row.startsWith('+++ b/')) {
-      currentFile = row.slice('+++ b/'.length).trim()
-      if (!stats.has(currentFile)) stats.set(currentFile, 0)
-      continue
-    }
-    if (!currentFile) continue
-    if (row.startsWith('+') && !row.startsWith('+++')) {
-      stats.set(currentFile, (stats.get(currentFile) ?? 0) + 1)
-    }
-  }
+  return sections.flatMap((section) => {
+    const rows = section.split(/\r?\n/)
+    const newPath = rows.find((row) => row.startsWith('+++ '))?.slice(4).trim()
+    const oldPath = rows.find((row) => row.startsWith('--- '))?.slice(4).trim()
+    const headerPath = rows[0]?.match(/\s"?b\/(.+?)"?$/)?.[1]
+    const path = newPath?.startsWith('b/')
+      ? newPath.slice(2)
+      : oldPath?.startsWith('a/')
+        ? oldPath.slice(2)
+        : headerPath
+    if (!path) return []
 
-  return [...stats.entries()].map(([path, changedLines]) => ({ path, changedLines }))
+    const changedLines = rows.filter(
+      (row) => (row.startsWith('+') && !row.startsWith('+++'))
+        || (row.startsWith('-') && !row.startsWith('---')),
+    ).length
+    return [{ path, changedLines, diff: section }]
+  })
 }
 
 function isHighRiskLowEvidence(comment: LineComment, changedFiles: Set<string>): boolean {
@@ -172,23 +179,48 @@ export function applyReviewQualityRepairs(
 export interface DiffBatch {
   label: string
   files: string[]
+  diff: string
 }
 
-export function buildDiffBatches(validationDiff: string, maxFilesPerBatch = 6): DiffBatch[] {
+export function buildDiffBatches(
+  validationDiff: string,
+  maxFilesPerBatch = 6,
+  maxDiffCharsPerBatch = 220_000,
+): DiffBatch[] {
+  if (maxFilesPerBatch < 1 || maxDiffCharsPerBatch < 1) {
+    throw new RangeError('Diff batch limits must be positive.')
+  }
   const stats = parseDiffFileStats(validationDiff)
   if (stats.length === 0) return []
 
   const sorted = [...stats].sort((a, b) => b.changedLines - a.changedLines)
   const batches: DiffBatch[] = []
-  for (let i = 0; i < sorted.length; i += maxFilesPerBatch) {
-    const slice = sorted.slice(i, i + maxFilesPerBatch)
+  let pending: DiffFileStat[] = []
+  let pendingChars = 0
+
+  function appendBatch(slice: DiffFileStat[]) {
     const files = slice.map((item) => item.path)
     const changedLines = slice.reduce((sum, item) => sum + item.changedLines, 0)
     batches.push({
       label: `Batch ${batches.length + 1} (${files.length} files, ${changedLines} changed lines)`,
       files,
+      diff: `${slice.map((item) => item.diff.trimEnd()).join('\n')}\n`,
     })
   }
+
+  for (const item of sorted) {
+    const exceedsFileLimit = pending.length >= maxFilesPerBatch
+    const exceedsCharacterLimit = pendingChars + item.diff.length > maxDiffCharsPerBatch
+    if (pending.length > 0 && (exceedsFileLimit || exceedsCharacterLimit)) {
+      appendBatch(pending)
+      pending = []
+      pendingChars = 0
+    }
+    pending.push(item)
+    pendingChars += item.diff.length
+  }
+  if (pending.length > 0) appendBatch(pending)
+
   return batches
 }
 

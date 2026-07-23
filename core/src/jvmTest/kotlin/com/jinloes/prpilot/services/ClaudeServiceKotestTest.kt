@@ -82,25 +82,45 @@ class ClaudeServiceKotestTest : FunSpec({
             c.getRationale() shouldBe "read the schema"
         }
 
-        test("JSON without required comment fields — rejected") {
+        test("JSON without required comment fields — comment dropped, rest of review kept") {
             val json = """{"summary":"s","verdict":"APPROVE","lineComments":[{"file":"a","line":1,"type":"note","body":"b"}]}"""
-            shouldThrow<IllegalArgumentException> {
-                ClaudeService.parseReview(json)
-            }
+            val result = ClaudeService.parseReview(json)
+            result.getLineComments() shouldHaveSize 0
+            result.getVerdict() shouldBe "APPROVE"
         }
 
-        test("JSON with unexpected fields — rejected") {
+        test("JSON with unexpected top-level fields — ignored rather than rejected") {
             val json = """{"summary":"s","verdict":"APPROVE","lineComments":[],"extra":true}"""
-            shouldThrow<IllegalArgumentException> {
-                ClaudeService.parseReview(json)
-            }
+            val result = ClaudeService.parseReview(json)
+            result.getVerdict() shouldBe "APPROVE"
         }
 
-        test("low-confidence issue — rejected") {
+        test("low-confidence issue — downgraded to suggestion instead of rejected") {
             val json = """{"summary":"s","verdict":"REQUEST_CHANGES","lineComments":[{"file":"a","line":1,"type":"issue","severity":"major","category":"correctness","confidence":"low","rationale":"The line returns null.","body":"Handle the null return value."}]}"""
-            shouldThrow<IllegalArgumentException> {
-                ClaudeService.parseReview(json)
-            }
+            val result = ClaudeService.parseReview(json)
+            result.getLineComments() shouldHaveSize 1
+            result.getLineComments()[0].getType() shouldBe "suggestion"
+            result.getVerdict() shouldBe "COMMENT"
+        }
+
+        test("verdict/issue mismatch — verdict self-heals instead of rejected") {
+            val json = """{"summary":"s","verdict":"APPROVE","lineComments":[{"file":"a","line":1,"type":"issue","severity":"major","category":"correctness","confidence":"high","rationale":"The line returns null.","body":"Handle the null return value."}]}"""
+            val result = ClaudeService.parseReview(json)
+            result.getVerdict() shouldBe "REQUEST_CHANGES"
+            result.getLineComments()[0].getType() shouldBe "issue"
+        }
+
+        test("over-long summary — truncated instead of rejected") {
+            val json = """{"summary":"${"s".repeat(900)}","verdict":"APPROVE","lineComments":[]}"""
+            val result = ClaudeService.parseReview(json)
+            result.getSummary().length shouldBe 800
+        }
+
+        test("body with embedded newline — collapsed instead of rejected") {
+            val json = """{"summary":"s","verdict":"COMMENT","lineComments":[{"file":"a","line":1,"type":"note","severity":"minor","category":"tests","confidence":"medium","body":"line one\nline two"}]}"""
+            val result = ClaudeService.parseReview(json)
+            result.getLineComments() shouldHaveSize 1
+            result.getLineComments()[0].getBody() shouldBe "line one line two"
         }
     }
 

@@ -197,9 +197,12 @@ open class CopilotService @JvmOverloads constructor(
                 }
             }
 
-            session.sendAndWait(prompt, REQUEST_TIMEOUT_MS)
+            val responseMessage = session.sendAndWait(prompt, REQUEST_TIMEOUT_MS)
 
-            val raw = StringUtils.defaultIfBlank(finalMessage.get(), deltaBuffer.toString()) ?: ""
+            val raw = StringUtils.defaultIfBlank(
+                finalMessage.get(),
+                StringUtils.defaultIfBlank(responseMessage, deltaBuffer.toString()),
+            ) ?: ""
             if (StringUtils.isBlank(raw) && StringUtils.isNotBlank(sessionError.get())) {
                 throw IOException(sessionError.get())
             }
@@ -309,7 +312,7 @@ open class CopilotService @JvmOverloads constructor(
         fun onSessionError(listener: Consumer<String?>): Closeable
 
         @Throws(Exception::class)
-        fun sendAndWait(prompt: String, timeoutMs: Long)
+        fun sendAndWait(prompt: String, timeoutMs: Long): String?
 
         fun abort()
     }
@@ -387,9 +390,8 @@ open class CopilotService @JvmOverloads constructor(
                 listener.accept(event.getData()?.message())
             }
 
-        override fun sendAndWait(prompt: String, timeoutMs: Long) {
-            session.sendAndWait(MessageOptions().setPrompt(prompt), timeoutMs).get()
-        }
+        override fun sendAndWait(prompt: String, timeoutMs: Long): String? =
+            session.sendAndWait(MessageOptions().setPrompt(prompt), timeoutMs).get().getData()?.content()
 
         override fun abort() {
             session.abort()

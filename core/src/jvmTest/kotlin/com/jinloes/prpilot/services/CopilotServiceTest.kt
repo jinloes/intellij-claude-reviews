@@ -94,6 +94,7 @@ private class FakeRuntimeSession : CopilotService.RuntimeSession {
     var closeCount = 0
         private set
     var sendFailure: Exception? = null
+    var sendResult: String? = null
     var sendAction: (FakeRuntimeSession) -> Unit = {}
 
     override fun onAssistantMessageDelta(listener: Consumer<String?>): Closeable =
@@ -108,11 +109,12 @@ private class FakeRuntimeSession : CopilotService.RuntimeSession {
     override fun onSessionError(listener: Consumer<String?>): Closeable =
         register(errorListeners, listener)
 
-    override fun sendAndWait(prompt: String, timeoutMs: Long) {
+    override fun sendAndWait(prompt: String, timeoutMs: Long): String? {
         lastPrompt = prompt
         lastTimeoutMs = timeoutMs
         sendAction(this)
         sendFailure?.let { throw it }
+        return sendResult
     }
 
     override fun abort() {
@@ -314,6 +316,19 @@ class CopilotServiceTest : FunSpec({
                 "\"verdict\":\"COMMENT\",",
                 "\"lineComments\":[]}",
             )
+        }
+
+        test("uses sendAndWait response when the assistant message event does not arrive") {
+            val factory = FakeRuntimeFactory {
+                FakeRuntimeClient {
+                    FakeRuntimeSession().apply { sendResult = reviewJson("APPROVE") }
+                }
+            }
+            val svc = CopilotService(runtimeFactory = factory)
+
+            val result = svc.reviewPR(fakeRequest(), "", "medium", Consumer {})
+
+            result.getVerdict() shouldBe "APPROVE"
         }
 
         test("surfaces session error when the runtime emits no output") {

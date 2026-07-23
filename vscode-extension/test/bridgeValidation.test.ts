@@ -7,9 +7,22 @@ const version = { protocolVersion: BRIDGE_PROTOCOL_VERSION };
 
 test('accepts valid PR-scoped request', () => {
   assert.equal(
-    isValidBridgeRequest({ ...version, type: 'generateReview', number: 42, owner: 'acme', repo: 'platform' }),
+    isValidBridgeRequest({
+      ...version,
+      type: 'generateReview',
+      number: 42,
+      owner: 'acme',
+      repo: 'platform',
+      diff: 'diff --git a/a.ts b/a.ts',
+    }),
     true,
   );
+});
+
+test('rejects invalid or oversized batch diffs', () => {
+  const base = { ...version, type: 'generateReview', number: 42, owner: 'acme', repo: 'platform' };
+  assert.equal(isValidBridgeRequest({ ...base, diff: 42 }), false);
+  assert.equal(isValidBridgeRequest({ ...base, diff: 'x'.repeat(1_100_001) }), false);
 });
 
 test('rejects unknown type', () => {

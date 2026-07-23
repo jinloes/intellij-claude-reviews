@@ -8,6 +8,7 @@ final class BridgeMessageValidator {
 
     static final int PROTOCOL_VERSION = 1;
     private static final int MAX_TEXT = 100_000;
+    private static final int MAX_REVIEW_DIFF = 1_100_000;
     private static final int MAX_COMMENTS = 1_000;
     private static final Set<String> TYPES =
             Set.of(
@@ -59,6 +60,7 @@ final class BridgeMessageValidator {
             case "selectPR", "deleteDraft" -> hasValidPrIdentity(node);
             case "generateReview" ->
                     hasValidPrIdentity(node)
+                            && optionalText(node.get("diff"), MAX_REVIEW_DIFF)
                             && optionalText(node.get("focusAreas"), 10_000)
                             && optionalText(node.get("customInstructions"), 20_000);
             case "saveDraft" ->

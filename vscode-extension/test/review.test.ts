@@ -45,40 +45,32 @@ test('parseReview rejects missing summary', () => {
   );
 });
 
-test('parseReview rejects invalid verdict', () => {
-  assert.throws(
-    () => parseReview(JSON.stringify({ summary: 's', verdict: 'LGTM', lineComments: [] })),
-    /verdict/,
-  );
+test('parseReview normalizes an invalid verdict instead of rejecting', () => {
+  const r = parseReview(JSON.stringify({ summary: 's', verdict: 'LGTM', lineComments: [] }));
+  assert.equal(r.verdict, 'COMMENT');
 });
 
-test('parseReview rejects non-array lineComments', () => {
-  assert.throws(
-    () => parseReview(JSON.stringify({ summary: 's', verdict: 'APPROVE', lineComments: {} })),
-    /lineComments/,
-  );
+test('parseReview treats non-array lineComments as empty instead of rejecting', () => {
+  const r = parseReview(JSON.stringify({ summary: 's', verdict: 'APPROVE', lineComments: {} }));
+  assert.equal(r.lineComments.length, 0);
 });
 
 test('parseReview rejects lineComment with wrong field types', () => {
-  assert.throws(
-    () => parseReview(JSON.stringify({
-      summary: 's',
-      verdict: 'APPROVE',
-      lineComments: [{ file: 'a', line: '5', type: 'issue', body: 'b' }],
-    })),
-    /lineComments/,
-  );
+  const r = parseReview(JSON.stringify({
+    summary: 's',
+    verdict: 'APPROVE',
+    lineComments: [{ file: 'a', line: '5', type: 'issue', body: 'b' }],
+  }));
+  assert.equal(r.lineComments.length, 0);
 });
 
-test('parseReview rejects lineComment with invalid type', () => {
-  assert.throws(
-    () => parseReview(JSON.stringify({
-      summary: 's',
-      verdict: 'APPROVE',
-      lineComments: [{ file: 'a', line: 5, type: 'nit', body: 'b' }],
-    })),
-    /lineComments/,
-  );
+test('parseReview drops lineComment with invalid type', () => {
+  const r = parseReview(JSON.stringify({
+    summary: 's',
+    verdict: 'APPROVE',
+    lineComments: [{ file: 'a', line: 5, type: 'nit', body: 'b' }],
+  }));
+  assert.equal(r.lineComments.length, 0);
 });
 
 test('parseReview throws on non-JSON input', () => {
@@ -101,56 +93,78 @@ test('parseReview keeps valid severity, category, confidence, and rationale', ()
   assert.equal(c.rationale, 'read the schema');
 });
 
-test('parseReview rejects invalid enum values for required comment fields', () => {
-  assert.throws(() => parseReview(JSON.stringify({
+test('parseReview drops comments with invalid enum values for required fields', () => {
+  const r = parseReview(JSON.stringify({
     summary: 's',
     verdict: 'COMMENT',
     lineComments: [{
       file: 'a.ts', line: 5, type: 'note', body: 'b',
       severity: 'catastrophic', category: 'vibes', confidence: 'certain',
     }],
-  })), /lineComments/);
+  }));
+  assert.equal(r.lineComments.length, 0);
 });
 
-test('parseReview rejects missing required comment fields', () => {
-  assert.throws(() => parseReview(JSON.stringify({
+test('parseReview drops comments missing required fields', () => {
+  const r = parseReview(JSON.stringify({
     summary: 's',
     verdict: 'COMMENT',
     lineComments: [{ file: 'a.ts', line: 5, type: 'note', body: 'b', severity: 'NIT' }],
-  })), /lineComments/);
+  }));
+  assert.equal(r.lineComments.length, 0);
 });
 
-test('parseReview rejects low-confidence issues and verdict mismatches', () => {
+test('parseReview downgrades low-confidence issues to suggestions instead of rejecting', () => {
   const issue = {
     file: 'a.ts', line: 5, type: 'issue', body: 'b', severity: 'major',
     category: 'correctness', confidence: 'low', rationale: 'The added branch returns null.',
   };
-  assert.throws(
-    () => parseReview(JSON.stringify({ summary: 's', verdict: 'REQUEST_CHANGES', lineComments: [issue] })),
-    /lineComments/,
-  );
-
-  const highConfidenceIssue = { ...issue, confidence: 'high' };
-  assert.throws(
-    () => parseReview(JSON.stringify({ summary: 's', verdict: 'APPROVE', lineComments: [highConfidenceIssue] })),
-    /verdict/,
-  );
+  const r = parseReview(JSON.stringify({ summary: 's', verdict: 'REQUEST_CHANGES', lineComments: [issue] }));
+  assert.equal(r.lineComments.length, 1);
+  assert.equal(r.lineComments[0].type, 'suggestion');
+  assert.equal(r.verdict, 'COMMENT');
 });
 
-test('parseReview rejects unexpected top-level and comment fields', () => {
-  assert.throws(
-    () => parseReview(JSON.stringify({ summary: 's', verdict: 'APPROVE', lineComments: [], extra: true })),
-    /top-level/,
-  );
-  assert.throws(
-    () => parseReview(JSON.stringify({
-      summary: 's',
-      verdict: 'COMMENT',
-      lineComments: [{
-        file: 'a.ts', line: 5, type: 'note', body: 'b', severity: 'minor',
-        category: 'tests', confidence: 'low', extra: true,
-      }],
-    })),
-    /lineComments/,
-  );
+test('parseReview self-heals a verdict/issue mismatch instead of rejecting', () => {
+  const highConfidenceIssue = {
+    file: 'a.ts', line: 5, type: 'issue', body: 'b', severity: 'major',
+    category: 'correctness', confidence: 'high', rationale: 'The added branch returns null.',
+  };
+  const r = parseReview(JSON.stringify({ summary: 's', verdict: 'APPROVE', lineComments: [highConfidenceIssue] }));
+  assert.equal(r.verdict, 'REQUEST_CHANGES');
+  assert.equal(r.lineComments[0].type, 'issue');
+});
+
+test('parseReview ignores unexpected top-level and comment fields instead of rejecting', () => {
+  const r1 = parseReview(JSON.stringify({ summary: 's', verdict: 'APPROVE', lineComments: [], extra: true }));
+  assert.equal(r1.verdict, 'APPROVE');
+
+  const r2 = parseReview(JSON.stringify({
+    summary: 's',
+    verdict: 'COMMENT',
+    lineComments: [{
+      file: 'a.ts', line: 5, type: 'note', body: 'b', severity: 'minor',
+      category: 'tests', confidence: 'low', extra: true,
+    }],
+  }));
+  assert.equal(r2.lineComments.length, 1);
+});
+
+test('parseReview truncates an over-long summary instead of rejecting', () => {
+  const longSummary = 's'.repeat(900);
+  const r = parseReview(JSON.stringify({ summary: longSummary, verdict: 'APPROVE', lineComments: [] }));
+  assert.equal(r.summary.length, 800);
+});
+
+test('parseReview collapses embedded newlines in a comment body instead of rejecting', () => {
+  const r = parseReview(JSON.stringify({
+    summary: 's',
+    verdict: 'COMMENT',
+    lineComments: [{
+      file: 'a.ts', line: 5, type: 'note', body: 'line one\nline two', severity: 'minor',
+      category: 'tests', confidence: 'medium',
+    }],
+  }));
+  assert.equal(r.lineComments.length, 1);
+  assert.equal(r.lineComments[0].body, 'line one line two');
 });

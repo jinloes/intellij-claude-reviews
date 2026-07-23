@@ -235,6 +235,8 @@ export interface GenerateReviewRequest {
   number: number
   owner: string
   repo: string
+  /** Optional batch-scoped diff; omitted for a normal full review. */
+  diff?: string
   /** Optional per-review override of the focus areas; falls back to the saved setting. */
   focusAreas?: string
   /** Optional per-review override of custom instructions; falls back to the saved setting. */

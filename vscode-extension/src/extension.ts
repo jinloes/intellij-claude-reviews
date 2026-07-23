@@ -841,7 +841,8 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
     try {
         const base = githubBaseUrl();
 
-        let diff = state.activeDiff;
+        const requestedDiff = typeof msg.diff === 'string' && msg.diff.trim() ? msg.diff : undefined;
+        let diff = requestedDiff ?? state.activeDiff;
         let validationDiff = state.activeValidationDiff;
         if (!diff) {
             const result = await sidecarClient.getPullRequestDiff(base, owner, repo, number, 'review');
@@ -915,6 +916,7 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
                 onChunk: (kind, chunk) => push(state, { type: 'reviewChunk', prKey: key, kind, chunk }),
             });
 
+        if (!result) throw new Error('Provider produced no output.');
         if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
         state.activeReviewResult = result;
         push(state, { type: 'reviewResult', prKey: key, result, diff, validationDiff });
@@ -966,10 +968,13 @@ async function handleSubmitReview(state: ViewState, msg: Record<string, unknown>
     const repo = msg.repo as string;
     const verdict = msg.verdict as string;
     const comment = msg.comment as string ?? '';
-    if (!number || !owner || !repo || !verdict || !state.pendingReviewId) return;
+    if (!number || !owner || !repo || !verdict) return;
     const key = prKeyFromParts(number, owner, repo);
-    if (prKey(state.activePR) !== key || state.pendingReviewKey !== key) {
-        push(state, { type: 'reviewSubmitError', prKey: key, message: 'The pending draft does not belong to the selected pull request.' });
+    // Always notify the webview when there is no usable draft to submit — the webview has
+    // already flipped into a "submitting" spinner state before sending this message, so a
+    // silent return here leaves the UI stuck forever with no way to recover.
+    if (prKey(state.activePR) !== key || state.pendingReviewKey !== key || !state.pendingReviewId) {
+        push(state, { type: 'reviewSubmitError', prKey: key, message: 'No pending draft review belongs to the selected pull request.' });
         return;
     }
     const reviewId = state.pendingReviewId;
@@ -997,9 +1002,11 @@ async function handleDeleteDraft(state: ViewState, msg: Record<string, unknown>)
     const number = msg.number as number;
     const owner = msg.owner as string;
     const repo = msg.repo as string;
-    if (!number || !owner || !repo || !state.pendingReviewId) return;
+    if (!number || !owner || !repo) return;
     const key = prKeyFromParts(number, owner, repo);
-    if (prKey(state.activePR) !== key || state.pendingReviewKey !== key) {
+    // Same reasoning as handleSubmitReview: the webview is already showing a "deleting"
+    // spinner, so any early exit here must push an error or the UI hangs forever.
+    if (prKey(state.activePR) !== key || state.pendingReviewKey !== key || !state.pendingReviewId) {
         push(state, { type: 'draftDeleteError', prKey: key, message: 'The pending draft does not belong to the selected pull request.' });
         return;
     }

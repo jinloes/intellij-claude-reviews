@@ -36,8 +36,8 @@ class IntellijClaudeServiceTest {
             String msg =
                     IntellijClaudeService.friendlyMessage(
                             ReviewProvider.CLAUDE,
-                            new IOException(
-                                    "Cannot run program \"claude\": error=2, No such file"));
+                            new IOException("Cannot run program \"claude\": error=2, No such file"),
+                            "generate review");
             assertThat(msg).contains("'claude'").contains("Claude Code");
         }
 
@@ -46,7 +46,8 @@ class IntellijClaudeServiceTest {
             String msg =
                     IntellijClaudeService.friendlyMessage(
                             ReviewProvider.COPILOT,
-                            new IOException("Cannot run program \"copilot\": error=2"));
+                            new IOException("Cannot run program \"copilot\": error=2"),
+                            "generate review");
             assertThat(msg).contains("'copilot'").contains("GitHub Copilot");
         }
 
@@ -54,8 +55,8 @@ class IntellijClaudeServiceTest {
         void blankMessageFallsBackToGeneric() {
             String msg =
                     IntellijClaudeService.friendlyMessage(
-                            ReviewProvider.CLAUDE, new IOException(""));
-            assertThat(msg).isEqualTo("Couldn't generate response. Please retry.");
+                            ReviewProvider.CLAUDE, new IOException(""), "generate review");
+            assertThat(msg).isEqualTo("Couldn't generate review. Please retry.");
         }
 
         @Test
@@ -63,8 +64,20 @@ class IntellijClaudeServiceTest {
             String msg =
                     IntellijClaudeService.friendlyMessage(
                             ReviewProvider.COPILOT,
-                            new IOException("Failed to parse review JSON: unexpected token"));
+                            new IOException("Failed to parse review JSON: unexpected token"),
+                            "generate review");
             assertThat(msg).contains("invalid review format").contains("Retry");
+        }
+
+        @Test
+        void chatFailureUsesChatOperation() {
+            String msg =
+                    IntellijClaudeService.friendlyMessage(
+                            ReviewProvider.CLAUDE,
+                            new IOException("opaque failure"),
+                            "answer chat question");
+
+            assertThat(msg).isEqualTo("Couldn't answer chat question. Please retry.");
         }
     }
 }

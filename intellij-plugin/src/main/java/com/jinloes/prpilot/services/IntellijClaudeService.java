@@ -85,6 +85,7 @@ public class IntellijClaudeService {
         BiConsumer<String, String> wrappedChunk = wrapChunkCallback(onChunk);
         runOnPooledThread(
                 settings.provider,
+                "generate review",
                 "Review interrupted.",
                 onError,
                 () ->
@@ -114,6 +115,7 @@ public class IntellijClaudeService {
         Consumer<String> wrappedChunk = wrapCallback(onChunk);
         runOnPooledThread(
                 settings.provider,
+                "answer chat question",
                 "Chat interrupted.",
                 onError,
                 () ->
@@ -146,6 +148,7 @@ public class IntellijClaudeService {
         Consumer<String> wrappedChunk = wrapCallback(onChunk);
         runOnPooledThread(
                 settings.provider,
+                "answer chat question",
                 "Chat interrupted.",
                 onError,
                 () ->
@@ -196,12 +199,14 @@ public class IntellijClaudeService {
 
     private static <T> void runOnPooledThread(
             ReviewProvider provider,
+            String operation,
             String interruptedMessage,
             Consumer<String> onError,
             CheckedSupplier<T> supplier,
             Consumer<T> onSuccess) {
         runOnPooledThread(
                 provider,
+                operation,
                 interruptedMessage,
                 onError,
                 () -> {
@@ -212,6 +217,7 @@ public class IntellijClaudeService {
 
     private static void runOnPooledThread(
             ReviewProvider provider,
+            String operation,
             String interruptedMessage,
             Consumer<String> onError,
             CheckedRunnable runnable) {
@@ -224,13 +230,16 @@ public class IntellijClaudeService {
                                 Thread.currentThread().interrupt();
                                 invokeLater(() -> onError.accept(interruptedMessage));
                             } catch (Exception e) {
-                                invokeLater(() -> onError.accept(friendlyMessage(provider, e)));
+                                invokeLater(
+                                        () ->
+                                                onError.accept(
+                                                        friendlyMessage(provider, e, operation)));
                             }
                         });
     }
 
-    static String friendlyMessage(ReviewProvider provider, Exception e) {
-        return UserFacingErrors.forProvider(provider, e, "generate response");
+    static String friendlyMessage(ReviewProvider provider, Exception e, String operation) {
+        return UserFacingErrors.forProvider(provider, e, operation);
     }
 
     static boolean resolveReviewInheritMcp(boolean inheritMcp, boolean forceMcpOnReview) {

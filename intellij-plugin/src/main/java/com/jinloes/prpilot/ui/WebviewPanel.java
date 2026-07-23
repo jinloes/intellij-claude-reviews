@@ -455,6 +455,7 @@ public class WebviewPanel implements Disposable {
                                 number,
                                 owner,
                                 repo,
+                                node.path("diff").asText(""),
                                 node.path("focusAreas").asText(""),
                                 node.path("customInstructions").asText(""));
                 case "cancelReview" -> activeReviewService.cancelCurrentRequest();
@@ -795,6 +796,7 @@ public class WebviewPanel implements Disposable {
             int number,
             String owner,
             String repo,
+            String overrideDiff,
             String overrideFocusAreas,
             String overrideCustomInstructions) {
         String key = bridgePrKey(number, owner, repo);
@@ -844,7 +846,9 @@ public class WebviewPanel implements Disposable {
 
                             // Reuse prefetched diff; fall back to live fetch only if stale.
                             String diff;
-                            if (StringUtils.isNotBlank(snapshotDiff)) {
+                            if (StringUtils.isNotBlank(overrideDiff)) {
+                                diff = overrideDiff;
+                            } else if (StringUtils.isNotBlank(snapshotDiff)) {
                                 diff = snapshotDiff;
                             } else {
                                 publishIfCurrent(
@@ -973,6 +977,18 @@ public class WebviewPanel implements Disposable {
                                             return;
                                         }
                                         activeReviewService = claudeService;
+                                        if (result == null) {
+                                            pushMessage(
+                                                    new ErrorMsg(
+                                                            "reviewError",
+                                                            key,
+                                                            UserFacingErrors.forProvider(
+                                                                    provider,
+                                                                    new Exception(
+                                                                            "Provider produced no output"),
+                                                                    "generate review")));
+                                            return;
+                                        }
                                         lastResult = result;
                                         pendingReviewId = null;
                                         pushMessage(
@@ -993,15 +1009,7 @@ public class WebviewPanel implements Disposable {
                                         String lower = err.toLowerCase(java.util.Locale.ROOT);
                                         if (!lower.contains("cancel")
                                                 && !lower.contains("interrupt")) {
-                                            pushMessage(
-                                                    new ErrorMsg(
-                                                            "reviewError",
-                                                            key,
-                                                            UserFacingErrors.forProvider(
-                                                                    PluginSettings.getInstance()
-                                                                            .getReviewProvider(),
-                                                                    new Exception(err),
-                                                                    "generate a review")));
+                                            pushMessage(new ErrorMsg("reviewError", key, err));
                                         }
                                     });
                         });
@@ -1210,14 +1218,7 @@ public class WebviewPanel implements Disposable {
                         if (!isCurrentSession(pr, chatRevision)) {
                             return;
                         }
-                        pushMessage(
-                                new ErrorMsg(
-                                        "chatError",
-                                        key,
-                                        UserFacingErrors.forProvider(
-                                                PluginSettings.getInstance().getReviewProvider(),
-                                                new Exception(err),
-                                                "answer chat question")));
+                        pushMessage(new ErrorMsg("chatError", key, err));
                     });
             return;
         }
@@ -1246,14 +1247,7 @@ public class WebviewPanel implements Disposable {
                     if (!isCurrentSession(pr, chatRevision)) {
                         return;
                     }
-                    pushMessage(
-                            new ErrorMsg(
-                                    "chatError",
-                                    key,
-                                    UserFacingErrors.forProvider(
-                                            PluginSettings.getInstance().getReviewProvider(),
-                                            new Exception(err),
-                                            "answer chat question")));
+                    pushMessage(new ErrorMsg("chatError", key, err));
                 });
     }
 

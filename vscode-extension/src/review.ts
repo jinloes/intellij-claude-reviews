@@ -5,54 +5,77 @@ const COMMENT_TYPES = ['issue', 'suggestion', 'note'] as const;
 const SEVERITIES = ['blocker', 'major', 'minor', 'nit'] as const;
 const CATEGORIES = ['correctness', 'security', 'performance', 'tests', 'maintainability'] as const;
 const CONFIDENCES = ['low', 'medium', 'high'] as const;
+const MAX_SUMMARY_CHARS = 800;
+const MAX_BODY_CHARS = 300;
+const MAX_RATIONALE_CHARS = 200;
+const MAX_LINE_COMMENTS = 20;
 
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-    const keys = Object.keys(value);
-    return keys.length === expected.length && keys.every((key) => expected.includes(key));
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
 }
 
-function isLineComment(value: unknown): value is LineComment {
-    if (typeof value !== 'object' || value === null) return false;
-    const c = value as Record<string, unknown>;
-    const type = c.type;
-    const expectedKeys = type === 'note'
-        ? ['file', 'line', 'type', 'severity', 'category', 'confidence', 'body']
-        : ['file', 'line', 'type', 'severity', 'category', 'confidence', 'rationale', 'body'];
-    return hasExactKeys(c, expectedKeys)
-        && typeof c.file === 'string' && c.file.length > 0
-        && typeof c.line === 'number'
-        && Number.isInteger(c.line) && c.line > 0
-        && typeof type === 'string' && (COMMENT_TYPES as readonly string[]).includes(type)
-        && typeof c.body === 'string'
-        && c.body.length > 0 && c.body.length <= 300 && !/[\r\n]/.test(c.body)
-        && typeof c.severity === 'string' && (SEVERITIES as readonly string[]).includes(c.severity)
-        && typeof c.category === 'string' && (CATEGORIES as readonly string[]).includes(c.category)
-        && typeof c.confidence === 'string' && (CONFIDENCES as readonly string[]).includes(c.confidence)
-        && !(type === 'issue' && c.confidence === 'low')
-        && (type === 'note'
-            || (typeof c.rationale === 'string' && c.rationale.length > 0 && c.rationale.length <= 200));
-}
+/**
+ * Validates and normalizes a single raw line comment, returning `undefined` when it is
+ * unsalvageable. A low-confidence "issue" is downgraded to "suggestion" instead of being
+ * dropped, matching the auto-repair already offered to users in the review-quality UI. Mirrors
+ * `ClaudeService.repairLineComment` in the Kotlin host.
+ */
+function repairLineComment(value: unknown): LineComment | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const c = value as Record<string, unknown>;
 
-function normalizeComment(value: LineComment): LineComment {
-    const c = value as unknown as Record<string, string>;
-    return {
-        file: value.file,
-        line: value.line,
-        type: value.type,
-        body: value.body,
-        severity: c.severity as Severity,
-        category: c.category as Category,
-        confidence: c.confidence as Confidence,
-        rationale: c.rationale,
-    };
+  const file = asString(c.file)?.trim();
+  if (!file) return undefined;
+
+  const line = typeof c.line === 'number' && Number.isInteger(c.line) && c.line > 0 ? c.line : undefined;
+  if (!line) return undefined;
+
+  const type = asString(c.type);
+  if (!type || !(COMMENT_TYPES as readonly string[]).includes(type)) return undefined;
+
+  let body = asString(c.body)?.replace(/[\r\n]+/g, ' ').trim();
+  if (!body) return undefined;
+  if (body.length > MAX_BODY_CHARS) body = body.slice(0, MAX_BODY_CHARS);
+
+  const severity = asString(c.severity);
+  if (!severity || !(SEVERITIES as readonly string[]).includes(severity)) return undefined;
+
+  const category = asString(c.category);
+  if (!category || !(CATEGORIES as readonly string[]).includes(category)) return undefined;
+
+  const confidence = asString(c.confidence);
+  if (!confidence || !(CONFIDENCES as readonly string[]).includes(confidence)) return undefined;
+
+  const effectiveType = type === 'issue' && confidence === 'low' ? 'suggestion' : type;
+
+  let rationale: string | undefined;
+  if (effectiveType !== 'note') {
+    rationale = asString(c.rationale)?.trim();
+    if (!rationale) return undefined;
+    if (rationale.length > MAX_RATIONALE_CHARS) rationale = rationale.slice(0, MAX_RATIONALE_CHARS);
+  }
+
+  return {
+    file,
+    line,
+    type: effectiveType as LineComment['type'],
+    body,
+    severity: severity as Severity,
+    category: category as Category,
+    confidence: confidence as Confidence,
+    rationale,
+  };
 }
 
 /**
  * Extracts and validates a {@link ReviewResult} from raw provider output (which may include
- * markdown fences or leading/trailing prose). Unlike a bare `JSON.parse(...) as ReviewResult`,
- * this enforces the schema so malformed-but-valid JSON fails here with a clear error instead of
- * crashing later in consumers like `buildCommentArray`. Mirrors the strict validation in the Kotlin
- * host.
+ * markdown fences or leading/trailing prose). Individual malformed line comments are dropped
+ * (and a low-confidence "issue" is downgraded to "suggestion") rather than failing the entire
+ * review — capable models occasionally emit one non-conforming comment among otherwise-valid
+ * output, and rejecting the whole review in that case throws away every other good comment to
+ * punish one bad one. The top-level shape (an object with a string "summary" and an array
+ * "lineComments") is still a hard requirement, since there is nothing to salvage without it.
+ * Mirrors the strict-then-lenient validation in the Kotlin host (`ClaudeService.parseReview`).
  */
 export function parseReview(raw: string): ReviewResult {
     let json = raw.trim();
@@ -73,25 +96,27 @@ export function parseReview(raw: string): ReviewResult {
     if (typeof obj.summary !== 'string') {
         throw new Error('review JSON missing string "summary"');
     }
-    if (obj.summary.length > 800) {
-        throw new Error('review JSON summary exceeds 800 characters');
+    const summary = obj.summary.length > MAX_SUMMARY_CHARS ? obj.summary.slice(0, MAX_SUMMARY_CHARS) : obj.summary;
+
+    const requestedVerdict = (VERDICTS as readonly string[]).includes(obj.verdict as string)
+        ? (obj.verdict as ReviewResult['verdict'])
+        : undefined;
+
+    const rawComments = Array.isArray(obj.lineComments) ? obj.lineComments : [];
+    const lineComments: LineComment[] = [];
+    for (const candidate of rawComments) {
+        if (lineComments.length >= MAX_LINE_COMMENTS) break;
+        const repaired = repairLineComment(candidate);
+        if (repaired) lineComments.push(repaired);
     }
-    if (!(VERDICTS as readonly string[]).includes(obj.verdict as string)) {
-        throw new Error('review JSON has invalid "verdict"');
-    }
-    if (!hasExactKeys(obj, ['summary', 'verdict', 'lineComments'])) {
-        throw new Error('review JSON has unexpected or missing top-level fields');
-    }
-    if (!Array.isArray(obj.lineComments) || obj.lineComments.length > 20 || !obj.lineComments.every(isLineComment)) {
-        throw new Error('review JSON has invalid "lineComments"');
-    }
-    const hasIssue = obj.lineComments.some((comment) => comment.type === 'issue');
-    if ((obj.verdict === 'REQUEST_CHANGES') !== hasIssue) {
-        throw new Error('review JSON verdict does not match issue comments');
-    }
-    return {
-        summary: obj.summary,
-        verdict: obj.verdict as ReviewResult['verdict'],
-        lineComments: obj.lineComments.map(normalizeComment),
-    };
+
+    const hasIssue = lineComments.some((comment) => comment.type === 'issue');
+    const verdict: ReviewResult['verdict'] =
+        requestedVerdict === 'REQUEST_CHANGES' && !hasIssue
+            ? 'COMMENT'
+            : requestedVerdict !== 'REQUEST_CHANGES' && hasIssue
+              ? 'REQUEST_CHANGES'
+              : (requestedVerdict ?? (hasIssue ? 'REQUEST_CHANGES' : 'COMMENT'));
+
+    return { summary, verdict, lineComments };
 }

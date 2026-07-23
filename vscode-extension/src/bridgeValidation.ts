@@ -2,6 +2,7 @@ type AnyMessage = { type?: unknown } & Record<string, unknown>;
 
 export const BRIDGE_PROTOCOL_VERSION = 1;
 const MAX_TEXT = 100_000;
+const MAX_REVIEW_DIFF = 1_100_000;
 const MAX_COMMENTS = 1_000;
 
 const MESSAGE_TYPES = new Set([
@@ -91,6 +92,7 @@ export function isValidBridgeRequest(msg: AnyMessage | null | undefined): msg is
       return hasValidPrIdentity(msg);
     case 'generateReview':
       return hasValidPrIdentity(msg)
+        && (msg.diff === undefined || isBoundedString(msg.diff, MAX_REVIEW_DIFF))
         && (msg.focusAreas === undefined || isBoundedString(msg.focusAreas, 10_000))
         && (msg.customInstructions === undefined || isBoundedString(msg.customInstructions, 20_000));
     case 'saveDraft':

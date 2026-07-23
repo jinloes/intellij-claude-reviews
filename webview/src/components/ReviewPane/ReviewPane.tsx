@@ -487,6 +487,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
                 number: activePr.number,
                 owner: activePr.owner,
                 repo: activePr.repo,
+                diff: nextBatch.diff,
                 focusAreas: chunkSession.focusAreas || undefined,
                 customInstructions: [
                   chunkSession.customInstructions,
@@ -889,6 +890,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
       number: currentPr.number,
       owner: currentPr.owner,
       repo: currentPr.repo,
+      diff: batch.diff,
       focusAreas: session.focusAreas || undefined,
       customInstructions: [
         session.customInstructions,

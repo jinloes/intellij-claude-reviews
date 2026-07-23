@@ -155,9 +155,27 @@ class WebviewPanelTest {
         void acceptsKnownMessageWithValidPrIdentity() throws Exception {
             var node =
                     MAPPER.readTree(
-                            "{\"protocolVersion\":1,\"type\":\"generateReview\",\"number\":7,\"owner\":\"acme\",\"repo\":\"platform\"}");
+                            "{\"protocolVersion\":1,\"type\":\"generateReview\",\"number\":7,\"owner\":\"acme\",\"repo\":\"platform\",\"diff\":\"diff --git a/a b/a\"}");
 
             assertThat(WebviewPanel.isValidIncomingMessage(node)).isTrue();
+        }
+
+        @Test
+        void rejectsInvalidOrOversizedReviewDiff() throws Exception {
+            var nonText =
+                    MAPPER.readTree(
+                            "{\"protocolVersion\":1,\"type\":\"generateReview\",\"number\":7,\"owner\":\"acme\",\"repo\":\"platform\",\"diff\":42}");
+            var oversized =
+                    MAPPER.createObjectNode()
+                            .put("protocolVersion", 1)
+                            .put("type", "generateReview")
+                            .put("number", 7)
+                            .put("owner", "acme")
+                            .put("repo", "platform")
+                            .put("diff", "x".repeat(1_100_001));
+
+            assertThat(WebviewPanel.isValidIncomingMessage(nonText)).isFalse();
+            assertThat(WebviewPanel.isValidIncomingMessage(oversized)).isFalse();
         }
 
         @Test
