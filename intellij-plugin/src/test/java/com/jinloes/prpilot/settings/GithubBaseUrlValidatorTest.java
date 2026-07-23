@@ -11,8 +11,6 @@ class GithubBaseUrlValidatorTest {
         assertThat(GithubBaseUrlValidator.normalize(" ")).isEqualTo("https://github.com");
         assertThat(GithubBaseUrlValidator.normalize(" https://GITHUB.EXAMPLE.COM/ "))
                 .isEqualTo("https://github.example.com");
-        assertThat(GithubBaseUrlValidator.normalize("https://github.example.com:8443///"))
-                .isEqualTo("https://github.example.com:8443");
     }
 
     @Test
@@ -37,6 +35,10 @@ class GithubBaseUrlValidatorTest {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> GithubBaseUrlValidator.normalize("https://github.example.com:"))
                 .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(
+                        () -> GithubBaseUrlValidator.normalize("https://github.example.com:8443"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("without credentials, a port");
         assertThatThrownBy(
                         () -> GithubBaseUrlValidator.normalize("https://github.example.com:65536"))
                 .isInstanceOf(IllegalArgumentException.class);

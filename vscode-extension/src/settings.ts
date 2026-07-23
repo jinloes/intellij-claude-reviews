@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import * as copilot from './copilot';
-import * as github from './github';
+import type { SidecarClient } from './sidecar';
 import {
     buildSettingsHtml,
     GITHUB_BASE_URL_ERROR,
@@ -12,16 +12,6 @@ import {
 } from './settingsView';
 
 let panel: vscode.WebviewPanel | undefined;
-
-interface GitHubAuthResult {
-    status: string;
-    username: string | null;
-    message: string;
-}
-
-export interface GitHubAuthSidecar {
-    checkGitHubAuth(githubBaseUrl: string): Promise<GitHubAuthResult | null>;
-}
 
 function config(): vscode.WorkspaceConfiguration {
     return vscode.workspace.getConfiguration('pr-pilot');
@@ -63,7 +53,7 @@ const BOOLEAN_KEYS = new Set([
 ]);
 
 /** Opens (or reveals) the PR Pilot settings webview panel. */
-export function openSettings(context: vscode.ExtensionContext, sidecar?: GitHubAuthSidecar): void {
+export function openSettings(context: vscode.ExtensionContext, sidecar: SidecarClient): void {
     if (panel) {
         panel.reveal();
         return;
@@ -182,22 +172,13 @@ export function openSettings(context: vscode.ExtensionContext, sidecar?: GitHubA
                     return;
                 }
                 try {
-                    const authResult = await sidecar?.checkGitHubAuth(baseUrl);
-                    if (authResult) {
-                        current.webview.postMessage({
-                            type: 'testResult',
-                            ok: authResult.status === 'authenticated',
-                            message: authResult.status === 'authenticated' && authResult.username
-                                ? `Signed in as @${authResult.username}.`
-                                : authResult.message,
-                        });
-                        return;
-                    }
-                    await github.resolveToken(baseUrl);
+                    const authResult = await sidecar.checkGitHubAuth(baseUrl);
                     current.webview.postMessage({
                         type: 'testResult',
-                        ok: true,
-                        message: 'gh authentication is available for this host.',
+                        ok: authResult.status === 'authenticated',
+                        message: authResult.status === 'authenticated' && authResult.username
+                            ? `Signed in as @${authResult.username}.`
+                            : authResult.message,
                     });
                 } catch (err) {
                     current.webview.postMessage({

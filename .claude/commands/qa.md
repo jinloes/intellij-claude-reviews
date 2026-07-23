@@ -31,17 +31,15 @@ If any command fails, capture the failing test name / lint rule / type error ver
 
 ## Phase 2 — IntelliJ ↔ VS Code sync audit
 
-CLAUDE.md lists pairs of files that must stay in lockstep. Spawn an Explore agent with this brief:
+AGENTS.md lists pairs of files that must stay in lockstep. Spawn an Explore agent with this brief:
 
-> Audit the IntelliJ↔VS Code sync table in CLAUDE.md (search for "## IntelliJ ↔ VS Code sync obligations"). For each row, read both files and check whether the named symbol/logic actually matches across hosts. Specifically verify:
+> Audit the IntelliJ↔VS Code sync table in AGENTS.md (search for "## IntelliJ <-> VS Code sync obligations"). For each row, read both files and check whether the named symbol/logic actually matches across hosts. Specifically verify:
 >
 > - `REVIEW_INSTRUCTIONS` and `CHAT_PERSONA` constants in `core/src/jvmMain/kotlin/com/jinloes/prpilot/services/ClaudeService.kt` vs `vscode-extension/src/claude.ts` — strings should be character-identical
 > - `buildPrompt` / `buildChatPrompt` / `buildFocusedChatPrompt` — same structure and template tags
 > - stream-json parsing — both hosts handle `result.subtype == "success"`, `is_error`, `session_id`, and the max-turns → resume recovery
-> - `encodeBody` / `decodeReview` / `buildCommentArray` / `effectiveBody` / `buildOrphanSection` in `core/src/commonMain/kotlin/com/jinloes/prpilot/services/GitHubService.kt` vs `vscode-extension/src/github.ts`
-> - GitHub API call shapes (endpoints, headers, 422 fallback flow)
-> - `searchPRs` query construction — JVM `PRToolWindowFactory.buildQuery` and TS `searchPRs` should produce equivalent `q=` strings
-> - `findGhBinary` known paths — same list on both sides
+> - GitHub API/query/repository/draft behavior exists only in `github-engine`; IntelliJ uses `IntellijGitHubService`, and VS Code uses `sidecar.ts` JSON-RPC without host-local fallback transport
+> - `github-engine` public capability/result changes are wired through `IntellijGitHubService.java`, `StdioJsonRpcServer.java`, and `vscode-extension/src/sidecar.ts`
 > - Webview bridge message shapes in `webview/src/bridge/types.ts` — verify both `WebviewPanel.java` and `vscode-extension/src/extension.ts` handle every `IncomingMessage` variant
 > - `PluginSettings` (JVM) vs `vscode-extension/package.json` contributes.configuration + reader in `extension.ts` — every setting present on one host should exist on the other (or have a documented reason not to)
 >
@@ -49,7 +47,7 @@ CLAUDE.md lists pairs of files that must stay in lockstep. Spawn an Explore agen
 
 ## Phase 3 — Test coverage on changed code
 
-CLAUDE.md mandates 100% branch coverage for new/modified non-UI methods. Using the diff from phase 1:
+AGENTS.md requires tests for new/modified non-UI methods. Using the diff from phase 1:
 
 - For each modified `.java` / `.kt` file outside `intellij-plugin/src/main/java/com/jinloes/prpilot/ui/` and outside the webview/vscode-extension TypeScript trees, check whether a corresponding test file under `core/src/jvmTest/` or `intellij-plugin/src/test/` was modified in the same diff.
 - Flag any non-UI source file changed without a matching test change.

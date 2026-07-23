@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { spawn, ChildProcess } from 'child_process';
-import type { ReviewResult, LineComment } from './github';
+import type { ReviewResult, LineComment } from './models';
 import { parseReview } from './review';
 
 export type { ReviewResult, LineComment };

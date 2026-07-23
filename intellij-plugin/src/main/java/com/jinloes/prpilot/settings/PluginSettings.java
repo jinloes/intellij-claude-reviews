@@ -5,7 +5,6 @@ import com.intellij.openapi.components.PersistentStateComponent;
 import com.intellij.openapi.components.State;
 import com.intellij.openapi.components.Storage;
 import com.jinloes.prpilot.model.ReviewProvider;
-import com.jinloes.prpilot.services.GitHubAuthService;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -15,9 +14,6 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
     public static class State {
         /** Base URL of GitHub instance, e.g. https://github.com or https://github.mycompany.com */
         public String githubBaseUrl = "https://github.com";
-
-        /** Cached display name of the authenticated user. */
-        public String githubUsername = "";
 
         /** Whether background PR notifications are enabled. */
         public boolean notificationsEnabled = false;
@@ -79,7 +75,6 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
     }
 
     private State myState = new State();
-    private final GitHubAuthService authService = new GitHubAuthService();
 
     public static PluginSettings getInstance() {
         return ApplicationManager.getApplication().getService(PluginSettings.class);
@@ -101,23 +96,6 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
 
     public void setGithubBaseUrl(String url) {
         myState.githubBaseUrl = GithubBaseUrlValidator.normalize(url);
-    }
-
-    /**
-     * Returns the REST API base URL derived from the GitHub base URL. github.com →
-     * https://api.github.com github.company.com → https://github.company.com/api/v3
-     */
-    public String getApiBaseUrl() {
-        String base = getGithubBaseUrl();
-        return base.equals("https://github.com") ? "https://api.github.com" : base + "/api/v3";
-    }
-
-    public String getGithubUsername() {
-        return myState.githubUsername != null ? myState.githubUsername : "";
-    }
-
-    public void setGithubUsername(String username) {
-        myState.githubUsername = username;
     }
 
     public boolean isNotificationsEnabled() {
@@ -232,54 +210,5 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
 
     public void setReviewCustomInstructions(String value) {
         myState.reviewCustomInstructions = value != null ? value.trim() : "";
-    }
-
-    /**
-     * Resolves the GitHub token via the local {@code gh} CLI. Returns {@code null} if the CLI is
-     * not installed or not authenticated.
-     */
-    public @Nullable String getGithubToken() {
-        try {
-            return authService.resolveToken(getGithubBaseUrl());
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    /** Returns true if {@code gh auth token} succeeds (i.e. the user is authenticated). */
-    public boolean isSignedIn() {
-        String token = getGithubToken();
-        return token != null && !token.isBlank();
-    }
-
-    /** Diagnosis result returned by {@link #diagnoseAuth()}. */
-    public enum AuthDiagnosis {
-        OK,
-        NOT_AUTHENTICATED,
-        NOT_INSTALLED,
-    }
-
-    /**
-     * Probes GitHub authentication and returns a fine-grained diagnosis so callers can surface
-     * actionable guidance instead of silently failing.
-     */
-    public AuthDiagnosis diagnoseAuth() {
-        try {
-            String token = authService.resolveToken(getGithubBaseUrl());
-            return org.apache.commons.lang3.StringUtils.isNotBlank(token)
-                    ? AuthDiagnosis.OK
-                    : AuthDiagnosis.NOT_AUTHENTICATED;
-        } catch (Exception e) {
-            return classifyAuthError(e);
-        }
-    }
-
-    /** Classifies an exception thrown by the auth service into a diagnosis reason. */
-    static AuthDiagnosis classifyAuthError(Exception e) {
-        String msg =
-                org.apache.commons.lang3.StringUtils.defaultString(e.getMessage()).toLowerCase();
-        return (msg.contains("no such file") || msg.contains("error=2"))
-                ? AuthDiagnosis.NOT_INSTALLED
-                : AuthDiagnosis.NOT_AUTHENTICATED;
     }
 }

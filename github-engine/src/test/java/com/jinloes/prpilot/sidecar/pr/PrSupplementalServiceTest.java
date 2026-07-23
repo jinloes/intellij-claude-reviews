@@ -18,7 +18,9 @@ class PrSupplementalServiceTest {
                 ok(
                         "{\"items\":[{\"number\":42,\"title\":\"Fix\","
                                 + "\"repository_url\":\"https://api.github.com/repos/acme/widgets\","
-                                + "\"user\":{\"login\":\"octo\"},\"html_url\":\"https://example/pr/42\"}]}"));
+                                + "\"user\":{\"login\":\"octo\"},"
+                                + "\"created_at\":\"2026-07-22T01:00:00Z\","
+                                + "\"html_url\":\"https://example/pr/42\"}]}"));
         PrSupplementalService service = service(client);
 
         PrSearchResult result =
@@ -52,6 +54,39 @@ class PrSupplementalServiceTest {
 
         assertThat(result.status()).isEqualTo("invalid_request");
         assertThat(tokenCalls[0]).isZero();
+    }
+
+    @Test
+    void rejectsMalformedSearchResponses() {
+        List<String> malformedBodies =
+                List.of(
+                        "{}",
+                        "{\"items\":{}}",
+                        "{\"items\":[{}]}",
+                        "{\"items\":[{\"number\":42,\"title\":\"Fix\","
+                                + "\"repository_url\":\"malformed\","
+                                + "\"user\":{\"login\":\"octo\"},"
+                                + "\"created_at\":\"2026-07-22T01:00:00Z\","
+                                + "\"html_url\":\"https://example/pr/42\"}]}",
+                        "{\"items\":[{\"number\":0,\"title\":\"Fix\","
+                                + "\"repository_url\":\"https://api.github.com/repos/acme/widgets\","
+                                + "\"user\":{\"login\":\"octo\"},"
+                                + "\"created_at\":\"2026-07-22T01:00:00Z\","
+                                + "\"html_url\":\"https://example/pr/42\"}]}");
+
+        for (String body : malformedBodies) {
+            FakeClient client = new FakeClient();
+            client.responses.add(ok(body));
+
+            PrSearchResult result =
+                    service(client)
+                            .search(
+                                    new PrSupplementalService.SearchParams(
+                                            "https://github.com", "is:pr", 50));
+
+            assertThat(result.status()).as(body).isEqualTo("api_failed");
+            assertThat(result.prs()).as(body).isEmpty();
+        }
     }
 
     @Test

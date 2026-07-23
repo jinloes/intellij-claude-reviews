@@ -66,31 +66,54 @@ public final class PrSupplementalService {
             return PrSearchResult.failure(failure.status(), failure.message(), limit);
         try {
             JsonNode items = mapper.readTree(response.body()).path("items");
+            if (!items.isArray()) {
+                return PrSearchResult.failure(
+                        "api_failed", "GitHub API response was invalid.", limit);
+            }
             List<PullRequestSummary> prs = new ArrayList<>();
-            if (items.isArray()) {
-                for (JsonNode item : items) {
-                    if (prs.size() > limit) break;
-                    String repositoryUrl = item.path("repository_url").asText("");
-                    String[] parts = repositoryUrl.split("/");
-                    String owner = parts.length >= 2 ? parts[parts.length - 2] : "";
-                    String repo = parts.length >= 1 ? parts[parts.length - 1] : "";
-                    prs.add(
-                            new PullRequestSummary(
-                                    item.path("number").asInt(),
-                                    item.path("title").asText(""),
-                                    owner,
-                                    repo,
-                                    item.path("user").path("login").asText(""),
-                                    item.path("created_at").asText(""),
-                                    item.path("html_url").asText(""),
-                                    item.path("draft").asBoolean(false)));
+            for (JsonNode item : items) {
+                if (prs.size() > limit) break;
+                PullRequestSummary pr = mapSearchItem(item);
+                if (pr == null) {
+                    return PrSearchResult.failure(
+                            "api_failed", "GitHub API response was invalid.", limit);
                 }
+                prs.add(pr);
             }
             boolean limited = prs.size() > limit;
             return PrSearchResult.success(limit, limited, prs.stream().limit(limit).toList());
         } catch (IOException exception) {
             return PrSearchResult.failure("api_failed", "GitHub API response was invalid.", limit);
         }
+    }
+
+    private PullRequestSummary mapSearchItem(JsonNode item) {
+        String repositoryUrl = item.path("repository_url").textValue();
+        String[] parts = repositoryUrl == null ? new String[0] : repositoryUrl.split("/");
+        if (parts.length < 2
+                || !SEGMENT.matcher(parts[parts.length - 2]).matches()
+                || !SEGMENT.matcher(parts[parts.length - 1]).matches()
+                || !item.path("number").canConvertToInt()
+                || item.path("number").intValue() < 1
+                || !item.path("title").isTextual()
+                || item.path("title").textValue().isBlank()
+                || !item.path("user").path("login").isTextual()
+                || item.path("user").path("login").textValue().isBlank()
+                || !item.path("created_at").isTextual()
+                || item.path("created_at").textValue().isBlank()
+                || !item.path("html_url").isTextual()
+                || item.path("html_url").textValue().isBlank()) {
+            return null;
+        }
+        return new PullRequestSummary(
+                item.path("number").intValue(),
+                item.path("title").textValue(),
+                parts[parts.length - 2],
+                parts[parts.length - 1],
+                item.path("user").path("login").textValue(),
+                item.path("created_at").textValue(),
+                item.path("html_url").textValue(),
+                item.path("draft").asBoolean(false));
     }
 
     public StarredReposResult starred(String githubBaseUrl) {

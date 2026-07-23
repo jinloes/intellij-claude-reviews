@@ -45,11 +45,18 @@ public class PluginSettingsConfigurable implements Configurable {
     @Override
     public void apply() throws ConfigurationException {
         PluginSettings s = PluginSettings.getInstance();
+        String githubBaseUrl;
         try {
-            s.setGithubBaseUrl(GithubBaseUrlValidator.normalize(component.getGithubBaseUrl()));
+            githubBaseUrl = GithubBaseUrlValidator.normalize(component.getGithubBaseUrl());
         } catch (IllegalArgumentException e) {
             throw new ConfigurationException(e.getMessage(), "Invalid GitHub base URL");
         }
+        boolean notificationScopeChanged =
+                !githubBaseUrl.equals(s.getGithubBaseUrl())
+                        || component.isNotificationsEnabled() != s.isNotificationsEnabled()
+                        || component.isNotifyReviewRequested() != s.isNotifyReviewRequested()
+                        || component.isNotifyStarredRepos() != s.isNotifyStarredRepos();
+        s.setGithubBaseUrl(githubBaseUrl);
         s.setNotificationsEnabled(component.isNotificationsEnabled());
         s.setNotifyReviewRequested(component.isNotifyReviewRequested());
         s.setNotifyStarredRepos(component.isNotifyStarredRepos());
@@ -66,6 +73,7 @@ public class PluginSettingsConfigurable implements Configurable {
 
         // Restart/stop polling to reflect the new settings immediately
         PRNotificationService svc = PRNotificationService.getInstance();
+        if (notificationScopeChanged) svc.resetSeenState();
         if (s.isNotificationsEnabled()) {
             svc.startPolling(s.getNotificationPollMinutes());
         } else {

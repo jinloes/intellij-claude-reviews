@@ -7,7 +7,7 @@ import {
     type PermissionHandler,
     type PermissionRequestResult,
 } from '@github/copilot-sdk';
-import type { ReviewResult, LineComment } from './github';
+import type { ReviewResult, LineComment } from './models';
 import type { ChatMessage, PR } from './claude';
 import { buildPrompt, buildChatPrompt, buildFocusedChatPrompt, existsOnPath } from './claude';
 import { parseReview } from './review';

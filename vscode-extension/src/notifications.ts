@@ -1,4 +1,4 @@
-import type { PR } from './github';
+import type { PR } from './models';
 
 /** Provenance of a background PR notification, surfaced so the source is unambiguous. */
 export type NotifySource = 'reviewRequested' | 'starredRepo';

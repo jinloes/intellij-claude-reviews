@@ -2,8 +2,21 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 
-const REQUEST_TIMEOUT_MS = 5_000;
+const REQUEST_TIMEOUT_MS = 60_000;
 const HEADER_TERMINATOR = '\r\n\r\n';
+const SIDECAR_PROTOCOL_VERSION = 1;
+const REQUIRED_CAPABILITIES = [
+    'githubAuth',
+    'prDetail',
+    'prDiff',
+    'prList',
+    'repoDetect',
+    'draftReview',
+    'draftReviewMutations',
+    'prSearch',
+    'starredRepos',
+    'existingReviews',
+] as const;
 
 interface PendingRequest {
     resolve: (value: unknown) => void;
@@ -11,9 +24,23 @@ interface PendingRequest {
 }
 
 interface SidecarRpcResponse {
+    jsonrpc?: string;
     id?: number;
     result?: unknown;
-    error?: { message?: string };
+    error?: { code?: number; message?: string };
+}
+
+export type SidecarSpawn = (
+    command: string,
+    args: string[],
+    options: { stdio: ['pipe', 'pipe', 'pipe'] },
+) => ChildProcessWithoutNullStreams;
+
+export interface SidecarInitializeResult {
+    serviceName: string;
+    serviceVersion: string;
+    protocolVersion: number;
+    capabilities: Record<string, boolean>;
 }
 
 export interface SidecarGitHubAuthResult {
@@ -202,6 +229,25 @@ export function parseGitHubAuthResult(value: unknown): SidecarGitHubAuthResult |
         status: result.status as SidecarGitHubAuthResult['status'],
         username: typeof result.username === 'string' ? result.username : null,
         message: result.message,
+    };
+}
+
+export function parseInitializeResult(value: unknown): SidecarInitializeResult | null {
+    if (!value || typeof value !== 'object') return null;
+    const result = value as Record<string, unknown>;
+    if (result.serviceName !== 'pr-pilot-sidecar'
+        || typeof result.serviceVersion !== 'string'
+        || !Number.isInteger(result.protocolVersion)
+        || !result.capabilities
+        || typeof result.capabilities !== 'object'
+        || Array.isArray(result.capabilities)) return null;
+    const capabilities = result.capabilities as Record<string, unknown>;
+    if (Object.values(capabilities).some((enabled) => typeof enabled !== 'boolean')) return null;
+    return {
+        serviceName: result.serviceName,
+        serviceVersion: result.serviceVersion,
+        protocolVersion: result.protocolVersion as number,
+        capabilities: capabilities as Record<string, boolean>,
     };
 }
 
@@ -478,11 +524,10 @@ export function extractFrames(buffer: Uint8Array, onFrame: (body: string) => voi
         const header = remaining.subarray(0, headerEnd).toString('ascii');
         const match = /Content-Length:\s*(\d+)/i.exec(header);
         if (!match) {
-            // Unparseable header — drop it rather than spin forever on garbage input.
-            return Buffer.alloc(0);
+            throw new Error('Sidecar sent an invalid Content-Length header');
         }
         const length = parseInt(match[1], 10);
-        if (length > 8 * 1024 * 1024) return Buffer.alloc(0);
+        if (length > 8 * 1024 * 1024) throw new Error('Sidecar response exceeds the maximum size');
         const bodyStart = headerEnd + HEADER_TERMINATOR.length;
         if (remaining.length < bodyStart + length) return remaining;
         onFrame(remaining.subarray(bodyStart, bodyStart + length).toString('utf8'));
@@ -490,53 +535,109 @@ export function extractFrames(buffer: Uint8Array, onFrame: (body: string) => voi
     }
 }
 
-/**
- * Best-effort client for the optional pr-pilot Java sidecar process. Speaks the same
- * Content-Length-framed JSON-RPC protocol as StdioFrameCodec/StdioJsonRpcServer (sidecar
- * module). The sidecar reduces logic duplication between hosts (e.g. PR search query
- * construction) but is never a hard dependency: every public method resolves to `null`
- * instead of throwing when the process can't be spawned, times out, or errors, so callers
- * always have a local TypeScript fallback path.
- */
+/** Required transport to the shared Java GitHub engine used by the VS Code host. */
 export class SidecarClient {
     private child: ChildProcessWithoutNullStreams | null = null;
-    private startFailed = false;
+    private startupFailure: Error | null = null;
+    private readyPromise: Promise<void> | null = null;
+    private disposed = false;
     private nextId = 1;
     private readonly pending = new Map<number, PendingRequest>();
     private buffer: Buffer = Buffer.alloc(0);
+    private stderr = '';
 
     constructor(
         private readonly jarPath: string | null,
         private readonly javaBinary = 'java',
+        private readonly spawnSidecar: SidecarSpawn = spawn,
+        private readonly requestTimeoutMs = REQUEST_TIMEOUT_MS,
     ) {}
 
-    private ensureStarted(): boolean {
-        if (this.startFailed) return false;
-        if (this.child) return true;
+    async initialize(): Promise<void> {
+        if (this.disposed) throw new Error('PR Pilot Java sidecar has been disposed. Reload VS Code.');
+        if (this.startupFailure) throw this.startupFailure;
+        if (this.readyPromise) return this.readyPromise;
+        this.ensureStarted();
+        this.readyPromise = this.requestRaw('initialize', {}).then((value) => {
+            const result = parseInitializeResult(value);
+            if (!result) throw new Error('PR Pilot Java sidecar returned an invalid initialization response.');
+            if (result.protocolVersion !== SIDECAR_PROTOCOL_VERSION) {
+                throw new Error(
+                    `PR Pilot Java sidecar protocol mismatch (expected ${SIDECAR_PROTOCOL_VERSION}, got ${result.protocolVersion}). Reinstall the extension.`,
+                );
+            }
+            const missing = REQUIRED_CAPABILITIES.filter((capability) => result.capabilities[capability] !== true);
+            if (missing.length > 0) {
+                throw new Error(`PR Pilot Java sidecar is missing required capabilities: ${missing.join(', ')}. Reinstall the extension.`);
+            }
+        }).catch((err: unknown) => {
+            const failure = err instanceof Error ? err : new Error(String(err));
+            this.startupFailure = failure;
+            this.stopChild();
+            throw failure;
+        });
+        return this.readyPromise;
+    }
+
+    private ensureStarted(): void {
+        if (this.disposed) throw new Error('PR Pilot Java sidecar has been disposed. Reload VS Code.');
+        if (this.startupFailure) throw this.startupFailure;
+        if (this.child) return;
         if (!this.jarPath) {
-            this.startFailed = true;
-            return false;
+            throw new Error(
+                'PR Pilot Java sidecar is missing. Reinstall the extension or run ./gradlew :sidecar:bootJar for local development.',
+            );
+        }
+        if (!fs.existsSync(this.jarPath)) {
+            throw new Error(`PR Pilot Java sidecar was not found at ${this.jarPath}. Reinstall the extension.`);
         }
         try {
-            const child = spawn(this.javaBinary, ['-jar', this.jarPath], { stdio: ['pipe', 'pipe', 'pipe'] });
-            child.on('error', () => this.failAllPending(new Error('Sidecar process failed to start')));
-            child.on('exit', () => {
-                this.child = null;
-                this.failAllPending(new Error('Sidecar process exited'));
+            const child = this.spawnSidecar(
+                this.javaBinary,
+                ['-jar', this.jarPath],
+                { stdio: ['pipe', 'pipe', 'pipe'] },
+            );
+            child.on('error', (err: NodeJS.ErrnoException) => {
+                if (this.disposed) return;
+                const failure = err.code === 'ENOENT'
+                    ? new Error('Java was not found. Install Java 17 or newer and ensure java is on PATH.')
+                    : new Error(`PR Pilot Java sidecar failed to start: ${err.message}`);
+                this.startupFailure ??= failure;
+                if (this.child === child) this.child = null;
+                this.failAllPending(this.startupFailure);
+            });
+            child.on('exit', (code, signal) => {
+                if (this.child === child) this.child = null;
+                if (this.disposed) return;
+                this.startupFailure ??= this.processExitError(code, signal);
+                this.failAllPending(this.startupFailure);
             });
             child.stdout.on('data', (chunk: Buffer) => this.onData(chunk));
-            // Diagnostics only; the sidecar never writes protocol frames to stderr.
-            child.stderr.on('data', () => { /* intentionally ignored */ });
+            child.stderr.on('data', (chunk: Buffer) => {
+                this.stderr = (this.stderr + chunk.toString('utf8')).slice(-4_096);
+            });
             this.child = child;
-            return true;
-        } catch {
-            this.startFailed = true;
-            return false;
+        } catch (err) {
+            const failure = err instanceof Error
+                ? new Error(`PR Pilot Java sidecar failed to start: ${err.message}`)
+                : new Error('PR Pilot Java sidecar failed to start.');
+            this.startupFailure = failure;
+            throw failure;
         }
     }
 
     private onData(chunk: Buffer): void {
-        this.buffer = extractFrames(Buffer.concat([this.buffer, chunk]), (body) => this.handleMessage(body));
+        try {
+            this.buffer = extractFrames(
+                Buffer.concat([this.buffer, chunk]),
+                (body) => this.handleMessage(body),
+            );
+        } catch (err) {
+            const failure = err instanceof Error ? err : new Error(String(err));
+            this.startupFailure = failure;
+            this.failAllPending(failure);
+            this.stopChild();
+        }
     }
 
     private handleMessage(body: string): void {
@@ -544,13 +645,19 @@ export class SidecarClient {
         try {
             message = JSON.parse(body) as SidecarRpcResponse;
         } catch {
+            const failure = new Error('PR Pilot Java sidecar sent malformed JSON.');
+            this.startupFailure = failure;
+            this.failAllPending(failure);
+            this.stopChild();
             return;
         }
         if (typeof message.id !== 'number') return;
         const pending = this.pending.get(message.id);
         if (!pending) return;
         this.pending.delete(message.id);
-        if (message.error) {
+        if (message.jsonrpc !== '2.0' || (message.error === undefined) === (message.result === undefined)) {
+            pending.reject(new Error('PR Pilot Java sidecar returned a malformed JSON-RPC response.'));
+        } else if (message.error) {
             pending.reject(new Error(message.error.message ?? 'Sidecar error'));
         } else {
             pending.resolve(message.result);
@@ -562,15 +669,24 @@ export class SidecarClient {
         this.pending.clear();
     }
 
-    private request(method: string, params: unknown): Promise<unknown> {
-        if (!this.ensureStarted() || !this.child) return Promise.reject(new Error('Sidecar unavailable'));
-        const id = this.nextId++;
+    private async request(method: string, params: unknown): Promise<unknown> {
+        await this.initialize();
+        return this.requestRaw(method, params);
+    }
+
+    private requestRaw(method: string, params: unknown): Promise<unknown> {
         const child = this.child;
+        if (!child) return Promise.reject(this.startupFailure ?? new Error('PR Pilot Java sidecar is not running.'));
+        const id = this.nextId++;
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
-                this.pending.delete(id);
-                reject(new Error(`Sidecar request "${method}" timed out`));
-            }, REQUEST_TIMEOUT_MS);
+                const failure = new Error(
+                    `PR Pilot Java sidecar request "${method}" timed out. Reload VS Code to restart PR Pilot.`,
+                );
+                this.startupFailure = failure;
+                this.failAllPending(failure);
+                this.stopChild();
+            }, this.requestTimeoutMs);
             this.pending.set(id, {
                 resolve: (value) => { clearTimeout(timer); resolve(value); },
                 reject: (err) => { clearTimeout(timer); reject(err); },
@@ -585,123 +701,76 @@ export class SidecarClient {
         });
     }
 
-    /**
-     * Builds a GitHub PR search query via the sidecar's pure `pr/buildSearchQuery` capability
-     * (mirrors PrSearchQueryService). Resolves to `null` on any failure — spawn failure, missing
-     * `java`, timeout, or a malformed response — so the caller falls back to the local
-     * `buildPRSearchQuery` implementation in github.ts.
-     */
-    async buildSearchQuery(state: string, searchScope: string, currentRepo?: string): Promise<string | null> {
-        try {
-            const result = (await this.request('pr/buildSearchQuery', {
-                state,
-                searchScope,
-                ...(currentRepo ? { currentRepo } : {}),
-            })) as { query?: string } | undefined;
-            return typeof result?.query === 'string' ? result.query : null;
-        } catch {
-            return null;
-        }
+    async buildSearchQuery(state: string, searchScope: string, currentRepo?: string): Promise<string> {
+        const result = (await this.request('pr/buildSearchQuery', {
+            state,
+            searchScope,
+            ...(currentRepo ? { currentRepo } : {}),
+        })) as { query?: string } | undefined;
+        if (typeof result?.query !== 'string') throw this.invalidResponse('PR search query');
+        return result.query;
     }
 
-    /**
-     * Detects the owner/repo for `path` via the sidecar's `repo/detect` capability (mirrors
-     * RepoDetector, which additionally understands linked-worktree `.git` files that the local
-     * TypeScript `detectCurrentRepo` does not). Resolves to `null` on any failure — spawn
-     * failure, missing `java`, timeout, malformed response, or any non-`found` detection status
-     * — so the caller falls back to the local `detectCurrentRepo` implementation in github.ts.
-     */
+    /** Returns null only when the shared detector reports that no repository was found. */
     async detectRepo(path: string): Promise<string | null> {
-        try {
-            const result = (await this.request('repo/detect', { path })) as
-                | { status?: string; repository?: { owner?: string; repo?: string } }
-                | undefined;
-            if (result?.status !== 'found') return null;
-            const owner = result.repository?.owner;
-            const repo = result.repository?.repo;
-            return owner && repo ? `${owner}/${repo}` : null;
-        } catch {
-            return null;
-        }
+        const result = (await this.request('repo/detect', { path })) as
+            | { status?: string; repository?: { owner?: string; repo?: string } | null }
+            | undefined;
+        if (typeof result?.status !== 'string') throw this.invalidResponse('repository detection');
+        if (result.status !== 'found') return null;
+        const owner = result.repository?.owner;
+        const repo = result.repository?.repo;
+        if (!owner || !repo) throw this.invalidResponse('repository detection');
+        return `${owner}/${repo}`;
     }
 
-    /**
-     * Verifies GitHub CLI credentials and the GitHub API via `github/checkAuth`. The sidecar
-     * never returns the token. Resolves to `null` on any transport or response-shape failure so
-     * settings can retain their local `gh auth token` fallback.
-     */
-    async checkGitHubAuth(githubBaseUrl: string): Promise<SidecarGitHubAuthResult | null> {
-        try {
-            return parseGitHubAuthResult(await this.request('github/checkAuth', { githubBaseUrl }));
-        } catch {
-            return null;
-        }
+    /** Verifies GitHub CLI credentials without returning the token to the extension. */
+    async checkGitHubAuth(githubBaseUrl: string): Promise<SidecarGitHubAuthResult> {
+        return this.parseResult(
+            'GitHub authentication',
+            parseGitHubAuthResult,
+            await this.request('github/checkAuth', { githubBaseUrl }),
+        );
     }
 
-    /**
-     * Lists pull requests through the sidecar without returning a GitHub token to the extension.
-     * Resolves to null only on transport or response-shape failures, leaving callers free to use
-     * the local TypeScript implementation; valid domain failures are returned as-is.
-     */
+    /** Lists pull requests without returning a GitHub token to the extension. */
     async listPullRequests(
         githubBaseUrl: string,
         state: string,
         searchScope: string,
         currentRepo?: string,
-    ): Promise<SidecarPrListResult | null> {
-        try {
-            return parsePrListResult(await this.request('prs/list', {
-                githubBaseUrl,
-                state,
-                searchScope,
-                ...(currentRepo ? { currentRepo } : {}),
-            }));
-        } catch {
-            return null;
-        }
+    ): Promise<SidecarPrListResult> {
+        return this.parseResult('PR list', parsePrListResult, await this.request('prs/list', {
+            githubBaseUrl,
+            state,
+            searchScope,
+            ...(currentRepo ? { currentRepo } : {}),
+        }));
     }
 
     async searchPullRequests(
         githubBaseUrl: string,
         query: string,
         limit: number,
-    ): Promise<SidecarPrSearchResult | null> {
-        try {
-            return parsePrSearchResult(await this.request('prs/search', { githubBaseUrl, query, limit }));
-        } catch {
-            return null;
-        }
+    ): Promise<SidecarPrSearchResult> {
+        return this.parseResult('PR search', parsePrSearchResult,
+            await this.request('prs/search', { githubBaseUrl, query, limit }));
     }
 
-    async listStarredRepositories(githubBaseUrl: string): Promise<SidecarStarredReposResult | null> {
-        try {
-            return parseStarredReposResult(await this.request('repos/listStarred', { githubBaseUrl }));
-        } catch {
-            return null;
-        }
+    async listStarredRepositories(githubBaseUrl: string): Promise<SidecarStarredReposResult> {
+        return this.parseResult('starred repositories', parseStarredReposResult,
+            await this.request('repos/listStarred', { githubBaseUrl }));
     }
 
-    /**
-     * Retrieves PR metadata through the sidecar without returning a GitHub token to the extension.
-     * Resolves to null only for transport or response-shape failures so callers retain local
-     * fallback behavior; valid domain failures are returned as-is.
-     */
+    /** Retrieves PR metadata without returning a GitHub token to the extension. */
     async getPullRequestDetail(
         githubBaseUrl: string,
         owner: string,
         repo: string,
         number: number,
-    ): Promise<SidecarPrDetailResult | null> {
-        try {
-            return parsePrDetailResult(await this.request('prs/getDetail', {
-                githubBaseUrl,
-                owner,
-                repo,
-                number,
-            }));
-        } catch {
-            return null;
-        }
+    ): Promise<SidecarPrDetailResult> {
+        return this.parseResult('PR detail', parsePrDetailResult,
+            await this.request('prs/getDetail', { githubBaseUrl, owner, repo, number }));
     }
 
     async getPullRequestDiff(
@@ -710,9 +779,9 @@ export class SidecarClient {
         repo: string,
         number: number,
         mode: 'review' | 'validation' = 'review',
-    ): Promise<SidecarPrDiffResult | null> {
-        try { return parsePrDiffResult(await this.request('prs/getDiff', { githubBaseUrl, owner, repo, number, mode })); }
-        catch { return null; }
+    ): Promise<SidecarPrDiffResult> {
+        return this.parseResult('PR diff', parsePrDiffResult,
+            await this.request('prs/getDiff', { githubBaseUrl, owner, repo, number, mode }));
     }
 
     async getExistingReviews(
@@ -720,48 +789,23 @@ export class SidecarClient {
         owner: string,
         repo: string,
         number: number,
-    ): Promise<SidecarExistingReviewsResult | null> {
-        try {
-            return parseExistingReviewsResult(await this.request('prs/getExistingReviews', {
-                githubBaseUrl,
-                owner,
-                repo,
-                number,
-            }));
-        } catch {
-            return null;
-        }
+    ): Promise<SidecarExistingReviewsResult> {
+        return this.parseResult('existing reviews', parseExistingReviewsResult,
+            await this.request('prs/getExistingReviews', { githubBaseUrl, owner, repo, number }));
     }
 
-    /**
-     * Loads the PENDING review draft (if any) for a PR through the sidecar without returning a
-     * GitHub token to the extension. Resolves to null only for transport or response-shape
-     * failures so callers retain local fallback behavior; valid domain outcomes (including
-     * `none`, meaning no draft exists) are returned as-is.
-     */
+    /** Loads a pending review; `none` is a valid domain outcome. */
     async getDraftReview(
         githubBaseUrl: string,
         owner: string,
         repo: string,
         number: number,
-    ): Promise<SidecarDraftReviewResult | null> {
-        try {
-            return parseDraftReviewResult(await this.request('prs/getDraftReview', {
-                githubBaseUrl,
-                owner,
-                repo,
-                number,
-            }));
-        } catch {
-            return null;
-        }
+    ): Promise<SidecarDraftReviewResult> {
+        return this.parseResult('draft review', parseDraftReviewResult,
+            await this.request('prs/getDraftReview', { githubBaseUrl, owner, repo, number }));
     }
 
-    /**
-     * Saves a pending (draft) review through the sidecar without returning a GitHub token to the
-     * extension. Resolves to null only for transport or response-shape failures so callers retain
-     * local fallback behavior; valid domain outcomes (including failures) are returned as-is.
-     */
+    /** Saves a pending review without returning a GitHub token to the extension. */
     async saveDraftReview(
         githubBaseUrl: string,
         owner: string,
@@ -771,27 +815,14 @@ export class SidecarClient {
         verdict: string,
         lineComments: SidecarCommentInput[],
         orphans: SidecarCommentInput[],
-    ): Promise<SidecarDraftReviewMutationResult | null> {
-        try {
-            return parseDraftReviewMutationResult(await this.request('prs/saveDraftReview', {
-                githubBaseUrl,
-                owner,
-                repo,
-                number,
-                summary,
-                verdict,
-                lineComments,
-                orphans,
+    ): Promise<SidecarDraftReviewMutationResult> {
+        return this.parseResult('save draft review', parseDraftReviewMutationResult,
+            await this.request('prs/saveDraftReview', {
+                githubBaseUrl, owner, repo, number, summary, verdict, lineComments, orphans,
             }));
-        } catch {
-            return null;
-        }
     }
 
-    /**
-     * Submits (publishes) a pending review through the sidecar without returning a GitHub token
-     * to the extension. Resolves to null only for transport or response-shape failures.
-     */
+    /** Submits a pending review without returning a GitHub token to the extension. */
     async submitReview(
         githubBaseUrl: string,
         owner: string,
@@ -800,62 +831,73 @@ export class SidecarClient {
         reviewId: string,
         event: string,
         body: string,
-    ): Promise<SidecarDraftReviewMutationResult | null> {
-        try {
-            return parseDraftReviewMutationResult(await this.request('prs/submitReview', {
-                githubBaseUrl,
-                owner,
-                repo,
-                number,
-                reviewId,
-                event,
-                body,
+    ): Promise<SidecarDraftReviewMutationResult> {
+        return this.parseResult('submit review', parseDraftReviewMutationResult,
+            await this.request('prs/submitReview', {
+                githubBaseUrl, owner, repo, number, reviewId, event, body,
             }));
-        } catch {
-            return null;
-        }
     }
 
-    /**
-     * Deletes a pending review through the sidecar without returning a GitHub token to the
-     * extension. Resolves to null only for transport or response-shape failures.
-     */
+    /** Deletes a pending review without returning a GitHub token to the extension. */
     async deleteDraftReview(
         githubBaseUrl: string,
         owner: string,
         repo: string,
         number: number,
         reviewId: string,
-    ): Promise<SidecarDraftReviewMutationResult | null> {
-        try {
-            return parseDraftReviewMutationResult(await this.request('prs/deleteDraftReview', {
-                githubBaseUrl,
-                owner,
-                repo,
-                number,
-                reviewId,
+    ): Promise<SidecarDraftReviewMutationResult> {
+        return this.parseResult('delete draft review', parseDraftReviewMutationResult,
+            await this.request('prs/deleteDraftReview', {
+                githubBaseUrl, owner, repo, number, reviewId,
             }));
-        } catch {
-            return null;
-        }
     }
 
-    dispose(): void {
+    private parseResult<T>(description: string, parser: (value: unknown) => T | null, value: unknown): T {
+        const result = parser(value);
+        if (!result) throw this.invalidResponse(description);
+        return result;
+    }
+
+    private invalidResponse(description: string): Error {
+        return new Error(`PR Pilot Java sidecar returned an invalid ${description} response.`);
+    }
+
+    private processExitError(code: number | null, signal: NodeJS.Signals | null): Error {
+        const diagnostics = this.stderr.trim();
+        if (/UnsupportedClassVersionError|class file version/i.test(diagnostics)) {
+            return new Error('PR Pilot requires Java 17 or newer. Update Java and reload VS Code.');
+        }
+        if (/Unable to access jarfile|Invalid or corrupt jarfile/i.test(diagnostics)) {
+            return new Error('PR Pilot Java sidecar could not be opened. Reinstall the extension.');
+        }
+        const reason = signal ? `signal ${signal}` : `exit code ${code ?? 'unknown'}`;
+        const diagnosticLines = diagnostics.split(/\r?\n/);
+        const detail = diagnostics ? ` ${diagnosticLines[diagnosticLines.length - 1]}` : '';
+        return new Error(`PR Pilot Java sidecar exited unexpectedly (${reason}).${detail}`);
+    }
+
+    private stopChild(): void {
         const child = this.child;
         this.child = null;
         if (child) {
             child.stdin.end();
             child.kill();
         }
-        this.failAllPending(new Error('Sidecar disposed'));
+    }
+
+    dispose(): void {
+        if (this.disposed) return;
+        this.disposed = true;
+        this.stopChild();
+        this.failAllPending(new Error('PR Pilot Java sidecar has been disposed.'));
     }
 }
 
 /**
  * Resolves the sidecar jar to spawn: the packaged copy staged alongside the extension by
  * `scripts/stage-sidecar.mjs` (release/`.vsix` builds), falling back to the sibling Gradle
- * module's `build/libs` bootJar output for local development. Returns `null` (never throws)
- * when no jar can be found, matching resolveWebviewDistPath's dev/packaged fallback shape.
+ * module's `build/libs` bootJar output for local development. Returns `null` when no jar can be
+ * found so the client can surface an actionable installation error on first use.
  */
 export function resolveSidecarJarPath(
     extensionRoot: string,

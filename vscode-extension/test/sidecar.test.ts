@@ -1,21 +1,101 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import * as path from 'path';
+import { PassThrough } from 'node:stream';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
 import {
+  SidecarClient,
   encodeFrame,
   extractFrames,
   parseDraftReviewMutationResult,
   parseDraftReviewResult,
   parseExistingReviewsResult,
   parseGitHubAuthResult,
+  parseInitializeResult,
   parsePrDetailResult,
   parsePrDiffResult,
   parsePrListResult,
   parsePrSearchResult,
   parseStarredReposResult,
   resolveSidecarJarPath,
+  type SidecarSpawn,
 } from '../src/sidecar';
+
+const tempRoot = mkdtempSync(path.join(tmpdir(), 'pr-pilot-sidecar-test-'));
+const fakeJar = path.join(tempRoot, 'pr-pilot-sidecar.jar');
+writeFileSync(fakeJar, 'test');
+after(() => rmSync(tempRoot, { recursive: true, force: true }));
+
+const initializeResult = {
+  serviceName: 'pr-pilot-sidecar',
+  serviceVersion: '0.1.0',
+  protocolVersion: 1,
+  capabilities: {
+    githubAuth: true,
+    prDetail: true,
+    prDiff: true,
+    prList: true,
+    repoDetect: true,
+    draftReview: true,
+    draftReviewMutations: true,
+    prSearch: true,
+    starredRepos: true,
+    existingReviews: true,
+  },
+};
+
+const NO_RESPONSE = Symbol('NO_RESPONSE');
+
+function createSidecarHarness(
+  responder: (method: string, params: unknown) => unknown | typeof NO_RESPONSE,
+): {
+  spawnSidecar: SidecarSpawn;
+  children: ChildProcessWithoutNullStreams[];
+  commands: Array<{ command: string; args: string[] }>;
+  methods: string[];
+  killCount: { value: number };
+} {
+  const children: ChildProcessWithoutNullStreams[] = [];
+  const commands: Array<{ command: string; args: string[] }> = [];
+  const methods: string[] = [];
+  const killCount = { value: 0 };
+  const spawnSidecar: SidecarSpawn = (command, args) => {
+    commands.push({ command, args });
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const child = Object.assign(new EventEmitter(), {
+      stdin,
+      stdout,
+      stderr,
+      kill: () => {
+        killCount.value++;
+        return true;
+      },
+    }) as unknown as ChildProcessWithoutNullStreams;
+    children.push(child);
+    let requestBuffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+    stdin.on('data', (chunk: Buffer) => {
+      requestBuffer = extractFrames(Buffer.concat([requestBuffer, chunk]), (body) => {
+        const request = JSON.parse(body) as { id: number; method: string; params: unknown };
+        methods.push(request.method);
+        const result = responder(request.method, request.params);
+        if (result === NO_RESPONSE) return;
+        queueMicrotask(() => stdout.write(encodeFrame(JSON.stringify({
+          jsonrpc: '2.0',
+          id: request.id,
+          result,
+        }))));
+      });
+    });
+    return child;
+  };
+  return { spawnSidecar, children, commands, methods, killCount };
+}
 
 test('supplemental GitHub parsers accept valid token-free results', () => {
   const pr = { number: 1, title: 'Fix', owner: 'acme', repo: 'widgets', author: 'octo', createdAt: '', htmlUrl: 'https://example/pr/1', isDraft: false };
@@ -72,22 +152,14 @@ test('extractFrames holds back a partial trailing frame for the next chunk', () 
   assert.equal(remaining.length, partialNext.length - 3);
 });
 
-test('extractFrames discards an unparseable header instead of looping forever', () => {
+test('extractFrames rejects an unparseable header', () => {
   const garbage = Buffer.from('Content-Type: application/json\r\n\r\n{}', 'ascii');
-  const seen: string[] = [];
-  const remaining = extractFrames(garbage, (body) => seen.push(body));
-  assert.deepEqual(seen, []);
-  assert.equal(remaining.length, 0);
+  assert.throws(() => extractFrames(garbage, () => undefined), /invalid Content-Length/);
 });
 
-test('extractFrames discards frames larger than the protocol limit', () => {
+test('extractFrames rejects frames larger than the protocol limit', () => {
   const oversizedHeader = Buffer.from(`Content-Length: ${8 * 1024 * 1024 + 1}\r\n\r\n`, 'ascii');
-  const seen: string[] = [];
-
-  const remaining = extractFrames(oversizedHeader, (body) => seen.push(body));
-
-  assert.deepEqual(seen, []);
-  assert.equal(remaining.length, 0);
+  assert.throws(() => extractFrames(oversizedHeader, () => undefined), /exceeds the maximum size/);
 });
 
 test('parseGitHubAuthResult accepts the token-free authenticated result shape', () => {
@@ -109,6 +181,13 @@ test('parseGitHubAuthResult rejects malformed or unknown authentication results'
   assert.equal(parseGitHubAuthResult({ status: 'unknown', username: null, message: 'x' }), null);
   assert.equal(parseGitHubAuthResult({ status: 'authenticated', username: 1, message: 'x' }), null);
   assert.equal(parseGitHubAuthResult({ status: 'authenticated', username: null }), null);
+});
+
+test('parseInitializeResult accepts only the expected service shape', () => {
+  assert.deepEqual(parseInitializeResult(initializeResult), initializeResult);
+  assert.equal(parseInitializeResult({ ...initializeResult, serviceName: 'other' }), null);
+  assert.equal(parseInitializeResult({ ...initializeResult, protocolVersion: '1' }), null);
+  assert.equal(parseInitializeResult({ ...initializeResult, capabilities: { githubAuth: 'yes' } }), null);
 });
 
 test('parsePrListResult accepts token-free pull request list results', () => {
@@ -305,4 +384,89 @@ test('resolveSidecarJarPath falls back to the sibling Gradle module build output
 test('resolveSidecarJarPath returns null when neither packaged nor dev jar exists', () => {
   const resolved = resolveSidecarJarPath(extensionRoot, () => false, () => []);
   assert.equal(resolved, null);
+});
+
+test('SidecarClient lazily starts once, initializes, and returns a validated result', async () => {
+  const harness = createSidecarHarness((method) => method === 'initialize'
+    ? initializeResult
+    : { status: 'authenticated', username: 'octocat', message: 'ok' });
+  const client = new SidecarClient(fakeJar, '/opt/java', harness.spawnSidecar);
+
+  assert.equal(harness.commands.length, 0);
+  const result = await client.checkGitHubAuth('https://github.com');
+
+  assert.equal(result.username, 'octocat');
+  assert.deepEqual(harness.commands, [{ command: '/opt/java', args: ['-jar', fakeJar] }]);
+  assert.deepEqual(harness.methods, ['initialize', 'github/checkAuth']);
+  await client.checkGitHubAuth('https://github.com');
+  assert.equal(harness.commands.length, 1);
+  client.dispose();
+});
+
+test('SidecarClient reports a missing packaged jar before spawning', async () => {
+  const harness = createSidecarHarness(() => initializeResult);
+  const client = new SidecarClient(path.join(tempRoot, 'missing.jar'), 'java', harness.spawnSidecar);
+
+  await assert.rejects(client.initialize(), /was not found.*Reinstall the extension/);
+  assert.equal(harness.commands.length, 0);
+});
+
+test('SidecarClient reports missing Java with installation guidance', async () => {
+  const harness = createSidecarHarness(() => NO_RESPONSE);
+  const spawnSidecar: SidecarSpawn = (command, args, options) => {
+    const child = harness.spawnSidecar(command, args, options);
+    queueMicrotask(() => child.emit('error', Object.assign(new Error('spawn java ENOENT'), { code: 'ENOENT' })));
+    return child;
+  };
+  const client = new SidecarClient(fakeJar, 'java', spawnSidecar);
+
+  await assert.rejects(client.initialize(), /Install Java 17 or newer/);
+});
+
+test('SidecarClient rejects incompatible protocols and missing capabilities', async () => {
+  const incompatible = createSidecarHarness(() => ({ ...initializeResult, protocolVersion: 2 }));
+  const incompatibleClient = new SidecarClient(fakeJar, 'java', incompatible.spawnSidecar);
+  await assert.rejects(incompatibleClient.initialize(), /protocol mismatch.*expected 1, got 2/);
+
+  const incomplete = createSidecarHarness(() => ({
+    ...initializeResult,
+    capabilities: { ...initializeResult.capabilities, prDiff: false },
+  }));
+  const incompleteClient = new SidecarClient(fakeJar, 'java', incomplete.spawnSidecar);
+  await assert.rejects(incompleteClient.initialize(), /missing required capabilities: prDiff/);
+});
+
+test('SidecarClient throws when a capability returns a malformed result', async () => {
+  const harness = createSidecarHarness((method) => method === 'initialize' ? initializeResult : { status: 'ok' });
+  const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar);
+
+  await assert.rejects(
+    client.checkGitHubAuth('https://github.com'),
+    /invalid GitHub authentication response/,
+  );
+  client.dispose();
+});
+
+test('SidecarClient terminates and fails a transport after a request timeout', async () => {
+  const harness = createSidecarHarness((method) => method === 'initialize' ? initializeResult : NO_RESPONSE);
+  const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar, 5);
+
+  await assert.rejects(
+    client.checkGitHubAuth('https://github.com'),
+    /request "github\/checkAuth" timed out.*Reload VS Code/,
+  );
+  assert.equal(harness.killCount.value, 1);
+  await assert.rejects(client.checkGitHubAuth('https://github.com'), /timed out/);
+  assert.equal(harness.commands.length, 1);
+  client.dispose();
+});
+
+test('SidecarClient cannot restart after disposal', async () => {
+  const harness = createSidecarHarness(() => initializeResult);
+  const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar);
+  await client.initialize();
+  client.dispose();
+
+  await assert.rejects(client.initialize(), /has been disposed/);
+  assert.equal(harness.commands.length, 1);
 });

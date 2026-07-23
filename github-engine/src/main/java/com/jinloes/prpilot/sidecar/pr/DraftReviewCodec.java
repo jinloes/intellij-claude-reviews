@@ -15,7 +15,7 @@ import java.util.Set;
  * Encodes/decodes PR Pilot review metadata embedded in a GitHub review body, falling back to GitHub
  * inline comments when absent or invalid.
  */
-final class DraftReviewCodec {
+public final class DraftReviewCodec {
     private static final String VERDICT_TAG = "<!-- claude-verdict: ";
     private static final String SUMMARY_TAG = "<!-- claude-summary: ";
     private static final String COMMENTS_TAG = "<!-- claude-comments: ";
@@ -80,7 +80,7 @@ final class DraftReviewCodec {
     /**
      * Encodes a summary/verdict/comment set into a GitHub review body carrying the PR Pilot
      * HTML-comment tags {@link #decode} understands, plus a trailing "General Notes" section for
-     * comments with no file/line (mirrors GitHubService.kt's {@code encodeBody}).
+     * comments with no file/line.
      */
     String encodeBody(String summary, String verdict, List<LineComment> lineComments) {
         StringBuilder sb = new StringBuilder(SUMMARY_TAG).append(escape(summary)).append(TAG_END);
@@ -192,7 +192,7 @@ final class DraftReviewCodec {
 
     record ApiComment(String path, Integer line, Integer originalLine, String body) {}
 
-    record LineComment(
+    public record LineComment(
             String file,
             int line,
             String type,
@@ -202,7 +202,7 @@ final class DraftReviewCodec {
             String confidence,
             String rationale) {}
 
-    record DecodedReview(
+    public record DecodedReview(
             String summary,
             String verdict,
             List<LineComment> lineComments,

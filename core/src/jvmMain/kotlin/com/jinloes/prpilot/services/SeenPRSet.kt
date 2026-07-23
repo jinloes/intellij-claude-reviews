@@ -76,6 +76,17 @@ class SeenPRSet(private val file: Path) {
         seeded = true
     }
 
+    @Synchronized
+    fun reset() {
+        seen.clear()
+        seeded = false
+        try {
+            Files.deleteIfExists(file)
+        } catch (e: IOException) {
+            log.warn("Failed to reset seen PR set", e)
+        }
+    }
+
     /**
      * Removes entries for PRs that are no longer in [livePrs]. Call after each poll to drop
      * closed/merged PRs and PRs where the review request was fulfilled.

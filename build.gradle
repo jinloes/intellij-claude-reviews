@@ -15,7 +15,6 @@ idea {
             file('.claude'),
             file('build'),
             file('org'),   // stray org.treesitter.TreeSitterProto.class from prior builds
-            file('src'),   // stray root-level source dir from prior builds
         ]
     }
 }

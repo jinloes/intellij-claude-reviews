@@ -23,7 +23,6 @@ test('normalizeProvider returns copilot only for the exact value', () => {
 test('normalizeGithubBaseUrl defaults blanks and canonicalizes HTTPS origins', () => {
     assert.equal(normalizeGithubBaseUrl(' '), 'https://github.com');
     assert.equal(normalizeGithubBaseUrl(' https://GITHUB.EXAMPLE.COM/// '), 'https://github.example.com');
-    assert.equal(normalizeGithubBaseUrl('https://github.example.com:8443'), 'https://github.example.com:8443');
 });
 
 test('normalizeGithubBaseUrl rejects non-origin and unsafe values', () => {
@@ -34,6 +33,7 @@ test('normalizeGithubBaseUrl rejects non-origin and unsafe values', () => {
         'https://github.example.com?query=1',
         'https://github.example.com#fragment',
         'https://github.example.com:',
+        'https://github.example.com:8443',
         'https://github.example.com:65536',
         'not a url',
     ]) {

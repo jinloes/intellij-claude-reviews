@@ -18,7 +18,7 @@ final class GithubBaseUrlValidator {
             if (!"https".equalsIgnoreCase(uri.getScheme())
                     || StringUtils.isBlank(uri.getHost())
                     || StringUtils.endsWith(authority, ":")
-                    || uri.getPort() > 65535
+                    || uri.getPort() != -1
                     || uri.getUserInfo() != null
                     || uri.getQuery() != null
                     || uri.getFragment() != null
@@ -33,6 +33,6 @@ final class GithubBaseUrlValidator {
 
     private static IllegalArgumentException invalid() {
         return new IllegalArgumentException(
-                "GitHub base URL must be an HTTPS origin without credentials, a path, query, or fragment.");
+                "GitHub base URL must be an HTTPS origin without credentials, a port, path, query, or fragment.");
     }
 }

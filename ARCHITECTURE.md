@@ -17,7 +17,7 @@ README.md                              – Root guide: setup, development, check
 
 .github/
   workflows/
-    ci.yml                           – Push/PR CI checks: Gradle verification plus webview and VS Code lint/typecheck/tests/build
+    ci.yml                           – Push/PR CI checks, Java 17 sidecar smoke test, and packaged-VSIX assertion
     release.yml                      – Tag-driven GitHub release pipeline; builds IntelliJ + VS Code artifacts and marks `v*-rc.*` tags as prereleases
 
 core/                                  – KMP module (jvm + js targets); Java services compiled as jvmMain
@@ -33,12 +33,7 @@ core/                                  – KMP module (jvm + js targets); Java s
       DiffParser.kt                  – Kotlin object; unified diff parser; DiffFile / DiffLine types
     util/
       ProcessUtil.kt                 – expect object; findBinary(name, candidates); jvmMain actual uses java.io.File, jsMain actual uses Node.js fs
-  src/commonMain/kotlin/com/jinloes/prpilot/services/
-      GitHubService.kt               – GitHub REST API: search PRs, diff, draft review CRUD; Ktor + kotlinx.serialization; blocking wrappers for Java callers
-      RunBlockingCompat.kt           – expect bridge from suspend to blocking API for Java callers
-      UrlEncode.kt                   – expect URL encoding helper
   src/jvmMain/kotlin/com/jinloes/prpilot/services/
-      GitHubAuthService.kt           – Runs `gh auth token`; probes known gh binary paths
       ClaudeService.kt               – Shells out to `claude --print`; synchronous/blocking API
       CopilotService.kt              – Uses the official Copilot Java SDK to drive local `copilot`; mirrors ClaudeService API
       CopilotModelDiscovery.kt       – Runs `copilot help config` once per session and caches model list
@@ -46,8 +41,6 @@ core/                                  – KMP module (jvm + js targets); Java s
       PendingReviewIndex.kt          – Local JSON index of saved drafts (~/.pr-pilot/pending-prs.json)
       SeenPRSet.kt                   – Local JSON set of notified PR IDs (~/.pr-pilot/seen-prs.json)
   src/jsMain/kotlin/com/jinloes/prpilot/
-      services/RunBlockingCompat.kt  – JS actual throws UnsupportedOperationException
-      services/UrlEncode.kt          – JS actual uses encodeURIComponent
       util/ProcessUtil.kt            – JS actual uses Node fs.existsSync/statSync
 
 intellij-plugin/                       – IntelliJ plugin host; depends on :core and :github-engine
@@ -69,7 +62,6 @@ intellij-plugin/                       – IntelliJ plugin host; depends on :cor
       HostThemeClassifier.java       – Pure light/dark/high-contrast theme classification
       ReviewMapper.java              – MapStruct mapper (core model -> webview DTOs)
       WebviewDtos.java               – package-private DTO records serialized to webview bridge
-      RepoDetector.java
 
 github-engine/                          – Plain Java 17 library containing host-neutral GitHub, PR, repository, and review behavior; no Spring or IDE APIs
   src/main/java/com/jinloes/prpilot/sidecar/
@@ -120,7 +112,7 @@ github-engine/                          – Plain Java 17 library containing hos
     repo/RepoDetectorTest.java
     repo/RemoteUrlParserTest.java
 
-sidecar/                                – Java 17, non-web Spring Boot/stdio JSON-RPC adapter over :github-engine; spawned on demand by the VS Code extension
+sidecar/                                – Java 17, non-web Spring Boot/stdio JSON-RPC adapter over :github-engine; initialized during VS Code activation
   src/main/java/com/jinloes/prpilot/sidecar/
     PrPilotSidecarApplication.java      – Non-web Boot entry point; owns stdio process lifecycle
     SidecarConfiguration.java           – Explicit Spring bean composition root
@@ -163,7 +155,7 @@ vscode-extension/                      – VS Code extension host
   src/
     extension.ts                       – VS Code activation plus PR Pilot webview tab/view bridge
     webviewAssets.ts                   – Resolves packaged `webview-dist/` assets with a dev fallback to sibling `webview/dist`
-    github.ts
+    models.ts                          – Host-neutral PR/review view models; contains no GitHub transport
     claude.ts
     copilot.ts                         – Copilot SDK service (`@github/copilot-sdk`) with streaming/status forwarding
     review.ts                          – Shared review-JSON extraction + schema validation (used by claude.ts + copilot.ts)
@@ -174,12 +166,13 @@ vscode-extension/                      – VS Code extension host
     notifications.ts                   – Pure background-notification helpers (source labeling, dedupe/merge with review-requested precedence); no vscode import, unit-tested
     userFacingError.ts                 – Maps host/provider errors to user-actionable copy
     workspace.ts                       – Resolves the VS Code workspace dir, including dev-host target repo override
-    sidecar.ts                         – Best-effort JSON-RPC client for the optional Java sidecar process (PR search/detail/diff/draft-review load+save+submit+delete/repo-detect/auth-check today); always falls back to local TS logic
+    sidecar.ts                         – Mandatory JSON-RPC client for the Java GitHub engine process
   shared/
     user-facing-errors.yaml            – Shared message templates consumed by both hosts
   scripts/
     stage-webview.mjs                  – Copies built webview/dist into vscode-extension/webview-dist for packaging
     stage-sidecar.mjs                  – Copies the built sidecar/build/libs/pr-pilot-sidecar.jar into vscode-extension/sidecar for packaging
+    smoke-sidecar.mjs                  – Launches the staged jar and verifies the initialize protocol/capabilities
   test/
     claude.test.ts
     copilot.test.ts
@@ -214,7 +207,7 @@ The sidecar's `review/parse` capability is a pure Java implementation of the str
 
 The sidecar's `pr/buildSearchQuery` capability is pure query construction only: it does not discover repositories, authenticate, or call GitHub. It normalizes unrecognized state values to `open`, unrecognized scopes to `currentRepo`, and blank repository paths to the existing `author:@me` fallback.
 
-The sidecar's `repo/detect` capability reads local git metadata directly (no git process spawned) to resolve the owner/repo for a directory. Unlike both existing host implementations, `GitDirectoryResolver` understands linked-worktree `.git` files (a regular file containing `gitdir: <path>`, relative or absolute) in addition to a standard `.git` directory. `RemoteUrlParser` is deliberately stricter than either host: it requires exactly two non-blank path segments (owner and repo), rejecting SCP-style urls with extra path segments that IntelliJ's `RepoDetector` currently accepts. Every non-`found` outcome (`not_git`, `config_missing`, `origin_missing`, `origin_url_malformed`, `gitdir_malformed`, `gitdir_unreadable`, etc.) is a typed, non-fatal `DetectStatus` returned as a normal JSON-RPC result — never a protocol error. `-32602` is reserved for malformed RPC params (missing/non-string `path`).
+The engine's repository detector reads local git metadata directly (no git process spawned) to resolve the owner/repo for a directory. `GitDirectoryResolver` understands linked-worktree `.git` files (a regular file containing `gitdir: <path>`, relative or absolute) in addition to a standard `.git` directory. `RemoteUrlParser` requires exactly two non-blank path segments (owner and repo), including for SCP-style URLs. Every non-`found` outcome (`not_git`, `config_missing`, `origin_missing`, `origin_url_malformed`, `gitdir_malformed`, `gitdir_unreadable`, etc.) is a typed, non-fatal `DetectStatus`; over JSON-RPC these are normal results, never protocol errors. `-32602` is reserved for malformed RPC params (missing/non-string `path`).
 
 The sidecar's `github/checkAuth` capability validates an HTTPS GitHub origin, runs `gh auth token` with the matching Enterprise hostname when needed, and verifies the resulting token with the host's `/user` API. It returns token-free structured statuses (`authenticated`, `not_installed`, `not_authenticated`, `api_failed`, or `invalid_base_url`) as normal domain results; never log, serialize, or include the token in an error message. Invalid JSON-RPC request parameters remain protocol errors.
 
@@ -226,27 +219,24 @@ The sidecar's `prs/getDiff` supports both review mode (250,000-byte limit with a
 
 The sidecar's `prs/getDraftReview` capability owns its `gh auth token` lookup and the GitHub pending-review lookup (`GET .../pulls/{number}/reviews` filtered to `state == PENDING`, plus that review's inline comments). `DraftReviewCodec` decodes the PR Pilot `claude-verdict`/`claude-summary`/`claude-comments` HTML-comment tags embedded in the review body, falling back to raw GitHub inline comments (with an `importedFromGitHub` flag) when those tags are absent or malformed. `none` (no pending review exists) is a normal domain result, not a failure; other token-free domain statuses (`invalid_request`, `invalid_base_url`, `not_installed`, `not_authenticated`, `rate_limited`, `network_error`, `api_failed`) are returned the same way `prs/getDetail` does. No token is ever logged, serialized, or included in an error message.
 
-The sidecar's `prs/saveDraftReview`, `prs/submitReview`, and `prs/deleteDraftReview` capabilities complete the draft-review lifecycle by porting `saveDraftReview`/`submitDraftReview`/`deleteDraftReview` from GitHubService.kt into `DraftReviewMutationService`. `save` deletes any existing pending review first (non-fatal on failure), fetches the PR's head SHA, and POSTs a new pending review; on a GitHub `422` (one or more inline comments reference an invalid path/line) it falls back to creating the review body-only, then POSTs each comment individually so only the bad ones are dropped, appending a "Comments not attached inline" section to the body via `DraftReviewCodec.buildDroppedSection` when any are dropped. `DraftReviewCodec` also now encodes (`encodeBody`/`buildCommentArray`/`buildOrphanSection`), mirroring `encodeBody`/`buildCommentArray`/`buildOrphanSection` in GitHubService.kt/github.ts exactly (same tag format, same short JSON keys) so review bodies remain interchangeable across hosts. `submit` posts to `.../reviews/{id}/events` with a default body substituted when blank (GitHub 422s on an empty `REQUEST_CHANGES`/`COMMENT` body). `delete` removes a pending review. All three share the token-free status vocabulary (`invalid_request`, `invalid_base_url`, `not_installed`, `not_authenticated`, `rate_limited`, `network_error`, `api_failed`) plus `ok`. The host-side mutation-serialization guard (`state.mutationQueue`/`enqueueMutation` in `extension.ts`) is not ported — it is UI-state sequencing local to each host, not a GitHub API concern.
+The sidecar's `prs/saveDraftReview`, `prs/submitReview`, and `prs/deleteDraftReview` capabilities expose `DraftReviewMutationService` over JSON-RPC. `save` deletes any existing pending review first (non-fatal on failure), fetches the PR's head SHA, and POSTs a new pending review; on a GitHub `422` (one or more inline comments reference an invalid path/line) it falls back to creating the review body-only, then POSTs each comment individually so only the bad ones are dropped, appending a "Comments not attached inline" section to the body via `DraftReviewCodec.buildDroppedSection` when any are dropped. `DraftReviewCodec` owns the stable metadata tag format and short JSON keys used by both hosts. `submit` posts to `.../reviews/{id}/events` with a default body substituted when blank (GitHub 422s on an empty `REQUEST_CHANGES`/`COMMENT` body). `delete` removes a pending review. All three share the token-free status vocabulary (`invalid_request`, `invalid_base_url`, `not_installed`, `not_authenticated`, `rate_limited`, `network_error`, `api_failed`) plus `ok`. The host-side mutation-serialization guard (`state.mutationQueue`/`enqueueMutation` in `extension.ts`) is UI-state sequencing local to each host, not a GitHub API concern.
 
 `PrSupplementalService` supplies the remaining token-safe read paths needed to remove host-local GitHub HTTP: bounded arbitrary PR searches (`prs/search`, query at most 8 KiB and limit at most 100), up to 200 starred repositories (`repos/listStarred`), and formatted submitted-review context (`prs/getExistingReviews`). Individual inline-comment lookup failures do not discard otherwise usable submitted-review context.
 
-### Sidecar wiring (VS Code)
-The VS Code extension is the sidecar's first real caller: `sidecar.ts`'s `SidecarClient` lazily spawns `java -jar <jar>` and speaks the same bounded Content-Length-framed JSON-RPC as `StdioFrameCodec`/`StdioJsonRpcServer`. `extension.ts` owns one process-wide `SidecarClient` instance created in `activate()` and disposed in `deactivate()`/on extension deconstruction; it is passed into `github.searchPRs` so `pr/buildSearchQuery` builds the search query when the sidecar responds successfully, into `github.detectCurrentRepoAsync` so `repo/detect` resolves the current repo when the sidecar finds one, and into Settings so `github/checkAuth` verifies the configured host.
+### GitHub engine host wiring
+GitHub behavior has one implementation in `github-engine`. IntelliJ calls its services directly in-process through `IntellijGitHubService`; the VS Code extension calls the same services through the sidecar's bounded Content-Length-framed JSON-RPC protocol. Hosts never receive, cache, or pass GitHub tokens. Authentication, retries, URL/API normalization, PR queries, repository detection, diffs, review context, and draft mutations belong only in `github-engine`.
 
-The sidecar is an optional accelerant, never a hard dependency: every `SidecarClient` method resolves to `null` (never throws) on spawn failure, missing `java`, timeout, or a malformed response, and `github.searchPRs`, `github.getPRDetailWithSidecar`, `github.loadDraftReviewWithSidecar`, `github.saveDraftReviewWithSidecar`, `github.submitReviewWithSidecar`, `github.deleteDraftReviewWithSidecar`, `github.detectCurrentRepoAsync`, and Settings fall back to their local implementations whenever that happens. Valid sidecar domain outcomes are not fallbacks: `prs/list` success supplies the list and truncation metadata directly, a `prs/getDraftReview` `none` result maps to the same `null` the local implementation returns when no pending review exists, and other auth/API outcomes (including from the save/submit/delete mutation capabilities) flow into the existing setup/error UI. `buildPRSearchQuery`/`PrSearchQueryService` and `detectCurrentRepo`/`RepoDetector` must therefore stay behaviorally compatible (the Java side is intentionally the stricter, linked-worktree-aware superset) — see the parity table in `AGENTS.md`.
+For VS Code, `extension.ts` owns one process-wide `SidecarClient` created and initialized in `activate()` and disposed during extension teardown. Initialization verifies protocol version 1 and every required GitHub capability before requests proceed. The sidecar is mandatory for GitHub operations: missing Java 17+, a missing/corrupt jar, process failure, timeout, incompatible capabilities, or malformed protocol output is surfaced as a setup/runtime error and must never activate a TypeScript GitHub fallback. RPC requests have a 60-second bound for GitHub network operations. `none` remains a valid `prs/getDraftReview` domain result; other token-free domain statuses flow into the existing setup/error UI.
 
 `resolveSidecarJarPath` mirrors `resolveWebviewDistPath`'s dev/packaged fallback: it prefers a jar staged at `vscode-extension/sidecar/pr-pilot-sidecar.jar` (produced by `scripts/stage-sidecar.mjs` from the Gradle `:sidecar:bootJar` output, matching the webview's `stage-webview.mjs` pattern) and falls back to the sibling `sidecar/build/libs/pr-pilot-sidecar.jar` during local development. The release pipeline runs `:sidecar:bootJar` before packaging so shipped `.vsix` builds bundle the jar.
 
-IntelliJ intentionally does not spawn the sidecar process: the plugin already runs in the same JVM, so any future migration of sidecar capabilities into the IntelliJ host would call the Java classes directly in-process rather than over stdio JSON-RPC. This is a container difference (see "IntelliJ webview surfaces"), not a missing feature — `PRToolWindowFactory.buildQuery` remains IntelliJ's canonical query-building implementation.
+IntelliJ intentionally does not spawn the sidecar process: the plugin already runs in the same JVM and calls `github-engine` directly. This is a container difference, not a behavior fork.
 
 ### Java interop conventions for commonMain Kotlin
 Java callers must use generated getters/setters (`getX()`), not Kotlin property or record-style accessors. `DiffParser` access from Java is via `DiffParser.INSTANCE.*`. Keep JSON in `core` on kotlinx.serialization.
 
 ### expect/actual bridges
-`ProcessUtil` and `runBlockingCompat` are expect/actual bridges; JVM provides blocking/runBlocking behavior, JS throws for blocking API path.
-
-### GitHubService lifecycle
-`GitHubService` is stateless except `apiBase`; IntelliJ adapter creates fresh instances so settings changes apply immediately. Keep `HTTP_CLIENT` shared/static to avoid per-call client pools.
+`ProcessUtil` is an expect/actual bridge used by provider binary discovery.
 
 ### Threading model
 `ClaudeService`/`CopilotService` are synchronous core services. IntelliJ adapters own threading (pooled thread for I/O, EDT for UI callbacks).
@@ -274,7 +264,7 @@ Both hosts discover the available Copilot model list at runtime and cache it for
   The settings webview validates `githubBaseUrl` before saving, posts per-field saved/error feedback, exposes model-refresh status, and has a `Test` action that verifies `gh` authentication for the configured host.
 
 ### PR discovery scope
-The shared PR list sends an explicit `searchScope` on `refreshPRs`: `currentRepo`, `reviewRequested`, `assigned`, or `authored`. Both hosts build GitHub search queries from that scope and return `listStatus` (`searchScope`, `currentRepo`, `resultLimit`, `limited`) with `prListLoaded` so the webview can explain what was searched and when additional PRs are hidden. To distinguish "exactly the limit" from "more exist", the search over-fetches one row beyond the display limit (`resultLimit` = 50, fetch 51): `limited` is true only when more than 50 match, and the list is sliced back to 50. `currentRepo` searches only the detected repository; if no repo is detected it falls back to `author:@me`. Main-list discovery intentionally includes GitHub draft pull requests (the old `draft:false` filter was removed) so authored WIP PRs are discoverable; the shared PR DTO distinguishes `isDraft` (GitHub PR draft / `PR-DRAFT`) from `hasReviewDraft` (saved PR Pilot review draft / `REV-DRAFT`). Starred repositories are used only by optional notification polling, not by the main list's current-repo scope.
+The shared PR list sends an explicit `searchScope` on `refreshPRs`: `currentRepo`, `reviewRequested`, `assigned`, or `authored`. `PrSearchQueryService` in `github-engine` builds the query for both hosts, and hosts return `listStatus` (`searchScope`, `currentRepo`, `resultLimit`, `limited`) with `prListLoaded` so the webview can explain what was searched and when additional PRs are hidden. To distinguish "exactly the limit" from "more exist", the search over-fetches one row beyond the display limit (`resultLimit` = 50, fetch 51): `limited` is true only when more than 50 match, and the list is sliced back to 50. `currentRepo` searches only the engine-detected repository; if no repo is detected it falls back to `author:@me`. Main-list discovery intentionally includes GitHub draft pull requests (the old `draft:false` filter was removed) so authored WIP PRs are discoverable; the shared PR DTO distinguishes `isDraft` (GitHub PR draft / `PR-DRAFT`) from `hasReviewDraft` (saved PR Pilot review draft / `REV-DRAFT`). Starred repositories are used only by optional notification polling, not by the main list's current-repo scope.
 
 ### Binary resolution
 Probe known hard-coded paths for `gh`, `claude`, and `copilot` before falling back to command name, because GUI-launched IntelliJ often has incomplete `PATH`.
@@ -294,7 +284,7 @@ Hosts fetch and bound the GitHub diff before provider execution and embed it in 
 When the PR's repo matches the open project/workspace and a git root is found, both hosts create a temporary git worktree checked out to the PR branch and reuse it for both review and chat. This gives the model accurate local file context (correct branch state) for type lookups and cross-file references across the full PR session. Cleanup runs when the active PR changes or the view is disposed. Falls back silently to the open project/workspace dir if worktree creation fails or the PR is from an unrelated repo. Fork PRs use `git fetch <clone_url> <branch>` + `FETCH_HEAD`.
 
 - **IntelliJ**: `WebviewPanel.resolvePrClaudeService` builds a per-PR `IntellijClaudeService` pointed at the worktree, using `GitWorktreeService` (jvmMain).
-- **VS Code**: `extension.ts` `resolveWorkingDir`/`clearWorktree` resolve the per-view worktree dir passed as `workingDir` to the review/chat CLIs, using `worktree.ts`. Chat reuses an existing worktree with the cached token only (never triggers a fresh auth).
+- **VS Code**: `extension.ts` `resolveWorkingDir`/`clearWorktree` resolve the per-view worktree dir passed as `workingDir` to the review/chat CLIs, using `worktree.ts`. Chat reuses an existing worktree and never requests GitHub credentials directly.
 
 ### Cross-host parity
 When host-specific logic changes in IntelliJ or VS Code, update the paired implementation in the other host. The mapping table and enforcement workflow live in `AGENTS.md`.
@@ -309,7 +299,7 @@ Bridge messages carry protocol version `1`. Both hosts validate webview-to-host 
 Both hosts apply a transient-failure policy on GitHub REST calls: 15s request/connect/socket timeout, retries on `429`/`5xx`, and retry of timeout-style transport errors. This keeps PR loading/review flows resilient to short-lived network or GitHub edge failures while preserving fast-fail behavior for permanent `4xx` errors.
 
 ### First-run onboarding path
-When startup PR loading fails, hosts push a `setupRequired` bridge message with actionable detail instead of silently failing. Supported reasons are `gh_not_installed`, `gh_not_authenticated`, and `load_failed` (non-auth load errors). `PRList` renders a full-pane setup/error screen with a checklist covering GitHub CLI installation, GitHub authentication, and PR loading, plus a Refresh button when this message is received. IntelliJ maps auth diagnosis to stable reason IDs via `PRToolWindowFactory.setupReason` and also emits `load_failed` for post-auth load exceptions; VS Code classifies setup-worthy auth failures (including 401/403/bad-credentials responses) in `classifySetupAuthError`. The VS Code host also triggers an initial `handleRefreshPRs` call immediately after `resolveWebviewView` so the webview never hangs on its initial loading state.
+When startup PR loading fails, hosts push a `setupRequired` bridge message with actionable detail instead of silently failing. Supported reasons are `gh_not_installed`, `gh_not_authenticated`, and `load_failed` (non-auth load errors). `PRList` renders a full-pane setup/error screen with a checklist covering GitHub CLI installation, GitHub authentication, and PR loading, plus a Refresh button when this message is received. Shared-engine domain messages and each host's error mapper preserve actionable authentication guidance; VS Code additionally classifies setup-worthy auth failures in `classifySetupAuthError`. The VS Code host also triggers an initial `handleRefreshPRs` call immediately after `resolveWebviewView` so the webview never hangs on its initial loading state.
 
 The setup screen is a guided in-app wizard with host detection. Both hosts expose status re-check, settings, and auth-guide actions; VS Code additionally supports one-click `gh auth login` automation via a `runAuthLogin` bridge action that opens an integrated terminal and runs the command.
 After the first successful load (or a recovery from `setupRequired`), the shared PR list shows a one-time success coach banner that points users at scope switching and the `PR-DRAFT` vs `REV-DRAFT` mental model.
@@ -351,7 +341,7 @@ Background PR notifications are available in both hosts and are off by default. 
 Client-side validation partitions comments: keep in-hunk, snap within +-3 lines, orphan otherwise. Orphans are excluded from inline POST and appended to review body section.
 
 ### Security constraints
-`githubBaseUrl` and external links must use HTTPS. GitHub/provider tokens are not persisted by PR Pilot. Provider review input is adversarial: do not enable tools, MCP discovery, shell/write permissions, or broader environment capabilities by default. A detached worktree protects the active checkout but is not a machine sandbox, so explicit capability elevation must remain visible in settings.
+`githubBaseUrl` must be an HTTPS origin without credentials, an explicit port, path, query, or fragment; external links must use HTTPS. GitHub/provider tokens are not persisted by PR Pilot. Provider review input is adversarial: do not enable tools, MCP discovery, shell/write permissions, or broader environment capabilities by default. A detached worktree protects the active checkout but is not a machine sandbox, so explicit capability elevation must remain visible in settings.
 
 ### Repo detection and webview hosting
 Repo detection walks upward to `.git/config` and reads the `[remote "origin"]` URL specifically (not the first `url=` in the file) so multi-remote/fork setups resolve to origin consistently across hosts, handling SCP and `ssh://` remotes correctly. Webview assets are served via loopback `HttpServer` for proper same-origin module loading; path normalization blocks traversal.
@@ -378,7 +368,6 @@ The `.vscode/launch.json` config `Run PR Pilot Extension Against Target Repo` pr
 - `notifyReviewRequested` (default `true`)
 - `notifyStarredRepos` (default `false`)
 - `notificationPollMinutes` (default `5`)
-- `githubUsername` (display cache)
 - `reviewModel` (default `""`)
 - `reviewModelCopilot` (default `"claude-sonnet-4.6"`)
 - `reviewProvider` (default `"claude"`; values `claude|copilot`)

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { mergeBySource, notificationMessage, notifySourceLabel } from '../src/notifications';
-import type { PR } from '../src/github';
+import type { PR } from '../src/models';
 
 function pr(owner: string, repo: string, number: number): PR {
   return {

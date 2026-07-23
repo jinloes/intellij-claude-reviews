@@ -1,4 +1,4 @@
-import type { ReviewResult, LineComment, Severity, Category, Confidence } from './github';
+import type { ReviewResult, LineComment, Severity, Category, Confidence } from './models';
 
 const VERDICTS = ['APPROVE', 'REQUEST_CHANGES', 'COMMENT'] as const;
 const COMMENT_TYPES = ['issue', 'suggestion', 'note'] as const;

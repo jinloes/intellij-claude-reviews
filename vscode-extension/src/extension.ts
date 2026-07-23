@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as github from './github';
 import * as claude from './claude';
 import * as copilot from './copilot';
 import * as worktree from './worktree';
@@ -16,11 +15,11 @@ import { resolveWebviewDistPath } from './webviewAssets';
 import { buildErrorHtml, buildLauncherHtml, buildMainWebviewHtml } from './webviewHtml';
 import { classifyHostTheme, type HostTheme } from './hostTheme';
 import { SidecarClient, resolveSidecarJarPath } from './sidecar';
+import type { LineComment, PR, PRSearchScope, ReviewResult } from './models';
 
-// Process-wide, lazily-started sidecar process shared by all views. Optional accelerant only —
-// every call site falls back to a local implementation when this is unavailable (no `java`,
-// missing jar, spawn failure, timeout). See ARCHITECTURE.md "Sidecar wiring (VS Code)".
-let sidecarClient: SidecarClient | null = null;
+// Process-wide, lazily-started Java engine host. GitHub operations are never performed in the
+// Node extension process, so missing Java/jar or transport failures surface as setup errors.
+let sidecarClient: SidecarClient;
 
 type Provider = 'claude' | 'copilot';
 
@@ -39,6 +38,10 @@ function cancelActiveProvider(): void {
 export function activate(context: vscode.ExtensionContext) {
     sidecarClient = new SidecarClient(resolveSidecarJarPath(context.extensionUri.fsPath));
     context.subscriptions.push({ dispose: () => sidecarClient?.dispose() });
+    void sidecarClient.initialize().catch((err) => {
+        const message = err instanceof Error ? err.message : 'PR Pilot Java sidecar failed to start.';
+        void vscode.window.showErrorMessage(message);
+    });
     const provider = new ClaudeReviewsViewProvider(context.extensionUri);
     const notificationPoller = new PRNotificationPoller(context, (pr) => provider.openPullRequest(pr));
     context.subscriptions.push(
@@ -48,7 +51,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('pr-pilot.open', () => provider.openPanel()),
         vscode.commands.registerCommand('pr-pilot.selectCopilotModel', selectCopilotModel),
         vscode.commands.registerCommand('pr-pilot.openSettings', () =>
-            settings.openSettings(context, sidecarClient ?? undefined)),
+            settings.openSettings(context, sidecarClient)),
         notificationPoller,
     );
     notificationPoller.syncFromSettings();
@@ -73,7 +76,6 @@ async function selectCopilotModel(): Promise<void> {
 
 export function deactivate() {
     sidecarClient?.dispose();
-    sidecarClient = null;
 }
 
 // ── Background PR notifications ───────────────────────────────────────────────
@@ -95,7 +97,7 @@ class PRNotificationPoller implements vscode.Disposable {
 
     constructor(
         private readonly context: vscode.ExtensionContext,
-        private readonly onOpenPr: (pr: github.PR) => void,
+        private readonly onOpenPr: (pr: PR) => void,
     ) {
         // Restore prior seen state so a reload/restart does not silently re-seed and swallow PRs
         // that appeared while the window was closed.
@@ -141,27 +143,26 @@ class PRNotificationPoller implements vscode.Disposable {
         if (this.running) return;
         this.running = true;
         try {
-            const token = await github.resolveToken(githubBaseUrl());
-            const reviewRequested: github.PR[] = [];
-            const starred: github.PR[] = [];
+            const reviewRequested: PR[] = [];
+            const starred: PR[] = [];
 
             if (config().get<boolean>('notifyReviewRequested', true)) {
-                reviewRequested.push(...await github.searchPRsByQuery(
-                    token,
-                    githubBaseUrl(),
-                    'is:open is:pr draft:false review-requested:@me',
-                ));
+                const result = await sidecarClient.searchPullRequests(
+                    githubBaseUrl(), 'is:open is:pr draft:false review-requested:@me', 50);
+                if (result.status !== 'ok') throw new Error(result.message);
+                reviewRequested.push(...result.prs.map((pr) => ({ ...pr, hasReviewDraft: false })));
             }
 
             if (config().get<boolean>('notifyStarredRepos', false)) {
-                const starredRepos = (await github.getStarredRepos(token, githubBaseUrl())).slice(0, 25);
+                const reposResult = await sidecarClient.listStarredRepositories(githubBaseUrl());
+                if (reposResult.status !== 'ok') throw new Error(reposResult.message);
+                const starredRepos = reposResult.repositories.slice(0, 25);
                 if (starredRepos.length > 0) {
                     const repoQ = starredRepos.map((repo) => `repo:${repo}`).join(' ');
-                    starred.push(...await github.searchPRsByQuery(
-                        token,
-                        githubBaseUrl(),
-                        `is:open is:pr draft:false ${repoQ}`,
-                    ));
+                    const result = await sidecarClient.searchPullRequests(
+                        githubBaseUrl(), `is:open is:pr draft:false ${repoQ}`, 50);
+                    if (result.status !== 'ok') throw new Error(result.message);
+                    starred.push(...result.prs.map((pr) => ({ ...pr, hasReviewDraft: false })));
                 }
             }
 
@@ -222,7 +223,7 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
     private readonly distUri: vscode.Uri;
     private panel: vscode.WebviewPanel | undefined;
     private state: ViewState | undefined;
-    private pendingActivation: { pr: github.PR; source: 'notification' } | null = null;
+    private pendingActivation: { pr: PR; source: 'notification' } | null = null;
 
     constructor(extensionUri: vscode.Uri) {
         this.distUri = vscode.Uri.file(resolveWebviewDistPath(extensionUri.fsPath, fs.existsSync));
@@ -251,7 +252,7 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
         });
     }
 
-    openPullRequest(pr: github.PR): void {
+    openPullRequest(pr: PR): void {
         this.pendingActivation = { pr, source: 'notification' };
         const hadLiveState = Boolean(this.state);
         this.openPanel();
@@ -291,7 +292,6 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
         // Per-view state — each panel gets its own instance of these fields
         const state: ViewState = {
             webview,
-            cachedToken: null,
             prStateFilter: 'open',
             searchScope: 'currentRepo',
             activePR: null,
@@ -433,13 +433,12 @@ function runAuthLoginInTerminal(): void {
 
 interface ViewState {
     webview: vscode.Webview;
-    cachedToken: string | null;
     prStateFilter: string;
-    searchScope: github.PRSearchScope;
+    searchScope: PRSearchScope;
     activePR: ActivePR | null;
     activeDiff: string;
     activeValidationDiff: string;
-    activeReviewResult: github.ReviewResult | null;
+    activeReviewResult: ReviewResult | null;
     pendingReviewId: string | null;
     pendingReviewKey: string | null;
     selectionRevision: number;
@@ -508,17 +507,16 @@ function clearWorktree(state: ViewState): void {
 async function resolveWorkingDir(
     state: ViewState,
     pr: ActivePR,
-    token: string,
     emitStatus: boolean,
     bridgePrKey?: string,
 ): Promise<string> {
     const fallback = workingDir();
     const key = worktreeKey(pr);
     if (state.worktreeDir && state.worktreeKey === key) return state.worktreeDir;
-    if (!token || !fallback) return fallback;
+    if (!fallback) return fallback;
 
     const gitRoot = worktree.findGitRoot(fallback);
-    const currentRepo = await github.detectCurrentRepoAsync(fallback, sidecarClient ?? undefined);
+    const currentRepo = await sidecarClient.detectRepo(fallback);
     const sameRepo = currentRepo !== null
         && currentRepo.toLowerCase() === `${pr.owner}/${pr.repo}`.toLowerCase();
     if (!gitRoot || !sameRepo) return fallback;
@@ -528,14 +526,17 @@ async function resolveWorkingDir(
     }
 
     try {
-        const headInfo = await github.getPRHeadInfo(token, githubBaseUrl(), pr.owner, pr.repo, pr.number);
-        if (!headInfo.ref.trim()) return fallback;
+        const detailResult = await sidecarClient.getPullRequestDetail(githubBaseUrl(), pr.owner, pr.repo, pr.number);
+        if (detailResult.status !== 'ok' || !detailResult.detail) throw new Error(detailResult.message);
+        const head = detailResult.detail.head;
+        if (!head?.ref.trim()) return fallback;
+        const isFork = !!head.repoFullName && head.repoFullName !== detailResult.detail.baseRepoFullName;
 
         const wt = worktree.worktreePath(pr.number);
-        if (headInfo.isFork) {
-            await worktree.createWorktreeFromFork(gitRoot, headInfo.forkCloneUrl, headInfo.ref, wt);
+        if (isFork) {
+            await worktree.createWorktreeFromFork(gitRoot, head.cloneUrl ?? '', head.ref, wt);
         } else {
-            await worktree.createWorktree(gitRoot, headInfo.ref, wt);
+            await worktree.createWorktree(gitRoot, head.ref, wt);
         }
 
         // The PR may have changed while we awaited git; discard the worktree if so.
@@ -641,7 +642,7 @@ function readRepoGuidelines(dir: string): string {
 }
 
 /** Formats a prior generated review as compact context for a re-generation prompt. */
-function formatPriorReview(result: github.ReviewResult | null): string {
+function formatPriorReview(result: ReviewResult | null): string {
     if (!result) return '';
     const lines = [`Verdict: ${result.verdict}`];
     if (result.summary) lines.push(`Summary: ${result.summary}`);
@@ -657,13 +658,6 @@ function workingDir(): string {
     );
 }
 
-async function getToken(state: ViewState): Promise<string> {
-    if (state.cachedToken) return state.cachedToken;
-    const token = await github.resolveToken(githubBaseUrl());
-    state.cachedToken = token;
-    return token;
-}
-
 // ── Message handlers ───────────────────────────────────────────────────────────
 
 async function handleRefreshPRs(state: ViewState, msg: Record<string, unknown>): Promise<void> {
@@ -677,16 +671,11 @@ async function handleRefreshPRs(state: ViewState, msg: Record<string, unknown>):
             state.searchScope = 'reviewRequested';
         }
 
-        const currentRepo = await github.detectCurrentRepoAsync(workingDir() || process.cwd(), sidecarClient ?? undefined);
-        const found = await github.searchPRs(
-            githubBaseUrl(),
-            state.prStateFilter,
-            state.searchScope,
-            currentRepo ?? undefined,
-            sidecarClient ?? undefined,
-            getToken.bind(null, state),
-        );
-        const prs = found.prs.map((pr) => {
+        const currentRepo = await sidecarClient.detectRepo(workingDir() || process.cwd());
+        const found = await sidecarClient.listPullRequests(
+            githubBaseUrl(), state.prStateFilter, state.searchScope, currentRepo ?? undefined);
+        if (found.status !== 'ok') throw new Error(found.message);
+        const prs = found.prs.map((item) => ({ ...item, hasReviewDraft: false })).map((pr) => {
             if (!state.activePR || !state.pendingReviewId) return pr;
             return pr.number === state.activePR.number && pr.owner === state.activePR.owner && pr.repo === state.activePR.repo
                 ? { ...pr, hasReviewDraft: true }
@@ -700,12 +689,11 @@ async function handleRefreshPRs(state: ViewState, msg: Record<string, unknown>):
             listStatus: {
                 searchScope: state.searchScope,
                 currentRepo: currentRepo ?? undefined,
-                resultLimit: github.PR_SEARCH_LIMIT,
+                resultLimit: found.resultLimit,
                 limited: found.limited,
             },
         });
     } catch (err) {
-        state.cachedToken = null;
         const reason = classifySetupAuthError(err);
         const detail = reason === 'gh_not_installed'
             ? "The 'gh' CLI was not found. Install it from https://cli.github.com, then run 'gh auth login' in a terminal and click Refresh."
@@ -716,7 +704,7 @@ async function handleRefreshPRs(state: ViewState, msg: Record<string, unknown>):
     }
 }
 
-function normalizeSearchScope(value: string): github.PRSearchScope {
+function normalizeSearchScope(value: string): PRSearchScope {
     if (value === 'authored' || value === 'assigned' || value === 'reviewRequested') return value;
     return 'currentRepo';
 }
@@ -740,17 +728,25 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
     state.pendingReviewKey = null;
     push(state, { type: 'draftLoading', prKey: key });
     try {
-        const token = await getToken(state);
         const base = githubBaseUrl();
         const readiness = providerReadiness();
 
-        const [diff, detail, draft] = await Promise.all([
-            github.getPRDiff(token, base, owner, repo, number, sidecarClient ?? undefined),
-            github.getPRDetailWithSidecar(
-                token, base, owner, repo, number, sidecarClient ?? undefined,
-            ),
-            github.loadDraftReviewWithSidecar(token, base, owner, repo, number, sidecarClient ?? undefined),
+        const [diffResult, detailResult, draftResult] = await Promise.all([
+            sidecarClient.getPullRequestDiff(base, owner, repo, number, 'review'),
+            sidecarClient.getPullRequestDetail(base, owner, repo, number),
+            sidecarClient.getDraftReview(base, owner, repo, number),
         ]);
+        if (diffResult.status !== 'ok' || diffResult.diff === null) throw new Error(diffResult.message);
+        if (detailResult.status !== 'ok' || !detailResult.detail) throw new Error(detailResult.message);
+        if (draftResult.status !== 'ok' && draftResult.status !== 'none') throw new Error(draftResult.message);
+        const diff = diffResult.diff;
+        const detail = detailResult.detail;
+        const draft = draftResult.status === 'ok' && draftResult.review ? {
+            id: draftResult.id ?? '',
+            commitId: draftResult.commitId ?? '',
+            result: draftResult.review as ReviewResult,
+            importedFromGitHub: draftResult.review.importedFromGitHub,
+        } : null;
         const validationDiff = diff;
 
         if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
@@ -794,10 +790,11 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
         // Comment-position validation benefits from an untruncated diff, but it must not block the
         // draft status UI on a large or slow response. The bounded review diff above is sufficient
         // until this optional fetch completes.
-        void github.getPRDiffFull(token, base, owner, repo, number)
-            .then((fullDiff) => {
+        void sidecarClient.getPullRequestDiff(base, owner, repo, number, 'validation')
+            .then((fullResult) => {
+                if (fullResult.status !== 'ok' || fullResult.diff === null) return;
                 if (prKey(state.activePR) === key && state.selectionRevision === selectionRevision) {
-                    state.activeValidationDiff = fullDiff || diff;
+                    state.activeValidationDiff = fullResult.diff || diff;
                 }
             })
             .catch((err) => {
@@ -805,7 +802,6 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
                     err instanceof Error ? err.message : String(err));
             });
     } catch (err) {
-        state.cachedToken = null;
         if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
         push(state, {
             type: 'draftLoaded',
@@ -843,23 +839,26 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
 
     push(state, { type: 'reviewGenerating', prKey: key, message: 'Fetching PR data…' });
     try {
-        const token = await getToken(state);
         const base = githubBaseUrl();
 
         let diff = state.activeDiff;
         let validationDiff = state.activeValidationDiff;
         if (!diff) {
-            diff = await github.getPRDiff(token, base, owner, repo, number);
+            const result = await sidecarClient.getPullRequestDiff(base, owner, repo, number, 'review');
+            if (!result || result.status !== 'ok' || result.diff === null) throw new Error(result?.message ?? 'Invalid sidecar diff response.');
+            diff = result.diff;
             if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
             state.activeDiff = diff;
         }
         if (!validationDiff) {
-            validationDiff = await github.getPRDiffFull(token, base, owner, repo, number).catch(() => diff);
+            const result = await sidecarClient.getPullRequestDiff(base, owner, repo, number, 'validation').catch(() => null);
+            validationDiff = result?.status === 'ok' && result.diff !== null ? result.diff : diff;
             if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
             state.activeValidationDiff = validationDiff;
         }
 
-        const existingReviews = await github.getExistingReviewsSummary(token, base, owner, repo, number).catch(() => '');
+        const reviewsResult = await sidecarClient.getExistingReviews(base, owner, repo, number).catch(() => null);
+        const existingReviews = reviewsResult?.status === 'ok' ? reviewsResult.summary : '';
 
         const pr: claude.PR = {
             number,
@@ -872,7 +871,6 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
         const reviewDir = await resolveWorkingDir(
             state,
             { number, owner, repo, title: pr.title, body: pr.body ?? '' },
-            token,
             true,
             key,
         );
@@ -922,7 +920,6 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
         push(state, { type: 'reviewResult', prKey: key, result, diff, validationDiff });
     } catch (err) {
         if (isCancellationError(err)) return;
-        state.cachedToken = null;
         push(state, { type: 'reviewError', prKey: key, message: toUserFacingError(err, 'generate review') });
     }
 }
@@ -931,8 +928,8 @@ async function handleSaveDraft(state: ViewState, msg: Record<string, unknown>): 
     const number = msg.number as number;
     const owner = msg.owner as string;
     const repo = msg.repo as string;
-    const resultFromMsg = msg.result as github.ReviewResult | undefined;
-    const orphansFromMsg = (msg.orphans as github.LineComment[] | undefined) ?? [];
+    const resultFromMsg = msg.result as ReviewResult | undefined;
+    const orphansFromMsg = (msg.orphans as LineComment[] | undefined) ?? [];
     const review = resultFromMsg ?? state.activeReviewResult;
     if (!number || !owner || !repo || !review) return;
     const key = prKeyFromParts(number, owner, repo);
@@ -943,17 +940,18 @@ async function handleSaveDraft(state: ViewState, msg: Record<string, unknown>): 
     const selectionRevision = state.selectionRevision;
 
     try {
-        const token = await getToken(state);
-        const { reviewId, commentsDropped } = await github.saveDraftReviewWithSidecar(
-            token, githubBaseUrl(), owner, repo, number, review, orphansFromMsg, sidecarClient ?? undefined,
+        const mutation = await sidecarClient.saveDraftReview(
+            githubBaseUrl(), owner, repo, number, review.summary, review.verdict,
+            review.lineComments, orphansFromMsg,
         );
+        if (mutation.status !== 'ok' || !mutation.reviewId) throw new Error(mutation.message);
+        const { reviewId, commentsDropped } = mutation;
         if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
         state.pendingReviewId = reviewId;
         state.pendingReviewKey = key;
         push(state, { type: 'draftSaved', prKey: key, reviewId, commentsDropped });
         push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasReviewDraft: true });
     } catch (err) {
-        state.cachedToken = null;
         push(state, {
             type: 'draftSaveError',
             prKey: key,
@@ -977,11 +975,9 @@ async function handleSubmitReview(state: ViewState, msg: Record<string, unknown>
     const reviewId = state.pendingReviewId;
 
     try {
-        const token = await getToken(state);
-        await github.submitReviewWithSidecar(
-            token, githubBaseUrl(), owner, repo, number,
-            reviewId, verdict, comment, sidecarClient ?? undefined,
-        );
+        const mutation = await sidecarClient.submitReview(
+            githubBaseUrl(), owner, repo, number, reviewId, verdict, comment);
+        if (mutation.status !== 'ok') throw new Error(mutation.message);
         if (state.pendingReviewId === reviewId && state.pendingReviewKey === key) {
             state.pendingReviewId = null;
             state.pendingReviewKey = null;
@@ -989,7 +985,6 @@ async function handleSubmitReview(state: ViewState, msg: Record<string, unknown>
         push(state, { type: 'reviewSubmitted', prKey: key });
         push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasReviewDraft: false });
     } catch (err) {
-        state.cachedToken = null;
         push(state, {
             type: 'reviewSubmitError',
             prKey: key,
@@ -1011,10 +1006,9 @@ async function handleDeleteDraft(state: ViewState, msg: Record<string, unknown>)
     const reviewId = state.pendingReviewId;
 
     try {
-        const token = await getToken(state);
-        await github.deleteDraftReviewWithSidecar(
-            token, githubBaseUrl(), owner, repo, number, reviewId, sidecarClient ?? undefined,
-        );
+        const mutation = await sidecarClient.deleteDraftReview(
+            githubBaseUrl(), owner, repo, number, reviewId);
+        if (mutation.status !== 'ok') throw new Error(mutation.message);
         if (state.pendingReviewId === reviewId && state.pendingReviewKey === key) {
             state.pendingReviewId = null;
             state.pendingReviewKey = null;
@@ -1022,7 +1016,6 @@ async function handleDeleteDraft(state: ViewState, msg: Record<string, unknown>)
         push(state, { type: 'draftDeleted', prKey: key });
         push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasReviewDraft: false });
     } catch (err) {
-        state.cachedToken = null;
         push(state, {
             type: 'draftDeleteError',
             prKey: key,
@@ -1050,9 +1043,9 @@ async function handleAskClaude(state: ViewState, msg: Record<string, unknown>): 
     const isCopilot = provider() === 'copilot';
     try {
         // Reuse the PR-branch worktree if one was built for the active PR (e.g. during review) so
-        // chat sees the same source. Uses the cached token only — never triggers a fresh auth.
+        // chat sees the same source.
         const chatDir = state.activePR
-            ? await resolveWorkingDir(state, state.activePR, state.cachedToken ?? '', false)
+            ? await resolveWorkingDir(state, state.activePR, false)
             : workingDir();
         const response = isCopilot
             ? await copilot.chat({

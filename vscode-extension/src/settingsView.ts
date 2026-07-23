@@ -31,7 +31,7 @@ export const COPILOT_MODEL_SUGGESTIONS: string[] = [
 /** Reasoning-effort levels accepted by `copilot --reasoning-effort`. Mirrors COPILOT_EFFORTS. */
 export const COPILOT_EFFORTS: string[] = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
 
-export const GITHUB_BASE_URL_ERROR = 'GitHub base URL must be an HTTPS origin without credentials, a path, query, or fragment.';
+export const GITHUB_BASE_URL_ERROR = 'GitHub base URL must be an HTTPS origin without credentials, a port, path, query, or fragment.';
 
 export interface SettingsState {
     provider: Provider;
@@ -64,6 +64,7 @@ export function normalizeGithubBaseUrl(value: string): string {
             url.protocol !== 'https:'
             || url.username !== ''
             || url.password !== ''
+            || url.port !== ''
             || url.pathname !== '/'
             || url.search !== ''
             || url.hash !== ''

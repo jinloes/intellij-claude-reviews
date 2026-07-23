@@ -71,6 +71,36 @@ class SeenPRSetTest : FunSpec({
         }
     }
 
+    context("reset") {
+
+        test("clears entries and returns to unseeded state") {
+            val s = set()
+            val existing = pr("o", "r", 1)
+            s.add(existing)
+            s.markSeeded()
+
+            s.reset()
+
+            s.isSeeded().shouldBeFalse()
+            s.contains(existing).shouldBeFalse()
+        }
+
+        test("persists the unseeded state by removing the prior file") {
+            val file = Path.of(tempDir.absolutePath, "seen-prs.json")
+            val existing = pr("o", "r", 1)
+            SeenPRSet(file).apply {
+                add(existing)
+                markSeeded()
+                save()
+                reset()
+            }
+
+            val reloaded = SeenPRSet(file)
+            reloaded.isSeeded().shouldBeFalse()
+            reloaded.contains(existing).shouldBeFalse()
+        }
+    }
+
     // ── retain ───────────────────────────────────────────────────────────
 
     context("retain") {

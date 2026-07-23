@@ -18,17 +18,28 @@ public final class PrDiffService {
     static final int VALIDATION_LIMIT_BYTES = 1_000_000;
     private static final String TRUNCATION_MARKER = "\n\n[... diff truncated at 250 KB ...]";
     private static final Duration TIMEOUT = Duration.ofSeconds(15);
+    private static final int MAX_ATTEMPTS = 3;
     private static final Pattern SEGMENT = Pattern.compile("[A-Za-z0-9_.-]+");
     private final GitHubAuthService.TokenResolver tokenResolver;
     private final DiffClient diffClient;
+    private final Backoff backoff;
 
     public PrDiffService() {
-        this(new GitHubAuthService.ProcessTokenResolver(), new HttpDiffClient());
+        this(
+                new GitHubAuthService.ProcessTokenResolver(),
+                new HttpDiffClient(),
+                new ThreadBackoff());
     }
 
     PrDiffService(GitHubAuthService.TokenResolver tokenResolver, DiffClient diffClient) {
+        this(tokenResolver, diffClient, new ThreadBackoff());
+    }
+
+    PrDiffService(
+            GitHubAuthService.TokenResolver tokenResolver, DiffClient diffClient, Backoff backoff) {
         this.tokenResolver = Objects.requireNonNull(tokenResolver);
         this.diffClient = Objects.requireNonNull(diffClient);
+        this.backoff = Objects.requireNonNull(backoff);
     }
 
     public PrDiffResult get(Params params) {
@@ -50,14 +61,21 @@ public final class PrDiffService {
                     "not_authenticated", "Run 'gh auth login' in a terminal for this GitHub host.");
         int limitBytes =
                 "validation".equals(params.mode()) ? VALIDATION_LIMIT_BYTES : REVIEW_LIMIT_BYTES;
-        Response response =
-                diffClient.get(
-                        base.api(),
-                        token.token(),
-                        params.owner(),
-                        params.repo(),
-                        params.number(),
-                        limitBytes);
+        Response response = Response.of(Status.NETWORK);
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            response =
+                    diffClient.get(
+                            base.api(),
+                            token.token(),
+                            params.owner(),
+                            params.repo(),
+                            params.number(),
+                            limitBytes);
+            if (!retryable(response.status())
+                    || attempt == MAX_ATTEMPTS
+                    || Thread.currentThread().isInterrupted()) break;
+            backoff.pause(attempt);
+        }
         return switch (response.status()) {
             case OK -> PrDiffResult.success(response.diff(), response.truncated(), limitBytes);
             case UNAUTHENTICATED ->
@@ -70,7 +88,8 @@ public final class PrDiffService {
             case NETWORK ->
                     PrDiffResult.failure(
                             "network_error", "Unable to reach GitHub. Check your connection.");
-            case API -> PrDiffResult.failure("api_failed", "GitHub API request failed.");
+            case API, TRANSIENT_API ->
+                    PrDiffResult.failure("api_failed", "GitHub API request failed.");
         };
     }
 
@@ -80,6 +99,10 @@ public final class PrDiffService {
     interface DiffClient {
         Response get(
                 String api, String token, String owner, String repo, int number, int limitBytes);
+    }
+
+    interface Backoff {
+        void pause(int attempt);
     }
 
     record Response(Status status, String diff, boolean truncated) {
@@ -97,6 +120,7 @@ public final class PrDiffService {
         UNAUTHENTICATED,
         RATE_LIMITED,
         NETWORK,
+        TRANSIENT_API,
         API
     }
 
@@ -124,8 +148,10 @@ public final class PrDiffService {
                 if (response.statusCode() == 401 || response.statusCode() == 403)
                     return Response.of(Status.UNAUTHENTICATED);
                 if (response.statusCode() == 429) return Response.of(Status.RATE_LIMITED);
-                if (response.statusCode() < 200 || response.statusCode() >= 300)
-                    return Response.of(Status.API);
+                if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                    return Response.of(
+                            response.statusCode() >= 500 ? Status.TRANSIENT_API : Status.API);
+                }
                 try (InputStream input = response.body()) {
                     return read(input, limitBytes);
                 }
@@ -147,6 +173,23 @@ public final class PrDiffService {
             return Response.ok(
                     truncated && reviewMode ? diff + TRUNCATION_MARKER : diff, truncated);
         }
+    }
+
+    private static final class ThreadBackoff implements Backoff {
+        @Override
+        public void pause(int attempt) {
+            try {
+                Thread.sleep(250L * attempt);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private static boolean retryable(Status status) {
+        return status == Status.RATE_LIMITED
+                || status == Status.NETWORK
+                || status == Status.TRANSIENT_API;
     }
 
     private static boolean valid(String value) {

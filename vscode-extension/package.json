@@ -75,7 +75,8 @@
         "pr-pilot.githubBaseUrl": {
           "type": "string",
           "default": "https://github.com",
-          "pattern": "^https://.+",
+          "pattern": "^https://[^/:?#]+/?$",
+          "patternErrorMessage": "Use an HTTPS origin without credentials, a port, path, query, or fragment.",
           "description": "GitHub base URL. Change for GitHub Enterprise (e.g. https://github.mycompany.com)."
         },
         "pr-pilot.notificationsEnabled": {
@@ -197,9 +198,10 @@
     "lint": "eslint .",
     "build:test": "tsc -p tsconfig.test.json",
     "test:unit": "sh -c 'npm run build:test && node --test dist-test/test/*.test.js; rc=$?; rm -rf dist-test; exit $rc'",
+    "test:sidecar": "node ./scripts/smoke-sidecar.mjs",
     "stage:webview": "node ./scripts/stage-webview.mjs",
     "stage:sidecar": "node ./scripts/stage-sidecar.mjs",
-    "package:vsix": "npm run build && npm run stage:webview && npm run stage:sidecar && npx @vscode/vsce package"
+    "package:vsix": "npm --prefix ../webview run build && ../gradlew :sidecar:bootJar && npm run build && npm run stage:webview && npm run stage:sidecar && npx --yes @vscode/vsce package"
   },
   "dependencies": {
     "@github/copilot-sdk": "^1.0.6",

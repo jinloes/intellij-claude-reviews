@@ -25,18 +25,18 @@ Update docs as part of each coding task:
 
 When logic changes in one host, update the parallel file in the other host:
 
+GitHub authentication, HTTP, query, repository detection, diff, and review mutation behavior has
+one implementation in `github-engine`. Do not add host-local GitHub behavior or fallback transport;
+mirror only the IntelliJ direct adapter and VS Code sidecar RPC wiring when capabilities change.
+
 | Changed file | Must also update |
 |---|---|
 | `ClaudeService.kt` prompt constants (`REVIEW_INSTRUCTIONS`, `CHAT_PERSONA`) | `vscode-extension/src/claude.ts` same constants |
 | `ClaudeService.kt` `buildPrompt`/`buildChatPrompt`/`buildFocusedChatPrompt` | `vscode-extension/src/claude.ts` same functions |
 | `ClaudeService.kt` stream-json review parsing | `vscode-extension/src/claude.ts` review event loop |
-| `GitHubService.kt` encode/decode/comment-body helpers | `vscode-extension/src/github.ts` matching helpers |
-| `GitHubService.kt` API call structure/headers/error handling | `vscode-extension/src/github.ts` `ghRequest` + callers |
 | `GitWorktreeService.kt` worktree create/remove/find-root logic | `vscode-extension/src/worktree.ts` matching functions |
 | `WebviewPanel.resolvePrClaudeService`/worktree lifecycle | `vscode-extension/src/extension.ts` `resolveWorkingDir`/`clearWorktree` |
-| `PRToolWindowFactory.buildQuery` query behavior | `vscode-extension/src/github.ts` `searchPRs` |
 | `PRNotificationService` poll/source-labeling/merge logic | `vscode-extension/src/notifications.ts` + `extension.ts` `PRNotificationPoller.poll` |
-| `GitHubAuthService.findGhBinary` binary path probes | `vscode-extension/src/github.ts` `findGhBinary` |
 | `ClaudeService.findClaudeBinary` / `CopilotService.findCopilotBinary` | `vscode-extension/src/claude.ts` + `vscode-extension/src/copilot.ts` |
 | `CopilotService.kt` SDK session setup, stream events, effort normalization | `vscode-extension/src/copilot.ts` |
 | `CopilotModelDiscovery` model probing / `PluginSettingsComponent` model combo | `vscode-extension/src/copilot.ts` `listModels`/`filterModelIds` + `extension.ts` `selectCopilotModel` command |
@@ -44,8 +44,7 @@ When logic changes in one host, update the parallel file in the other host:
 | `CopilotService.DEFAULT_REASONING_EFFORT` | `vscode-extension/src/copilot.ts` |
 | `webview/src/bridge/types.ts` message schemas | `WebviewPanel.java` and `vscode-extension/src/extension.ts` handlers |
 | `PluginSettings` adding new setting | `vscode-extension/package.json` config contribution + `vscode-extension/src/extension.ts` reader |
-| `sidecar/.../pr/PrSearchQueryService.java` query behavior | `vscode-extension/src/github.ts` `buildPRSearchQuery` (the sidecar's fallback path) |
-| `sidecar/.../repo/RepoDetector.java` (+ `RemoteUrlParser`/`GitDirectoryResolver`/`GitConfigOriginReader`) detection behavior | `vscode-extension/src/github.ts` `detectCurrentRepo` (the sidecar's fallback path) and `intellij-plugin/.../RepoDetector.java` |
+| `github-engine` public capability/result changes | `IntellijGitHubService.java`, `sidecar/StdioJsonRpcServer.java`, and `vscode-extension/src/sidecar.ts` wiring |
 
 ## Testing conventions
 

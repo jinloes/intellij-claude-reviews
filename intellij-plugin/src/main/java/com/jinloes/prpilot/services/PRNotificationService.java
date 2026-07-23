@@ -72,6 +72,10 @@ public final class PRNotificationService implements Disposable {
         }
     }
 
+    public void resetSeenState() {
+        seenSet.reset();
+    }
+
     public boolean isPolling() {
         ScheduledFuture<?> task = scheduledTask;
         return task != null && !task.isCancelled();
@@ -111,19 +115,13 @@ public final class PRNotificationService implements Disposable {
         PluginSettings settings = PluginSettings.getInstance();
         if (!settings.isNotificationsEnabled()) return;
 
-        String token = settings.getGithubToken();
-        if (token == null || token.isBlank()) {
-            recordPollStatus(AUTH_MISSING_ERROR);
-            return;
-        }
-
         String pollError = null;
         List<PullRequest> reviewRequested = new ArrayList<>();
         List<PullRequest> starredPrs = new ArrayList<>();
 
         if (settings.isNotifyReviewRequested()) {
             try {
-                reviewRequested.addAll(githubService.searchPRs(token, REVIEW_REQUESTED_QUERY));
+                reviewRequested.addAll(githubService.searchPRs(REVIEW_REQUESTED_QUERY));
             } catch (Exception e) {
                 log.warn("PR notification poll failed", e);
                 pollError = sanitizeError(e);
@@ -132,14 +130,13 @@ public final class PRNotificationService implements Disposable {
 
         if (settings.isNotifyStarredRepos()) {
             try {
-                List<String> starred = githubService.getStarredRepos(token);
+                List<String> starred = githubService.getStarredRepos();
                 // Cap at 25 repos to avoid a huge search query
                 List<String> slice = starred.subList(0, Math.min(starred.size(), 25));
                 if (!slice.isEmpty()) {
                     String repoQ =
                             slice.stream().map(r -> "repo:" + r).collect(Collectors.joining(" "));
-                    starredPrs.addAll(
-                            githubService.searchPRs(token, buildStarredReposQuery(repoQ)));
+                    starredPrs.addAll(githubService.searchPRs(buildStarredReposQuery(repoQ)));
                 }
             } catch (Exception e) {
                 log.warn("PR notification poll failed", e);

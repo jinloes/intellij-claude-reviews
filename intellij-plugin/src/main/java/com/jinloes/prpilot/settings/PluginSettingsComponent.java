@@ -9,8 +9,9 @@ import com.intellij.util.ui.FormBuilder;
 import com.intellij.util.ui.JBUI;
 import com.jinloes.prpilot.model.ReviewProvider;
 import com.jinloes.prpilot.services.CopilotModelDiscovery;
-import com.jinloes.prpilot.services.GitHubAuthService;
 import com.jinloes.prpilot.services.PRNotificationService;
+import com.jinloes.prpilot.sidecar.github.CheckAuthResult;
+import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
 import java.awt.Component;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -466,29 +467,25 @@ public class PluginSettingsComponent {
             checkButton.setEnabled(true);
             return;
         }
-        String apiUrl =
-                baseUrl.equals("https://github.com")
-                        ? "https://api.github.com"
-                        : baseUrl + "/api/v3";
-
         ApplicationManager.getApplication()
                 .executeOnPooledThread(
                         () -> {
-                            try {
-                                String token = authService.resolveToken(baseUrl);
-                                String username =
-                                        authService.getAuthenticatedUsername(apiUrl, token);
-                                PluginSettings.getInstance().setGithubUsername(username);
+                            CheckAuthResult result = authService.check(baseUrl);
+                            if ("authenticated".equals(result.status())
+                                    && result.username() != null) {
+                                String username = result.username();
                                 SwingUtilities.invokeLater(
                                         () -> {
                                             statusLabel.setText("Signed in as @" + username);
                                             checkButton.setEnabled(true);
                                         });
-                            } catch (Exception ex) {
+                            } else {
                                 SwingUtilities.invokeLater(
                                         () -> {
                                             statusLabel.setText(
-                                                    "<html><font color='red'>Not signed in — run 'gh auth login'</font></html>");
+                                                    "<html><font color='red'>"
+                                                            + result.message()
+                                                            + "</font></html>");
                                             checkButton.setEnabled(true);
                                         });
                             }
@@ -509,12 +506,6 @@ public class PluginSettingsComponent {
     }
 
     private void refreshAuthStatus() {
-        PluginSettings settings = PluginSettings.getInstance();
-        String username = settings.getGithubUsername();
-        if (!username.isBlank()) {
-            statusLabel.setText("Signed in as @" + username);
-        } else {
-            checkStatus();
-        }
+        checkStatus();
     }
 }

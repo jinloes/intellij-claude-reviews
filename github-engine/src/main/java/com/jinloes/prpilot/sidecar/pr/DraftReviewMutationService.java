@@ -20,9 +20,8 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
- * Save/submit/delete orchestration for GitHub pending (draft) reviews; tokens never leave the
- * sidecar process. Mirrors GitHubService.kt's {@code saveDraftReview}/{@code submitDraftReview}/
- * {@code deleteDraftReview}, including the body-first, per-comment 422 fallback.
+ * Canonical save/submit/delete orchestration for GitHub pending reviews; tokens never leave the
+ * engine. Includes the body-first, per-comment 422 fallback used by both hosts.
  */
 public final class DraftReviewMutationService {
     private static final Duration TIMEOUT = Duration.ofSeconds(15);

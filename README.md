@@ -19,8 +19,9 @@ It helps you discover PRs, generate AI-assisted reviews (Claude or Copilot), edi
 ## Repository layout
 
 - `core/` - Kotlin Multiplatform shared logic (JVM + JS)
+- `github-engine/` - Plain Java 17 GitHub/repository/review engine shared by both hosts
 - `intellij-plugin/` - IntelliJ host integration
-- `sidecar/` - Java sidecar used by the VS Code extension for shared GitHub operations
+- `sidecar/` - Thin stdio JSON-RPC process adapter used by the VS Code extension
 - `vscode-extension/` - VS Code host integration
 - `webview/` - Shared React webview UI
 - `.github/workflows/release.yml` - Tag-driven release workflow for both plugin artifacts
@@ -29,13 +30,18 @@ It helps you discover PRs, generate AI-assisted reviews (Claude or Copilot), edi
 
 ## Requirements
 
-- Java 17 (for Gradle builds)
+- Java 17+ (for Gradle builds and at VS Code extension runtime)
 - Node.js 20+ (Node 20.17+ recommended by extension engines)
 - npm
 - GitHub CLI (`gh`) authenticated (`gh auth login`)
 - Optional for runtime review providers:
   - Claude CLI (`claude`)
   - GitHub Copilot CLI (`copilot`)
+
+The IntelliJ plugin calls `github-engine` directly in the IDE JVM. The VS Code extension bundles
+the sidecar JAR and launches it with `java`; it checks protocol compatibility and required
+capabilities during activation. If Java 17+ is unavailable, PR Pilot reports an actionable setup
+error instead of falling back to a separate TypeScript GitHub implementation.
 
 ## Local development
 
@@ -110,6 +116,7 @@ CI checks:
 - Gradle Spotless + JVM checks (`spotlessCheck`, `check`, `:core:jvmTest`, `:intellij-plugin:unitTest`)
 - Webview lint/typecheck/build
 - VS Code extension lint/typecheck/unit tests/build
+- Java 17 sidecar protocol smoke test and packaged `.vsix` JAR assertion
 
 Releases are tag-driven via `.github/workflows/release.yml`.
 
@@ -144,6 +151,7 @@ User-facing behavior must stay aligned between IntelliJ and VS Code. If you upda
 
 ## Notes
 
-- Runtime auth and provider setup are host-specific, but shared model and review semantics should remain aligned.
+- GitHub authentication and API behavior are shared in `github-engine`; hosts never receive or persist GitHub tokens.
+- Review-provider CLI setup remains host-specific, while prompt and review semantics stay aligned.
 - For deeper architecture details and persistence files, see `ARCHITECTURE.md`.
 

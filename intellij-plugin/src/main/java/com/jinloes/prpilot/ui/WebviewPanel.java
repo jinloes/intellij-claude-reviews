@@ -29,7 +29,6 @@ import com.jinloes.prpilot.model.ReviewProvider;
 import com.jinloes.prpilot.model.ReviewResult;
 import com.jinloes.prpilot.services.ClaudeService;
 import com.jinloes.prpilot.services.CopilotService;
-import com.jinloes.prpilot.services.GitHubService;
 import com.jinloes.prpilot.services.GitWorktreeService;
 import com.jinloes.prpilot.services.IntellijClaudeService;
 import com.jinloes.prpilot.services.IntellijGitHubService;
@@ -582,24 +581,6 @@ public class WebviewPanel implements Disposable {
         getApplication()
                 .executeOnPooledThread(
                         () -> {
-                            String token = PluginSettings.getInstance().getGithubToken();
-                            if (StringUtils.isBlank(token)) {
-                                pushMessage(
-                                        new DraftLoadedMsg(
-                                                "draftLoaded",
-                                                key,
-                                                "NO_DRAFT",
-                                                null,
-                                                null,
-                                                null,
-                                                null,
-                                                false,
-                                                false,
-                                                "No GitHub token configured.",
-                                                currentProviderReadiness()));
-                                return;
-                            }
-
                             // Check local index upfront (no network) so we can prefetch
                             // the current HEAD SHA in parallel if a staleness check is
                             // likely to be needed.
@@ -622,7 +603,7 @@ public class WebviewPanel implements Disposable {
                                                     () -> {
                                                         try {
                                                             return ghSvc.getPRHeadSha(
-                                                                    token, owner, repo, number);
+                                                                    owner, repo, number);
                                                         } catch (Exception ex) {
                                                             log.warn(
                                                                     "getPRHeadSha prefetch"
@@ -637,8 +618,7 @@ public class WebviewPanel implements Disposable {
                                     CompletableFuture.supplyAsync(
                                             () -> {
                                                 try {
-                                                    return ghSvc.isPRMerged(
-                                                            token, owner, repo, number);
+                                                    return ghSvc.isPRMerged(owner, repo, number);
                                                 } catch (Exception e) {
                                                     log.warn(
                                                             "isPRMerged failed: {}",
@@ -647,12 +627,12 @@ public class WebviewPanel implements Disposable {
                                                 }
                                             });
 
-                            CompletableFuture<GitHubService.PendingReview> pendingFuture =
+                            CompletableFuture<IntellijGitHubService.PendingReview> pendingFuture =
                                     CompletableFuture.supplyAsync(
                                             () -> {
                                                 try {
                                                     return ghSvc.loadDraftReview(
-                                                            token, owner, repo, number);
+                                                            owner, repo, number);
                                                 } catch (Exception e) {
                                                     log.warn(
                                                             "loadDraftReview failed: {}",
@@ -665,8 +645,7 @@ public class WebviewPanel implements Disposable {
                                     CompletableFuture.supplyAsync(
                                             () -> {
                                                 try {
-                                                    return ghSvc.getPRDiff(
-                                                            token, owner, repo, number);
+                                                    return ghSvc.getPRDiff(owner, repo, number);
                                                 } catch (Exception e) {
                                                     log.warn(
                                                             "getPRDiff prefetch failed: {}",
@@ -679,8 +658,7 @@ public class WebviewPanel implements Disposable {
                                     CompletableFuture.supplyAsync(
                                             () -> {
                                                 try {
-                                                    return ghSvc.getPRDiffFull(
-                                                            token, owner, repo, number);
+                                                    return ghSvc.getPRDiffFull(owner, repo, number);
                                                 } catch (Exception e) {
                                                     log.warn(
                                                             "getPRDiffFull prefetch failed: {}",
@@ -694,7 +672,7 @@ public class WebviewPanel implements Disposable {
                                             () -> {
                                                 try {
                                                     return ghSvc.getExistingReviewsSummary(
-                                                            token, owner, repo, number);
+                                                            owner, repo, number);
                                                 } catch (Exception e) {
                                                     log.warn(
                                                             "getExistingReviewsSummary prefetch"
@@ -705,7 +683,7 @@ public class WebviewPanel implements Disposable {
                                             });
 
                             boolean merged = mergedFuture.join();
-                            GitHubService.PendingReview pending = pendingFuture.join();
+                            IntellijGitHubService.PendingReview pending = pendingFuture.join();
                             String fetchedDiff = diffFuture.join();
                             String fetchedValidationDiff = validationDiffFuture.join();
                             String fetchedReviews = reviewsFuture.join();
@@ -730,8 +708,7 @@ public class WebviewPanel implements Disposable {
                             // Delete stale draft on a merged PR, best-effort.
                             if (merged && pending != null) {
                                 try {
-                                    ghSvc.deleteDraftReview(
-                                            token, owner, repo, number, pending.getId());
+                                    ghSvc.deleteDraftReview(owner, repo, number, pending.id());
                                 } catch (Exception e) {
                                     log.warn("deleteDraftReview failed: {}", e.getMessage());
                                 }
@@ -766,8 +743,7 @@ public class WebviewPanel implements Disposable {
                                 boolean stale =
                                         StringUtils.isNotBlank(savedHeadSha)
                                                 && !savedHeadSha.equals(currentHeadSha);
-                                ReviewResultDto dto =
-                                        ReviewMapper.INSTANCE.toDto(pending.getResult());
+                                ReviewResultDto dto = ReviewMapper.INSTANCE.toDto(pending.result());
                                 pushMessage(
                                         new PrDraftStatusMsg(
                                                 "prDraftStatusUpdated", number, owner, repo, true));
@@ -776,19 +752,19 @@ public class WebviewPanel implements Disposable {
                                                 "draftLoaded",
                                                 key,
                                                 "DRAFT_PRESENT",
-                                                pending.getId(),
+                                                pending.id(),
                                                 dto,
                                                 prefetchedDiff,
                                                 effectiveValidationDiff,
                                                 stale,
-                                                pending.component3(),
+                                                pending.importedFromGitHub(),
                                                 "Loaded pending draft review.",
                                                 providerReadiness));
                                 synchronized (WebviewPanel.this) {
                                     if (activePR == pr && selectionRevision == revision) {
-                                        pendingReviewId = pending.getId();
+                                        pendingReviewId = pending.id();
                                         pendingReviewKey = key;
-                                        lastResult = pending.getResult();
+                                        lastResult = pending.result();
                                     }
                                 }
                                 return;
@@ -833,12 +809,6 @@ public class WebviewPanel implements Disposable {
             return;
         }
 
-        String token = PluginSettings.getInstance().getGithubToken();
-        if (StringUtils.isBlank(token)) {
-            pushMessage(new ErrorMsg("reviewError", key, "No GitHub token configured."));
-            return;
-        }
-
         // Provider preflight: fail fast with actionable guidance instead of a raw CLI spawn error
         // when the configured review provider's binary isn't installed/resolvable.
         ReviewProvider provider = PluginSettings.getInstance().getReviewProvider();
@@ -854,7 +824,6 @@ public class WebviewPanel implements Disposable {
         // Dispatch all blocking work to a pooled thread so the JCEF bridge returns immediately
         // and status messages can flow during the network-fetch phase.
         final PullRequest finalPr = pr;
-        final String finalToken = token;
         getApplication()
                 .executeOnPooledThread(
                         () -> {
@@ -884,7 +853,7 @@ public class WebviewPanel implements Disposable {
                                         new ReviewGeneratingMsg(
                                                 "reviewGenerating", key, "Fetching diff…"));
                                 try {
-                                    diff = ghSvc.getPRDiff(finalToken, owner, repo, number);
+                                    diff = ghSvc.getPRDiff(owner, repo, number);
                                 } catch (Exception e) {
                                     publishIfCurrent(
                                             finalPr,
@@ -903,8 +872,7 @@ public class WebviewPanel implements Disposable {
                                 validationDiff = snapshotValidationDiff;
                             } else {
                                 try {
-                                    validationDiff =
-                                            ghSvc.getPRDiffFull(finalToken, owner, repo, number);
+                                    validationDiff = ghSvc.getPRDiffFull(owner, repo, number);
                                 } catch (Exception e) {
                                     log.warn(
                                             "getPRDiffFull failed; falling back to truncated diff: {}",
@@ -921,8 +889,7 @@ public class WebviewPanel implements Disposable {
                             } else {
                                 try {
                                     existingReviews =
-                                            ghSvc.getExistingReviewsSummary(
-                                                    finalToken, owner, repo, number);
+                                            ghSvc.getExistingReviewsSummary(owner, repo, number);
                                 } catch (Exception e) {
                                     log.warn(
                                             "getExistingReviewsSummary failed: {}", e.getMessage());
@@ -932,7 +899,7 @@ public class WebviewPanel implements Disposable {
 
                             IntellijClaudeService reviewService = claudeService;
                             try {
-                                reviewService = resolvePrClaudeService(finalPr, finalToken, true);
+                                reviewService = resolvePrClaudeService(finalPr, true);
                             } catch (Exception e) {
                                 log.warn(
                                         "Worktree resolution for PR #{} failed; falling back to"
@@ -1082,15 +1049,9 @@ public class WebviewPanel implements Disposable {
         }
         lastResult = result;
 
-        String token = PluginSettings.getInstance().getGithubToken();
-        if (StringUtils.isBlank(token)) {
-            pushMessage(new ErrorMsg("draftSaveError", key, "No GitHub token configured."));
-            return;
-        }
-
-        GitHubService.SaveDraftResult saved;
+        IntellijGitHubService.SaveDraftResult saved;
         try {
-            saved = ghSvc.saveDraftReview(token, owner, repo, number, result, orphans);
+            saved = ghSvc.saveDraftReview(owner, repo, number, result, orphans);
         } catch (Exception e) {
             pushMessage(
                     new ErrorMsg(
@@ -1102,7 +1063,7 @@ public class WebviewPanel implements Disposable {
 
         String headSha = "";
         try {
-            headSha = ghSvc.getPRHeadSha(token, owner, repo, number);
+            headSha = ghSvc.getPRHeadSha(owner, repo, number);
         } catch (Exception e) {
             log.warn("getPRHeadSha failed during saveDraft: {}", e.getMessage());
         }
@@ -1121,12 +1082,11 @@ public class WebviewPanel implements Disposable {
         if (!isActivePrKey(key) || selectionRevision != revision) {
             return;
         }
-        pendingReviewId = saved.getReviewId();
+        pendingReviewId = saved.reviewId();
         pendingReviewKey = key;
 
         pushMessage(
-                new DraftSavedMsg(
-                        "draftSaved", key, saved.getReviewId(), saved.getCommentsDropped()));
+                new DraftSavedMsg("draftSaved", key, saved.reviewId(), saved.commentsDropped()));
         pushMessage(new PrDraftStatusMsg("prDraftStatusUpdated", number, owner, repo, true));
     }
 
@@ -1147,14 +1107,8 @@ public class WebviewPanel implements Disposable {
             return;
         }
 
-        String token = PluginSettings.getInstance().getGithubToken();
-        if (StringUtils.isBlank(token)) {
-            pushMessage(new ErrorMsg("reviewSubmitError", key, "No GitHub token configured."));
-            return;
-        }
-
         try {
-            ghSvc.submitDraftReview(token, owner, repo, number, reviewId, verdict, comment);
+            ghSvc.submitDraftReview(owner, repo, number, reviewId, verdict, comment);
         } catch (Exception e) {
             pushMessage(
                     new ErrorMsg(
@@ -1192,14 +1146,8 @@ public class WebviewPanel implements Disposable {
             return;
         }
 
-        String token = PluginSettings.getInstance().getGithubToken();
-        if (StringUtils.isBlank(token)) {
-            pushMessage(new ErrorMsg("draftDeleteError", key, "No GitHub token configured."));
-            return;
-        }
-
         try {
-            ghSvc.deleteDraftReview(token, owner, repo, number, reviewId);
+            ghSvc.deleteDraftReview(owner, repo, number, reviewId);
         } catch (Exception e) {
             pushMessage(
                     new ErrorMsg(
@@ -1240,8 +1188,7 @@ public class WebviewPanel implements Disposable {
         }
         String key = bridgePrKey(pr.getNumber(), pr.getOwner(), pr.getRepo());
 
-        String token = PluginSettings.getInstance().getGithubToken();
-        IntellijClaudeService chatService = resolvePrClaudeService(pr, token, false);
+        IntellijClaudeService chatService = resolvePrClaudeService(pr, false);
 
         // When the user has selected a code snippet, use a focused prompt (no history, no PR
         // context) — matching VS Code's buildFocusedChatPrompt path. Responses for focused
@@ -1446,8 +1393,7 @@ public class WebviewPanel implements Disposable {
         return sb.toString();
     }
 
-    private IntellijClaudeService resolvePrClaudeService(
-            PullRequest pr, String token, boolean emitStatus) {
+    private IntellijClaudeService resolvePrClaudeService(PullRequest pr, boolean emitStatus) {
         // Phase 1: quick local checks — hold the lock briefly to read shared fields.
         final String key;
         final java.io.File detectedRoot;
@@ -1459,15 +1405,12 @@ public class WebviewPanel implements Disposable {
             if (activePrClaudeService != null && key.equals(activePrWorktreeKey)) {
                 return activePrClaudeService;
             }
-            if (StringUtils.isBlank(token)) {
-                return claudeService;
-            }
             String projectPath = project.getBasePath();
             if (projectPath == null) {
                 return claudeService;
             }
             java.io.File root = worktreeService.findGitRoot(new java.io.File(projectPath));
-            String currentRepo = RepoDetector.detectCurrentRepo(projectPath);
+            String currentRepo = ghSvc.detectCurrentRepo(projectPath);
             boolean sameRepo =
                     currentRepo != null
                             && currentRepo.equalsIgnoreCase(pr.getOwner() + "/" + pr.getRepo());
@@ -1487,9 +1430,9 @@ public class WebviewPanel implements Disposable {
         }
 
         try {
-            GitHubService.PRHeadInfo headInfo =
-                    ghSvc.getPRHeadInfo(token, pr.getOwner(), pr.getRepo(), pr.getNumber());
-            if (headInfo.getRef().isBlank()) {
+            IntellijGitHubService.PRHeadInfo headInfo =
+                    ghSvc.getPRHeadInfo(pr.getOwner(), pr.getRepo(), pr.getNumber());
+            if (headInfo.ref().isBlank()) {
                 return claudeService;
             }
 
@@ -1505,9 +1448,9 @@ public class WebviewPanel implements Disposable {
                     new java.io.File(System.getProperty("java.io.tmpdir"), "pr-pilot-wt-" + unique);
             if (headInfo.isFork()) {
                 worktreeService.createWorktreeFromFork(
-                        detectedRoot, headInfo.getForkCloneUrl(), headInfo.getRef(), wt);
+                        detectedRoot, headInfo.forkCloneUrl(), headInfo.ref(), wt);
             } else {
-                worktreeService.createWorktree(detectedRoot, headInfo.getRef(), wt);
+                worktreeService.createWorktree(detectedRoot, headInfo.ref(), wt);
             }
 
             // Phase 3: write results under lock; double-check the PR hasn't changed.

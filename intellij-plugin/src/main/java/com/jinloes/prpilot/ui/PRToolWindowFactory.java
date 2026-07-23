@@ -14,7 +14,6 @@ import com.intellij.ui.jcef.JBCefApp;
 import com.jinloes.prpilot.model.PullRequest;
 import com.jinloes.prpilot.services.IntellijGitHubService;
 import com.jinloes.prpilot.services.UserFacingErrors;
-import com.jinloes.prpilot.settings.PluginSettings;
 import com.jinloes.prpilot.settings.PluginSettingsConfigurable;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -147,47 +146,26 @@ public class PRToolWindowFactory implements ToolWindowFactory {
 
     private static void loadAndPushPRs(Project project, WebviewPanel webviewPanel)
             throws Exception {
-        String token = PluginSettings.getInstance().getGithubToken();
-        if (token == null) {
-            PluginSettings.AuthDiagnosis diagnosis = PluginSettings.getInstance().diagnoseAuth();
-            String detail =
-                    diagnosis == PluginSettings.AuthDiagnosis.NOT_INSTALLED
-                            ? "The 'gh' CLI was not found. Install it from https://cli.github.com,"
-                                    + " then run 'gh auth login' in a terminal and click Refresh."
-                            : "Run 'gh auth login' in a terminal to authenticate, then click"
-                                    + " Refresh.";
-            ApplicationManager.getApplication()
-                    .invokeLater(
-                            () -> webviewPanel.pushSetupRequired(setupReason(diagnosis), detail));
-            return;
-        }
         try {
-            String currentRepo = RepoDetector.detectCurrentRepo(project.getBasePath());
+            IntellijGitHubService github = IntellijGitHubService.getInstance();
+            IntellijGitHubService.PullRequestList result =
+                    github.listPullRequests(
+                            project.getBasePath(),
+                            webviewPanel.getPrStateFilter(),
+                            webviewPanel.getSearchScope());
+            String currentRepo = result.currentRepo();
 
             List<String> starred;
             try {
-                starred = IntellijGitHubService.getInstance().getStarredRepos(token);
+                starred = github.getStarredRepos();
             } catch (Exception e) {
                 log.warn("Could not fetch starred repos: {}", e.getMessage());
                 starred = List.of();
             }
 
-            String query =
-                    buildQuery(
-                            currentRepo,
-                            starred,
-                            webviewPanel.getPrStateFilter(),
-                            webviewPanel.getSearchScope());
-            log.info("Webview PR query: {}", query);
-            // Over-fetch by one so we can distinguish "exactly the limit" from "more exist".
-            List<PullRequest> fetched =
-                    IntellijGitHubService.getInstance()
-                            .searchPRs(token, query, WebviewPanel.PR_SEARCH_LIMIT + 1);
-            boolean limited = fetched.size() > WebviewPanel.PR_SEARCH_LIMIT;
-            List<PullRequest> prs =
-                    limited
-                            ? new ArrayList<>(fetched.subList(0, WebviewPanel.PR_SEARCH_LIMIT))
-                            : fetched;
+            log.info("Webview PR query: {}", result.query());
+            boolean limited = result.limited();
+            List<PullRequest> prs = new ArrayList<>(result.pullRequests());
             prs.sort(Comparator.comparing(PullRequest::getCreatedAt).reversed());
 
             String defaultRepo =
@@ -212,35 +190,5 @@ public class PRToolWindowFactory implements ToolWindowFactory {
             ApplicationManager.getApplication()
                     .invokeLater(() -> webviewPanel.pushSetupRequired("load_failed", detail));
         }
-    }
-
-    static String setupReason(PluginSettings.AuthDiagnosis diagnosis) {
-        return diagnosis == PluginSettings.AuthDiagnosis.NOT_INSTALLED
-                ? "gh_not_installed"
-                : "gh_not_authenticated";
-    }
-
-    static String buildQuery(
-            String currentRepo, List<String> starredRepos, String state, String searchScope) {
-        StringBuilder q = new StringBuilder("is:pr");
-        if ("closed".equals(state)) {
-            q.append(" is:closed");
-        } else if (!"all".equals(state)) {
-            q.append(" is:open");
-        }
-
-        switch (WebviewPanel.normalizeSearchScope(searchScope)) {
-            case "assigned" -> q.append(" assignee:@me");
-            case "reviewRequested" -> q.append(" review-requested:@me");
-            case "authored" -> q.append(" author:@me");
-            default -> {
-                if (StringUtils.isNotBlank(currentRepo)) {
-                    q.append(" repo:").append(currentRepo);
-                } else {
-                    q.append(" author:@me");
-                }
-            }
-        }
-        return q.toString();
     }
 }
