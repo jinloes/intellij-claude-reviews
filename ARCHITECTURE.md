@@ -33,9 +33,6 @@ core/                                  – KMP module (jvm + js targets)
       DiffParser.kt                  – Kotlin object; unified diff parser; DiffFile / DiffLine types
     util/
       ProcessUtil.kt                 – expect object; findBinary(name, candidates); jvmMain actual uses java.io.File, jsMain actual uses Node.js fs
-  src/jvmMain/kotlin/com/jinloes/prpilot/services/
-      PendingReviewIndex.kt          – Local JSON index of saved drafts (~/.pr-pilot/pending-prs.json)
-      SeenPRSet.kt                   – Local JSON set of notified PR IDs (~/.pr-pilot/seen-prs.json)
   src/jsMain/kotlin/com/jinloes/prpilot/
       util/ProcessUtil.kt            – JS actual uses Node fs.existsSync/statSync
 
@@ -55,6 +52,8 @@ intellij-plugin/                       – IntelliJ plugin host; depends on :cor
       IntellijGitHubService.java
       IntellijClaudeService.java       – Adapts review-engine's ClaudeService/CopilotService to IntelliJ threading (pooled I/O, EDT callbacks)
       UserFacingErrors.java           – Maps runtime/network exceptions to actionable UI copy
+      PendingReviewIndex.java         – Local JSON index of saved drafts (~/.pr-pilot/pending-prs.json)
+      SeenPRSet.java                  – Local JSON set of notified PR IDs (~/.pr-pilot/seen-prs.json)
       PRNotificationService.java
       PRNotificationStartup.java
     settings/
@@ -205,7 +204,7 @@ CI runs full-page Playwright + axe scenarios (`npm run test:a11y`) using `playwr
 The "Verify" and "Suggest fix" per-comment actions (`buildVerifyCommentPrompt`/`buildExampleFixPrompt` in `ReviewPane/verifyPrompt.ts`) instruct the model to return only a bare JSON object (no prose) matching one of two fixed schemas. `ChatPane` treats every assistant reply as potentially structured: `structuredResult.ts`'s `parseStructuredResult` tries to parse the content (tolerating a stray ```` ```json ```` fence some models add despite instructions) against the verify schema (`verdict`/`why`/`action`/`replacementComment`) and the example-fix schema (`approach`/`examplePatch`/`why`/`risks`/`testUpdates`/`missingContext`); a match renders a dedicated card (verdict badge, why, suggested replacement, etc.) instead of the raw JSON string being passed through the Markdown renderer, which previously showed the reviewer a wall of escaped-quote JSON text. Ordinary free-form chat replies simply fail both schema checks and fall back to the normal Markdown bubble. If either prompt's JSON schema changes, `structuredResult.ts`'s parser and field rendering must be updated in lockstep.
 
 ### Module boundaries
-`core` is KMP and has zero IntelliJ dependencies; it holds only shared models (`PullRequest`, `ReviewResult`, etc.), the diff parser, and the two local-file-index services (`PendingReviewIndex`, `SeenPRSet`). `github-engine` is a plain Java 17 library with no Spring or IDE APIs; both `intellij-plugin` and `sidecar` depend on it. `review-engine` is a plain Java 17 library owning Claude/Copilot CLI invocation, prompt building, and review-JSON parsing (`ClaudeService`, `CopilotService`, `CopilotModelDiscovery`, `GitWorktreeService`); both `intellij-plugin` and `sidecar` depend on it, so AI review generation has exactly one JVM implementation rather than being duplicated per host. `review-engine` depends on `core` only for shared models — it is JVM-only and does not need to compile to JS, unlike `core`. `intellij-plugin` also depends on the JVM variant of `core`.
+`core` is KMP and has zero IntelliJ dependencies; it holds only shared models (`PullRequest`, `ReviewResult`, etc.) and the diff parser. `intellij-plugin` also owns two IntelliJ-only local-file-index services (`PendingReviewIndex`, `SeenPRSet`, plain Java records/classes using Jackson) rather than `core`, since they are not shared with VS Code — the VS Code equivalent (`globalState`, see Notification parity below) is a different persistence mechanism entirely, so there is no cross-host code-sharing benefit to keeping them KMP. `github-engine` is a plain Java 17 library with no Spring or IDE APIs; both `intellij-plugin` and `sidecar` depend on it. `review-engine` is a plain Java 17 library owning Claude/Copilot CLI invocation, prompt building, and review-JSON parsing (`ClaudeService`, `CopilotService`, `CopilotModelDiscovery`, `GitWorktreeService`); both `intellij-plugin` and `sidecar` depend on it, so AI review generation has exactly one JVM implementation rather than being duplicated per host. `review-engine` depends on `core` only for shared models — it is JVM-only and does not need to compile to JS, unlike `core`. `intellij-plugin` also depends on the JVM variant of `core`.
 
 `sidecar` is a Java 17 Spring Boot application configured with `WebApplicationType.NONE`; it is not an HTTP server. Its protocol uses bounded `Content-Length`-framed UTF-8 JSON-RPC over standard input/output. Standard output must contain protocol frames only—diagnostics belong on standard error. GitHub, PR, repository, and review behavior belongs in `github-engine`/`review-engine`; Spring remains only the sidecar composition and lifecycle layer.
 
@@ -391,6 +390,8 @@ The `.vscode/launch.json` config `Run PR Pilot Extension Against Target Repo` pr
 No API keys or tokens are written to disk.
 
 ## Local data files
+
+IntelliJ-only (`intellij-plugin`'s `PendingReviewIndex`/`SeenPRSet`); VS Code persists the equivalent state via extension `globalState` instead (see Notification parity above).
 
 | Path | Purpose |
 |------|---------|
