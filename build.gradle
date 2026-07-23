@@ -14,7 +14,6 @@ idea {
             file('.gradle'),
             file('.claude'),
             file('build'),
-            file('org'),   // stray org.treesitter.TreeSitterProto.class from prior builds
         ]
     }
 }

@@ -10,10 +10,8 @@ import com.jinloes.prpilot.sidecar.pr.DraftReviewService;
 import com.jinloes.prpilot.sidecar.pr.PrDetailService;
 import com.jinloes.prpilot.sidecar.pr.PrDiffService;
 import com.jinloes.prpilot.sidecar.pr.PrListService;
-import com.jinloes.prpilot.sidecar.pr.PrSearchQueryService;
 import com.jinloes.prpilot.sidecar.pr.PrSupplementalService;
 import com.jinloes.prpilot.sidecar.repo.RepoDetector;
-import com.jinloes.prpilot.sidecar.review.ReviewJsonParser;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -34,8 +32,6 @@ class StdioJsonRpcServerTest {
                         objectMapper,
                         frameCodec,
                         new SidecarBootstrapService(),
-                        new ReviewJsonParser(objectMapper),
-                        new PrSearchQueryService(),
                         new RepoDetector(),
                         new GitHubAuthService(),
                         new PrListService(),
@@ -65,10 +61,6 @@ class StdioJsonRpcServerTest {
         assertThat(response.path("result").path("serviceName").asText())
                 .isEqualTo("pr-pilot-sidecar");
         assertThat(response.path("result").path("protocolVersion").asInt()).isEqualTo(1);
-        assertThat(response.path("result").path("capabilities").path("reviewParse").asBoolean())
-                .isTrue();
-        assertThat(response.path("result").path("capabilities").path("prSearchQuery").asBoolean())
-                .isTrue();
         assertThat(response.path("result").path("capabilities").path("githubAuth").asBoolean())
                 .isTrue();
         assertThat(response.path("result").path("capabilities").path("prList").asBoolean())
@@ -87,76 +79,6 @@ class StdioJsonRpcServerTest {
                 .isTrue();
         assertThat(response.path("result").path("capabilities").path("existingReviews").asBoolean())
                 .isTrue();
-    }
-
-    @Test
-    void parsesAValidProviderReview() {
-        JsonNode response =
-                server.handle(
-                        ("{\"jsonrpc\":\"2.0\",\"id\":\"parse-1\",\"method\":\"review/parse\","
-                                        + "\"params\":{\"raw\":\"```json\\n{\\\"summary\\\":\\\"s\\\","
-                                        + "\\\"verdict\\\":\\\"APPROVE\\\",\\\"lineComments\\\":[]}\\n```\"}}")
-                                .getBytes(StandardCharsets.UTF_8));
-
-        assertThat(response.path("id").asText()).isEqualTo("parse-1");
-        assertThat(response.path("result").path("valid").asBoolean()).isTrue();
-        assertThat(response.path("result").path("review").path("verdict").asText())
-                .isEqualTo("APPROVE");
-    }
-
-    @Test
-    void returnsAStructuredValidationResultForAnInvalidReview() {
-        JsonNode response =
-                server.handle(
-                        ("{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"review/parse\","
-                                        + "\"params\":{\"raw\":\"{\\\"summary\\\":\\\"s\\\","
-                                        + "\\\"verdict\\\":\\\"LGTM\\\",\\\"lineComments\\\":[]}\"}}")
-                                .getBytes(StandardCharsets.UTF_8));
-
-        assertThat(response.path("result").path("valid").asBoolean()).isFalse();
-        assertThat(response.path("result").path("error").path("code").asText())
-                .isEqualTo("invalid_review_json");
-        assertThat(response.path("result").path("error").path("message").asText())
-                .isEqualTo("review JSON has invalid verdict");
-    }
-
-    @Test
-    void rejectsMissingRawReviewParams() {
-        JsonNode response =
-                server.handle(
-                        "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"review/parse\",\"params\":{}}"
-                                .getBytes(StandardCharsets.UTF_8));
-
-        assertThat(response.path("error").path("code").asInt()).isEqualTo(-32602);
-    }
-
-    @Test
-    void buildsAPullRequestSearchQuery() {
-        JsonNode response =
-                server.handle(
-                        ("{\"jsonrpc\":\"2.0\",\"id\":\"query-1\",\"method\":\"pr/buildSearchQuery\","
-                                        + "\"params\":{\"state\":\"closed\",\"searchScope\":\"currentRepo\","
-                                        + "\"currentRepo\":\"acme/platform\"}}")
-                                .getBytes(StandardCharsets.UTF_8));
-
-        assertThat(response.path("id").asText()).isEqualTo("query-1");
-        assertThat(response.path("result").path("query").asText())
-                .isEqualTo("is:pr is:closed repo:acme/platform");
-    }
-
-    @Test
-    void rejectsUnknownOrNonTextPullRequestQueryParams() {
-        JsonNode unknownFieldResponse =
-                server.handle(
-                        "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"pr/buildSearchQuery\",\"params\":{\"extra\":true}}"
-                                .getBytes(StandardCharsets.UTF_8));
-        JsonNode nonTextResponse =
-                server.handle(
-                        "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"pr/buildSearchQuery\",\"params\":{\"state\":1}}"
-                                .getBytes(StandardCharsets.UTF_8));
-
-        assertThat(unknownFieldResponse.path("error").path("code").asInt()).isEqualTo(-32602);
-        assertThat(nonTextResponse.path("error").path("code").asInt()).isEqualTo(-32602);
     }
 
     @Test

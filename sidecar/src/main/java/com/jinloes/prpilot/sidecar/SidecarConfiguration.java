@@ -7,10 +7,8 @@ import com.jinloes.prpilot.sidecar.pr.DraftReviewService;
 import com.jinloes.prpilot.sidecar.pr.PrDetailService;
 import com.jinloes.prpilot.sidecar.pr.PrDiffService;
 import com.jinloes.prpilot.sidecar.pr.PrListService;
-import com.jinloes.prpilot.sidecar.pr.PrSearchQueryService;
 import com.jinloes.prpilot.sidecar.pr.PrSupplementalService;
 import com.jinloes.prpilot.sidecar.repo.RepoDetector;
-import com.jinloes.prpilot.sidecar.review.ReviewJsonParser;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -24,16 +22,6 @@ class SidecarConfiguration {
     @Bean
     SidecarBootstrapService sidecarBootstrapService() {
         return new SidecarBootstrapService();
-    }
-
-    @Bean
-    ReviewJsonParser reviewJsonParser(ObjectMapper objectMapper) {
-        return new ReviewJsonParser(objectMapper);
-    }
-
-    @Bean
-    PrSearchQueryService prSearchQueryService() {
-        return new PrSearchQueryService();
     }
 
     @Bean
@@ -81,8 +69,6 @@ class SidecarConfiguration {
             ObjectMapper objectMapper,
             StdioFrameCodec frameCodec,
             SidecarBootstrapService bootstrapService,
-            ReviewJsonParser reviewJsonParser,
-            PrSearchQueryService prSearchQueryService,
             RepoDetector repoDetector,
             GitHubAuthService gitHubAuthService,
             PrListService prListService,
@@ -95,8 +81,6 @@ class SidecarConfiguration {
                 objectMapper,
                 frameCodec,
                 bootstrapService,
-                reviewJsonParser,
-                prSearchQueryService,
                 repoDetector,
                 gitHubAuthService,
                 prListService,

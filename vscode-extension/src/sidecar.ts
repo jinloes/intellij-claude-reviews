@@ -701,16 +701,6 @@ export class SidecarClient {
         });
     }
 
-    async buildSearchQuery(state: string, searchScope: string, currentRepo?: string): Promise<string> {
-        const result = (await this.request('pr/buildSearchQuery', {
-            state,
-            searchScope,
-            ...(currentRepo ? { currentRepo } : {}),
-        })) as { query?: string } | undefined;
-        if (typeof result?.query !== 'string') throw this.invalidResponse('PR search query');
-        return result.query;
-    }
-
     /** Returns null only when the shared detector reports that no repository was found. */
     async detectRepo(path: string): Promise<string | null> {
         const result = (await this.request('repo/detect', { path })) as

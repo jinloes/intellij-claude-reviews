@@ -67,14 +67,6 @@ kotlin {
     }
 }
 
-// Wire the existing Java source tree into the KMP JVM compilation.
-// In KMP 2.x, jvmMain Kotlin sources live under src/jvmMain/kotlin.
-// The compileJvmMainJava JavaCompile task starts with no Java source dirs;
-// we add the legacy src/main/java directory directly to each compile task.
-tasks.named('compileJvmMainJava', JavaCompile) {
-    source fileTree('src/main/java')
-}
-
 // Ensure the jvmTest task uses JUnit Platform.
 tasks.named('jvmTest', Test) {
     useJUnitPlatform()

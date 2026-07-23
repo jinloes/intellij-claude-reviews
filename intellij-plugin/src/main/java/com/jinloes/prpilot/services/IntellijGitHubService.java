@@ -49,13 +49,9 @@ public final class IntellijGitHubService {
     }
 
     public List<PullRequest> searchPRs(String query) throws IOException {
-        return searchPRs(query, 50);
-    }
-
-    public List<PullRequest> searchPRs(String query, int perPage) throws IOException {
         PrSearchResult result =
                 supplementalService.search(
-                        new PrSupplementalService.SearchParams(baseUrl(), query, perPage));
+                        new PrSupplementalService.SearchParams(baseUrl(), query, 50));
         requireOk(result.status(), result.message());
         return toPullRequests(result.prs());
     }

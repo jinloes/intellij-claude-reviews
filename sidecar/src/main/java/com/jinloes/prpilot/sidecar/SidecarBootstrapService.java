@@ -13,8 +13,6 @@ final class SidecarBootstrapService {
                         Map.entry("prDetail", true),
                         Map.entry("prDiff", true),
                         Map.entry("prList", true),
-                        Map.entry("prSearchQuery", true),
-                        Map.entry("reviewParse", true),
                         Map.entry("repoDetect", true),
                         Map.entry("draftReview", true),
                         Map.entry("draftReviewMutations", true),

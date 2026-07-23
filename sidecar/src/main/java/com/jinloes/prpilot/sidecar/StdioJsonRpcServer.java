@@ -10,10 +10,8 @@ import com.jinloes.prpilot.sidecar.pr.DraftReviewService;
 import com.jinloes.prpilot.sidecar.pr.PrDetailService;
 import com.jinloes.prpilot.sidecar.pr.PrDiffService;
 import com.jinloes.prpilot.sidecar.pr.PrListService;
-import com.jinloes.prpilot.sidecar.pr.PrSearchQueryService;
 import com.jinloes.prpilot.sidecar.pr.PrSupplementalService;
 import com.jinloes.prpilot.sidecar.repo.RepoDetector;
-import com.jinloes.prpilot.sidecar.review.ReviewJsonParser;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -28,8 +26,6 @@ final class StdioJsonRpcServer {
     private final ObjectMapper objectMapper;
     private final StdioFrameCodec frameCodec;
     private final SidecarBootstrapService bootstrapService;
-    private final ReviewJsonParser reviewJsonParser;
-    private final PrSearchQueryService prSearchQueryService;
     private final RepoDetector repoDetector;
     private final GitHubAuthService gitHubAuthService;
     private final PrListService prListService;
@@ -43,8 +39,6 @@ final class StdioJsonRpcServer {
             ObjectMapper objectMapper,
             StdioFrameCodec frameCodec,
             SidecarBootstrapService bootstrapService,
-            ReviewJsonParser reviewJsonParser,
-            PrSearchQueryService prSearchQueryService,
             RepoDetector repoDetector,
             GitHubAuthService gitHubAuthService,
             PrListService prListService,
@@ -56,8 +50,6 @@ final class StdioJsonRpcServer {
         this.objectMapper = Objects.requireNonNull(objectMapper);
         this.frameCodec = Objects.requireNonNull(frameCodec);
         this.bootstrapService = Objects.requireNonNull(bootstrapService);
-        this.reviewJsonParser = Objects.requireNonNull(reviewJsonParser);
-        this.prSearchQueryService = Objects.requireNonNull(prSearchQueryService);
         this.repoDetector = Objects.requireNonNull(repoDetector);
         this.gitHubAuthService = Objects.requireNonNull(gitHubAuthService);
         this.prListService = Objects.requireNonNull(prListService);
@@ -103,8 +95,6 @@ final class StdioJsonRpcServer {
                     switch (method) {
                         case "initialize" ->
                                 result(requestId(request), bootstrapService.initialize());
-                        case "review/parse" -> parseReview(request);
-                        case "pr/buildSearchQuery" -> buildPrSearchQuery(request);
                         case "repo/detect" -> detectRepo(request);
                         case "github/checkAuth" -> checkGitHubAuth(request);
                         case "prs/list" -> listPullRequests(request);
@@ -124,34 +114,6 @@ final class StdioJsonRpcServer {
         }
 
         return notification ? null : response;
-    }
-
-    private ObjectNode parseReview(JsonNode request) {
-        JsonNode params = request.get("params");
-        if (params == null
-                || !params.isObject()
-                || params.size() != 1
-                || !params.path("raw").isTextual()) {
-            return error(requestId(request), -32602, "Invalid params");
-        }
-        return result(requestId(request), reviewJsonParser.parse(params.path("raw").textValue()));
-    }
-
-    private ObjectNode buildPrSearchQuery(JsonNode request) {
-        JsonNode params = request.get("params");
-        if (params == null
-                || !params.isObject()
-                || !hasOnlyFields(params, Set.of("state", "searchScope", "currentRepo"))
-                || !hasOnlyTextValues(params)) {
-            return error(requestId(request), -32602, "Invalid params");
-        }
-        return result(
-                requestId(request),
-                prSearchQueryService.build(
-                        new PrSearchQueryService.QueryParams(
-                                optionalText(params, "state"),
-                                optionalText(params, "searchScope"),
-                                optionalText(params, "currentRepo"))));
     }
 
     private ObjectNode detectRepo(JsonNode request) {

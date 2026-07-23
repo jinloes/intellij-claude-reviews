@@ -65,11 +65,6 @@ intellij-plugin/                       – IntelliJ plugin host; depends on :cor
 
 github-engine/                          – Plain Java 17 library containing host-neutral GitHub, PR, repository, and review behavior; no Spring or IDE APIs
   src/main/java/com/jinloes/prpilot/sidecar/
-    review/
-      ReviewJsonParser.java             – Pure strict provider-review JSON extraction and validation engine
-      ReviewResult.java                 – Sidecar review result DTO
-      ReviewLineComment.java            – Sidecar validated inline-comment DTO
-      ReviewParseResult.java            – Valid review or provider-safe validation error
     pr/
       PrSearchQueryService.java          – Pure normalized GitHub PR-search query construction
       PrListService.java                 – Token-safe authenticated GitHub PR search with retry and truncation handling
@@ -101,7 +96,6 @@ github-engine/                          – Plain Java 17 library containing hos
       DetectResult.java                  – Typed detect() outcome (status + optional RepositoryId)
       DetectStatus.java                  – Non-fatal detection outcomes (found, not_git, origin_missing, etc.)
   src/test/java/com/jinloes/prpilot/sidecar/
-    review/ReviewJsonParserTest.java
     pr/PrSearchQueryServiceTest.java
     pr/PrListServiceTest.java
     pr/PrDetailServiceTest.java
@@ -199,13 +193,9 @@ Webview development runs dev-only runtime accessibility scans via `@axe-core/rea
 CI runs full-page Playwright + axe scenarios (`npm run test:a11y`) using `playwright.a11y.config.ts` and fails on any reported violation. Deterministic screenshot scenarios use `playwright.visual.config.ts`; pseudo-localization is test-only and enabled with `?locale=pseudo` to expose narrow-layout overflow. Visual snapshots are platform-sensitive and remain a manual verification suite unless CI and canonical baselines are updated together.
 
 ### Module boundaries
-`core` is KMP and has zero IntelliJ dependencies. `github-engine` is a plain Java 17 library with no Spring or IDE APIs; both `intellij-plugin` and `sidecar` depend on it. `intellij-plugin` also depends on the JVM variant of `core`. Keep Java sources in `core/src/main/java` and `core/src/test/java` (do not move to `src/jvmMain/java`).
+`core` is KMP and has zero IntelliJ dependencies. `github-engine` is a plain Java 17 library with no Spring or IDE APIs; both `intellij-plugin` and `sidecar` depend on it. `intellij-plugin` also depends on the JVM variant of `core`.
 
 `sidecar` is a Java 17 Spring Boot application configured with `WebApplicationType.NONE`; it is not an HTTP server. Its protocol uses bounded `Content-Length`-framed UTF-8 JSON-RPC over standard input/output. Standard output must contain protocol frames only—diagnostics belong on standard error. GitHub, PR, repository, and review behavior belongs in `github-engine`; Spring remains only the sidecar composition and lifecycle layer.
-
-The sidecar's `review/parse` capability is a pure Java implementation of the strict provider-review contract. It accepts raw provider output, tolerates the current outer prose/markdown-fence format, and returns either a validated review or an `invalid_review_json` domain result. Validation failures must not include or log raw provider output. Invalid JSON-RPC parameters remain protocol errors; malformed provider review content is an expected domain result.
-
-The sidecar's `pr/buildSearchQuery` capability is pure query construction only: it does not discover repositories, authenticate, or call GitHub. It normalizes unrecognized state values to `open`, unrecognized scopes to `currentRepo`, and blank repository paths to the existing `author:@me` fallback.
 
 The engine's repository detector reads local git metadata directly (no git process spawned) to resolve the owner/repo for a directory. `GitDirectoryResolver` understands linked-worktree `.git` files (a regular file containing `gitdir: <path>`, relative or absolute) in addition to a standard `.git` directory. `RemoteUrlParser` requires exactly two non-blank path segments (owner and repo), including for SCP-style URLs. Every non-`found` outcome (`not_git`, `config_missing`, `origin_missing`, `origin_url_malformed`, `gitdir_malformed`, `gitdir_unreadable`, etc.) is a typed, non-fatal `DetectStatus`; over JSON-RPC these are normal results, never protocol errors. `-32602` is reserved for malformed RPC params (missing/non-string `path`).
 
