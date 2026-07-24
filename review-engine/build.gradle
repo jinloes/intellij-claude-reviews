@@ -19,7 +19,7 @@ compileJava {
 }
 
 dependencies {
-    // JVM-target artifact of the KMP `core` module: review request/result/PR models.
+    // core: shared review request/result/PR models (plain Java 17 module, no Kotlin).
     api project(':core')
 
     implementation 'com.github:copilot-sdk-java:1.0.6'

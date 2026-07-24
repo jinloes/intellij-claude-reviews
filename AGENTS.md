@@ -21,7 +21,7 @@ Update docs as part of each coding task:
 
 ## IntelliJ <-> VS Code sync obligations
 
-**Feature parity is mandatory.** Every user-facing feature must work in both the IntelliJ plugin and the VS Code extension. When you add or change a feature in one host, implement the equivalent in the other host in the same change — do not ship a feature to only one host. If a true platform constraint makes parity impossible, document the gap and the reason in `ARCHITECTURE.md` "Key design decisions" and call it out explicitly in the PR description. Logic that belongs in shared code goes in `core` (`commonMain` when it must compile to JS for the extension; `jvmMain` only for JVM-only/IntelliJ code) or `review-engine`/`github-engine` (JVM-only, used by both IntelliJ directly and the sidecar for VS Code); host wiring is mirrored between `WebviewPanel.java`/`PRToolWindowFactory.java` and `vscode-extension/src/extension.ts`.
+**Feature parity is mandatory.** Every user-facing feature must work in both the IntelliJ plugin and the VS Code extension. When you add or change a feature in one host, implement the equivalent in the other host in the same change — do not ship a feature to only one host. If a true platform constraint makes parity impossible, document the gap and the reason in `ARCHITECTURE.md` "Key design decisions" and call it out explicitly in the PR description. Logic that belongs in shared code goes in `core` (plain Java 17 JVM module — no Kotlin) or `review-engine`/`github-engine` (JVM-only, used by both IntelliJ directly and the sidecar for VS Code); host wiring is mirrored between `WebviewPanel.java`/`PRToolWindowFactory.java` and `vscode-extension/src/extension.ts`.
 
 AI review/chat generation (Claude CLI, Copilot SDK), prompt building, and review-JSON parsing have
 one implementation in `review-engine`, shared by IntelliJ (in-process via `IntellijClaudeService`)
@@ -68,11 +68,11 @@ Checklist before completing a coding task:
 
 Test framework and location rules:
 
-- Core tests: `core/src/jvmTest/kotlin/com/jinloes/prpilot/` using Kotest `FunSpec`.
+- Core tests: `core/src/test/java/com/jinloes/prpilot/` using JUnit 5 + AssertJ (same convention as `intellij-plugin`).
 - IntelliJ plugin tests: `intellij-plugin/src/test/java/com/jinloes/prpilot/` using JUnit 5 + AssertJ.
 - `review-engine`/`github-engine`/`sidecar` tests: `<module>/src/test/java/com/jinloes/prpilot/` using JUnit 5 + AssertJ (same convention as `intellij-plugin`).
-- Group Kotest tests by `context("MethodName")`.
-- For temp directories in Kotest, use `beforeTest`/`afterTest` + `Files.createTempDirectory`.
+- Group tests by `@Nested` classes named after the method under test.
+- For temp directories, use `@BeforeEach`/`@AfterEach` + `Files.createTempDirectory`.
 - Do not write tests to `~/.pr-pilot`; use temp dirs.
 
 ## Required verification commands
@@ -81,7 +81,7 @@ Test framework and location rules:
 ./gradlew spotlessApply
 ./gradlew spotlessCheck
 ./gradlew check
-./gradlew :core:jvmTest :review-engine:test :intellij-plugin:unitTest
+./gradlew :core:test :review-engine:test :intellij-plugin:unitTest
 ```
 
 ```bash
@@ -95,7 +95,7 @@ Test framework and location rules:
 ## Coding rules
 
 - Prefer Apache Commons helpers over hand-rolled equivalents (`CollectionUtils`, `StringUtils`, `Strings.CS`, `StringEscapeUtils`).
-- In `core`, use kotlinx.serialization for JSON; do not introduce Jackson/Gson there.
+- `core`'s shared model classes and `DiffParser` are plain Java (JavaBean getters/setters). Don't reintroduce Kotlin, kotlinx.serialization, or jackson-module-kotlin for these classes — Jackson (plain bean introspection) is the only runtime JSON serializer used against them.
 - In `intellij-plugin`, Jackson is allowed for webview bridge deserialization.
 - IntelliJ threading: background work on pooled threads, UI updates on EDT via `invokeLater()`.
 - Follow Google Java Style (Spotless-enforced), avoid FQNs in method bodies, keep imports explicit.

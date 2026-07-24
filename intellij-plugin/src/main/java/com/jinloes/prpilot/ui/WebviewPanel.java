@@ -9,7 +9,6 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.module.kotlin.KotlinModule;
 import com.intellij.ide.BrowserUtil;
 import com.intellij.ide.ui.LafManagerListener;
 import com.intellij.openapi.Disposable;
@@ -175,9 +174,7 @@ public class WebviewPanel implements Disposable {
     private final JBCefJSQuery bridgeQuery;
     private final Alarm layoutRepaintAlarm = new Alarm(Alarm.ThreadToUse.SWING_THREAD, this);
     private final ObjectMapper mapper =
-            new ObjectMapper()
-                    .registerModule(new KotlinModule.Builder().build())
-                    .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+            new ObjectMapper().disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
     private final PendingReviewIndex pendingIndex = new PendingReviewIndex();
     private final IntellijClaudeService claudeService;
     private final GitWorktreeService worktreeService = new GitWorktreeService();

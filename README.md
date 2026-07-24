@@ -18,7 +18,7 @@ It helps you discover PRs, generate AI-assisted reviews (Claude or Copilot), edi
 
 ## Repository layout
 
-- `core/` - Kotlin Multiplatform shared logic (JVM + JS)
+- `core/` - Plain Java 17 shared models and diff parser used by both hosts
 - `github-engine/` - Plain Java 17 GitHub/repository/review engine shared by both hosts
 - `intellij-plugin/` - IntelliJ host integration
 - `sidecar/` - Thin stdio JSON-RPC process adapter used by the VS Code extension
