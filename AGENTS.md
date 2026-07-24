@@ -95,7 +95,7 @@ Test framework and location rules:
 ## Coding rules
 
 - Prefer Apache Commons helpers over hand-rolled equivalents (`CollectionUtils`, `StringUtils`, `Strings.CS`, `StringEscapeUtils`).
-- `core`'s shared model classes and `DiffParser` are plain Java (JavaBean getters/setters). Don't reintroduce Kotlin, kotlinx.serialization, or jackson-module-kotlin for these classes — Jackson (plain bean introspection) is the only runtime JSON serializer used against them.
+- `core`'s shared model classes are plain Java (JavaBean getters/setters). Don't reintroduce Kotlin, kotlinx.serialization, or jackson-module-kotlin for these classes — Jackson (plain bean introspection) is the only runtime JSON serializer used against them.
 - In `intellij-plugin`, Jackson is allowed for webview bridge deserialization.
 - IntelliJ threading: background work on pooled threads, UI updates on EDT via `invokeLater()`.
 - Follow Google Java Style (Spotless-enforced), avoid FQNs in method bodies, keep imports explicit.

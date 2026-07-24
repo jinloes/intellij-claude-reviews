@@ -11,9 +11,6 @@ repositories {
 
 // core is a plain Java 17 module: all shared models are plain Java so downstream Java modules
 // don't need Kotlin-Java interop shims (no jackson-module-kotlin, no @JvmOverloads/@JvmStatic).
-// DiffParser was converted from Kotlin to Java once the sidecar (Java) replaced the old
-// Kotlin/JS multiplatform target as VS Code's integration path, removing the last reason to keep
-// any part of this module in Kotlin.
 java {
     sourceCompatibility = JavaVersion.VERSION_17
     targetCompatibility = JavaVersion.VERSION_17
