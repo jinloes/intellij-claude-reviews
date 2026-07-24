@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
@@ -116,7 +117,7 @@ public final class GitHubAuthService {
 
         @Override
         public TokenResolution resolve(String hostnameArgument) {
-            List<String> command = new java.util.ArrayList<>();
+            List<String> command = new ArrayList<>();
             command.add(findGhBinary());
             command.add("auth");
             command.add("token");
@@ -213,11 +214,13 @@ public final class GitHubAuthService {
             } catch (IllegalArgumentException exception) {
                 throw new IllegalArgumentException("Invalid GitHub base URL", exception);
             }
+            String path = uri.getPath();
+            boolean pathIsRootOrEmpty = "/".equals(path) || (path != null && path.isEmpty());
             if (!"https".equalsIgnoreCase(uri.getScheme())
                     || uri.getHost() == null
                     || uri.getUserInfo() != null
                     || uri.getPort() != -1
-                    || !"/".equals(uri.getPath()) && !uri.getPath().isEmpty()
+                    || !pathIsRootOrEmpty
                     || uri.getQuery() != null
                     || uri.getFragment() != null) {
                 throw new IllegalArgumentException("Invalid GitHub base URL");
