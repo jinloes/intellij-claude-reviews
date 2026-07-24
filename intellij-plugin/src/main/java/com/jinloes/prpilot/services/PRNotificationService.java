@@ -1,6 +1,5 @@
 package com.jinloes.prpilot.services;
 
-import com.intellij.ide.BrowserUtil;
 import com.intellij.notification.Notification;
 import com.intellij.notification.NotificationAction;
 import com.intellij.notification.NotificationGroupManager;
@@ -11,6 +10,7 @@ import com.intellij.openapi.components.Service;
 import com.intellij.util.concurrency.AppExecutorUtil;
 import com.jinloes.prpilot.model.PullRequest;
 import com.jinloes.prpilot.settings.PluginSettings;
+import com.jinloes.prpilot.ui.PRToolWindowFactory;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -232,7 +232,10 @@ public final class PRNotificationService implements Disposable {
                                                     title, content, NotificationType.INFORMATION);
                             notification.addAction(
                                     NotificationAction.createSimple(
-                                            "Open PR", () -> BrowserUtil.browse(pr.getHtmlUrl())));
+                                            "Open in PR Pilot",
+                                            () ->
+                                                    PRToolWindowFactory.activatePrFromNotification(
+                                                            pr)));
                             notification.notify(null);
                         });
     }

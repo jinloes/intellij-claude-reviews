@@ -36,10 +36,13 @@ async function cancelActiveProvider(): Promise<void> {
 export function activate(context: vscode.ExtensionContext) {
     sidecarClient = new SidecarClient(resolveSidecarJarPath(context.extensionUri.fsPath));
     context.subscriptions.push({ dispose: () => sidecarClient?.dispose() });
-    void sidecarClient.initialize().catch((err) => {
+    const initializeSidecar = (restart = false) => (restart ? sidecarClient.restart() : sidecarClient.initialize()).catch((err) => {
         const message = err instanceof Error ? err.message : 'PR Pilot Java sidecar failed to start.';
-        void vscode.window.showErrorMessage(message);
+        void vscode.window.showErrorMessage(message, 'Retry').then((action) => {
+            if (action === 'Retry') void initializeSidecar(true);
+        });
     });
+    void initializeSidecar();
     const provider = new ClaudeReviewsViewProvider(context.extensionUri);
     const notificationPoller = new PRNotificationPoller(context, (pr) => provider.openPullRequest(pr));
     context.subscriptions.push(

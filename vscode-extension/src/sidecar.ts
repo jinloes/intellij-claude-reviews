@@ -704,18 +704,18 @@ export class SidecarClient {
                 { stdio: ['pipe', 'pipe', 'pipe'] },
             );
             child.on('error', (err: NodeJS.ErrnoException) => {
-                if (this.disposed) return;
+                if (this.disposed || this.child !== child) return;
                 const failure = err.code === 'ENOENT'
                     ? new Error('Java was not found. Install Java 17 or newer and ensure java is on PATH.')
                     : new Error(`PR Pilot Java sidecar failed to start: ${err.message}`);
-                this.startupFailure ??= failure;
-                if (this.child === child) this.child = null;
+                this.startupFailure = failure;
+                this.child = null;
                 this.failAllPending(this.startupFailure);
             });
             child.on('exit', (code, signal) => {
-                if (this.child === child) this.child = null;
-                if (this.disposed) return;
-                this.startupFailure ??= this.processExitError(code, signal);
+                if (this.disposed || this.child !== child) return;
+                this.child = null;
+                this.startupFailure = this.processExitError(code, signal);
                 this.failAllPending(this.startupFailure);
             });
             child.stdout.on('data', (chunk: Buffer) => this.onData(chunk));
@@ -794,6 +794,19 @@ export class SidecarClient {
     private failAllPending(err: Error): void {
         for (const pending of this.pending.values()) pending.reject(err);
         this.pending.clear();
+        this.notificationHandlers.clear();
+    }
+
+    /** Restarts the sidecar after a user-visible transport failure and revalidates its capabilities. */
+    async restart(): Promise<void> {
+        if (this.disposed) throw new Error('PR Pilot Java sidecar has been disposed. Reload VS Code.');
+        this.failAllPending(new Error('PR Pilot Java sidecar is restarting.'));
+        this.stopChild();
+        this.startupFailure = null;
+        this.readyPromise = null;
+        this.buffer = Buffer.alloc(0);
+        this.stderr = '';
+        await this.initialize();
     }
 
     private async request(method: string, params: unknown): Promise<unknown> {
@@ -814,7 +827,7 @@ export class SidecarClient {
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
                 const failure = new Error(
-                    `PR Pilot Java sidecar request "${method}" timed out. Reload VS Code to restart PR Pilot.`,
+                    `PR Pilot Java sidecar request "${method}" timed out. Select Retry to restart PR Pilot.`,
                 );
                 this.startupFailure = failure;
                 this.failAllPending(failure);

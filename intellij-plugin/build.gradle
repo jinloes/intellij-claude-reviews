@@ -41,14 +41,12 @@ dependencies {
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 
     intellijPlatform {
+        // Set ideaLocalPath in ~/.gradle/gradle.properties to override the local IDE.
         def configuredLocalIdea = providers.gradleProperty('ideaLocalPath').orNull
         def userHome = System.getProperty('user.home')
         def localIdeaCandidates = [
             configuredLocalIdea,
-            "${userHome}/Applications/IntelliJ IDEA 2026.1.4.app",
-            "${userHome}/Applications/IntelliJ IDEA.app",
-            '/Applications/IntelliJ IDEA 2026.1.4.app',
-            '/Applications/IntelliJ IDEA Ultimate.app',
+            "${userHome}/Applications/IntelliJ IDEA 2026.2.0.1.app",
         ].findAll { it != null }
             .collect { file(it) }
 
@@ -58,6 +56,7 @@ dependencies {
         } else {
             intellijIdeaUltimate('2026.1.4')
         }
+        bundledPlugin('com.intellij.modules.jcef')
     }
 }
 

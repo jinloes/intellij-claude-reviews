@@ -454,11 +454,33 @@ test('SidecarClient terminates and fails a transport after a request timeout', a
 
   await assert.rejects(
     client.checkGitHubAuth('https://github.com'),
-    /request "github\/checkAuth" timed out.*Reload VS Code/,
+    /request "github\/checkAuth" timed out.*Select Retry/,
   );
   assert.equal(harness.killCount.value, 1);
   await assert.rejects(client.checkGitHubAuth('https://github.com'), /timed out/);
   assert.equal(harness.commands.length, 1);
+  client.dispose();
+});
+
+test('SidecarClient restarts and reinitializes after a timed-out request', async () => {
+  let timedOut = false;
+  const harness = createSidecarHarness((method) => {
+    if (method === 'initialize') return initializeResult;
+    if (!timedOut) {
+      timedOut = true;
+      return NO_RESPONSE;
+    }
+    return { status: 'authenticated', username: 'octocat', message: 'ok' };
+  });
+  const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar, 5);
+
+  await assert.rejects(client.checkGitHubAuth('https://github.com'), /Select Retry/);
+  await client.restart();
+  const result = await client.checkGitHubAuth('https://github.com');
+
+  assert.equal(result.username, 'octocat');
+  assert.equal(harness.commands.length, 2);
+  assert.equal(harness.killCount.value, 1);
   client.dispose();
 });
 
@@ -469,5 +491,6 @@ test('SidecarClient cannot restart after disposal', async () => {
   client.dispose();
 
   await assert.rejects(client.initialize(), /has been disposed/);
+  await assert.rejects(client.restart(), /has been disposed/);
   assert.equal(harness.commands.length, 1);
 });

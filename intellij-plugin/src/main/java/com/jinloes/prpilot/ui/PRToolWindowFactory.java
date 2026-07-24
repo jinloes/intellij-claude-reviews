@@ -5,8 +5,11 @@ import com.intellij.openapi.actionSystem.AnAction;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.project.ProjectManager;
+import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.ToolWindowFactory;
+import com.intellij.openapi.wm.ToolWindowManager;
 import com.intellij.openapi.wm.ToolWindowType;
 import com.intellij.ui.content.Content;
 import com.intellij.ui.content.ContentFactory;
@@ -18,6 +21,8 @@ import com.jinloes.prpilot.settings.PluginSettingsConfigurable;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import javax.swing.JLabel;
 import javax.swing.SwingConstants;
 import org.apache.commons.lang3.StringUtils;
@@ -30,6 +35,7 @@ public class PRToolWindowFactory implements ToolWindowFactory {
     private static final Logger log = LoggerFactory.getLogger(PRToolWindowFactory.class);
 
     static final String TOOL_WINDOW_ID = "PR Pilot";
+    private static final Map<Project, WebviewPanel> WEBVIEW_PANELS = new ConcurrentHashMap<>();
 
     @Override
     public void createToolWindowContent(@NotNull Project project, @NotNull ToolWindow toolWindow) {
@@ -48,6 +54,8 @@ public class PRToolWindowFactory implements ToolWindowFactory {
         }
 
         WebviewPanel webviewPanel = new WebviewPanel(project);
+        WEBVIEW_PANELS.put(project, webviewPanel);
+        Disposer.register(webviewPanel, () -> WEBVIEW_PANELS.remove(project, webviewPanel));
         wireWebviewLoading(project, webviewPanel);
         Content content = factory.createContent(webviewPanel.getComponent(), "PR Pilot", false);
         content.setDisposer(webviewPanel);
@@ -58,6 +66,25 @@ public class PRToolWindowFactory implements ToolWindowFactory {
         titleActions.add(new PopOutAction(toolWindow));
         titleActions.add(new SettingsAction(project));
         toolWindow.setTitleActions(titleActions);
+    }
+
+    /**
+     * Activates the first open PR Pilot tool window and selects a PR opened from a notification.
+     */
+    public static void activatePrFromNotification(PullRequest pr) {
+        for (Project project : ProjectManager.getInstance().getOpenProjects()) {
+            if (project.isDisposed()) continue;
+            ToolWindow toolWindow =
+                    ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID);
+            if (toolWindow == null) continue;
+            toolWindow.activate(
+                    () -> {
+                        WebviewPanel webviewPanel = WEBVIEW_PANELS.get(project);
+                        if (webviewPanel != null) webviewPanel.activatePr(pr, "notification");
+                    },
+                    true);
+            return;
+        }
     }
 
     private static final class ReloadAction extends AnAction {
