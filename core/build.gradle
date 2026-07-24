@@ -11,11 +11,6 @@ repositories {
 }
 
 kotlin {
-    // Suppress Beta warning for expect/actual classes (stable in practice for Kotlin 2.x).
-    compilerOptions {
-        freeCompilerArgs.add("-Xexpect-actual-classes")
-    }
-
     jvm {
         compilations.main.compileTaskProvider.configure {
             compilerOptions {
@@ -27,10 +22,6 @@ kotlin {
                 jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
             }
         }
-    }
-
-    js(IR) {
-        nodejs()
     }
 
     sourceSets {
@@ -63,14 +54,6 @@ tasks.named('jvmTest', Test) {
     useJUnitPlatform()
 }
 
-// The JS target exists only to emit the JS library consumed by vscode-extension
-// (see copyJsToVscodeExtension); tests are run on the JVM via Kotest + JUnit5.
-// commonTest sources compile for JS but no Kotest JS runner is wired up, so the
-// Node test task discovers zero tests. Don't fail the build on that.
-tasks.named('jsNodeTest') {
-    failOnNoDiscoveredTests = false
-}
-
 // Keep Java compilation at Java 17.
 tasks.withType(JavaCompile).configureEach {
     sourceCompatibility = JavaVersion.VERSION_17
@@ -78,10 +61,3 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
-// Copy the compiled KMP JS output into vscode-extension/node_modules/core so the
-// extension can import it without a published npm package.
-tasks.register('copyJsToVscodeExtension', Copy) {
-    dependsOn 'jsPublicPackageJson', 'jsJar'
-    from("$rootDir/build/js/packages/pr-pilot-core")
-    into("$rootDir/vscode-extension/node_modules/core")
-}
