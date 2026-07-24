@@ -200,17 +200,24 @@ export function ChatPane({
             </div>
           )}
 
-          {streaming && (
-            <div className="flex flex-col gap-1 items-start">
-              <span className="text-[10px] font-medium tracking-widest uppercase text-muted-foreground px-1">ai</span>
-              <div className="bg-secondary text-secondary-foreground rounded-md px-3 py-2 text-sm max-w-[90%]">
-                <div className="prose prose-sm prose-invert max-w-none [&_code]:font-mono [&_code]:text-xs [&_code]:bg-background/50 [&_code]:px-1 [&_code]:rounded [&_p]:my-0.5">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{streaming}</ReactMarkdown>
-                </div>
-                <span className="inline-block w-2 h-3.5 bg-primary animate-pulse ml-0.5 align-text-bottom" />
+          {streaming && (() => {
+            const streamedStructured = parseStructuredResult(streaming)
+            return (
+              <div className="flex flex-col gap-1 items-start">
+                <span className="text-[10px] font-medium tracking-widest uppercase text-muted-foreground px-1">ai</span>
+                {streamedStructured ? (
+                  <StructuredResultCard result={streamedStructured} />
+                ) : (
+                  <div className="bg-secondary text-secondary-foreground rounded-md px-3 py-2 text-sm max-w-[90%]">
+                    <div className="prose prose-sm prose-invert max-w-none [&_code]:font-mono [&_code]:text-xs [&_code]:bg-background/50 [&_code]:px-1 [&_code]:rounded [&_p]:my-0.5">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{streaming}</ReactMarkdown>
+                    </div>
+                    <span className="inline-block w-2 h-3.5 bg-primary animate-pulse ml-0.5 align-text-bottom" />
+                  </div>
+                )}
               </div>
-            </div>
-          )}
+            )
+          })()}
           </>
         )}
       </div>

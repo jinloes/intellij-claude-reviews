@@ -113,5 +113,33 @@ describe('ChatPane', () => {
     expect(screen.getByText('This check is redundant with the guard added above.')).toBeVisible()
     expect(screen.queryByText(/"verdict":"invalid"/)).not.toBeInTheDocument()
   })
+
+  it('renders structured JSON as a card while still streaming, instead of raw JSON with a blinking cursor', async () => {
+    Object.assign(window, { cefQuery: vi.fn() })
+    render(<ChatPane pr={pr} />)
+
+    const fullJson = JSON.stringify({
+      verdict: 'valid',
+      why: 'Supported by the diff.',
+      action: 'keep',
+      replacementComment: null,
+    })
+
+    act(() => {
+      const hostWindow = window as unknown as {
+        __handleMessage: (message: unknown) => void
+      }
+      hostWindow.__handleMessage({
+        protocolVersion: 1,
+        type: 'chatChunk',
+        prKey: 'acme/widget#42',
+        chunk: fullJson,
+      })
+    })
+
+    expect(await screen.findByText('Valid')).toBeVisible()
+    expect(screen.getByText('Supported by the diff.')).toBeVisible()
+    expect(screen.queryByText(/"verdict":"valid"/)).not.toBeInTheDocument()
+  })
 })
 

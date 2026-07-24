@@ -1,6 +1,7 @@
 package com.jinloes.prpilot.review;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -44,5 +45,18 @@ final class BinaryLocator {
             }
         }
         return false;
+    }
+
+    static String providerPath(String userHome, String existingPath) {
+        List<String> directories = new ArrayList<>();
+        directories.add(userHome + "/.local/bin");
+        directories.add(userHome + "/.npm-global/bin");
+        directories.add(userHome + "/.volta/bin");
+        directories.add("/opt/homebrew/bin");
+        directories.add("/usr/local/bin");
+        if (existingPath != null && !existingPath.isBlank()) {
+            directories.add(existingPath);
+        }
+        return String.join(File.pathSeparator, directories);
     }
 }

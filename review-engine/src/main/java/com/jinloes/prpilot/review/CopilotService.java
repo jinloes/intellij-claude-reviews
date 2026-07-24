@@ -285,9 +285,10 @@ public class CopilotService {
 
     private ClientRequest buildClientRequest() {
         Map<String, String> env = new LinkedHashMap<>(System.getenv());
-        env.put("HOME", System.getProperty("user.home", "/"));
+        String userHome = System.getProperty("user.home", "/");
+        env.put("HOME", userHome);
         String existingPath = env.getOrDefault("PATH", "");
-        env.put("PATH", "/opt/homebrew/bin:/usr/local/bin:" + existingPath);
+        env.put("PATH", BinaryLocator.providerPath(userHome, existingPath));
         return new ClientRequest(findCopilotBinary(), workingDir, env);
     }
 

@@ -661,10 +661,11 @@ public class ClaudeService {
         cmd.addAll(List.of(extraArgs));
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.directory(workingDir);
-        pb.environment().put("HOME", System.getProperty("user.home", "/"));
-        // Prepend known tool paths so gh/git are found without relying on shell PATH inheritance.
+        String userHome = System.getProperty("user.home", "/");
+        pb.environment().put("HOME", userHome);
+        // GUI-launched IDEs do not inherit shell PATH configuration.
         String existingPath = pb.environment().getOrDefault("PATH", "");
-        pb.environment().put("PATH", "/opt/homebrew/bin:/usr/local/bin:" + existingPath);
+        pb.environment().put("PATH", BinaryLocator.providerPath(userHome, existingPath));
         if (stdoutFile != null) {
             pb.redirectOutput(stdoutFile);
         }

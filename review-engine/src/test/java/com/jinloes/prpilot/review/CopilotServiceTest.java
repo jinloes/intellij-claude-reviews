@@ -258,7 +258,10 @@ class CopilotServiceTest {
             assertThat(clientRequest.environment().get("HOME"))
                     .isEqualTo(System.getProperty("user.home", "/"));
             assertThat(clientRequest.environment().get("PATH"))
-                    .startsWith("/opt/homebrew/bin:/usr/local/bin:");
+                    .isEqualTo(
+                            BinaryLocator.providerPath(
+                                    System.getProperty("user.home", "/"),
+                                    System.getenv().getOrDefault("PATH", "")));
 
             FakeRuntimeClient client = factory.lastClient;
             assertThat(client.started).isTrue();
