@@ -5,6 +5,7 @@ import com.intellij.openapi.components.PersistentStateComponent;
 import com.intellij.openapi.components.State;
 import com.intellij.openapi.components.Storage;
 import com.jinloes.prpilot.model.ReviewProvider;
+import com.jinloes.prpilot.review.RepoGuidelinesReader;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -42,15 +43,16 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
 
         /**
          * Reasoning effort passed to {@code copilot --reasoning-effort}. One of "none", "low",
-         * "medium", "high", "xhigh", "max". Defaults to "medium" — enough depth for real bugs
-         * without Opus-tier wall-clock. Only applied when {@code reviewProvider} is COPILOT.
+         * "medium", "high", "xhigh", "max". Defaults to "high" for deeper review reasoning. Only
+         * applied when {@code reviewProvider} is COPILOT.
          */
-        public String reviewEffort = "medium";
+        public String reviewEffort = "high";
 
         /**
-         * When true, the Copilot review/chat session inherits MCP servers from the Copilot CLI
-         * config ({@code ~/.copilot/mcp-config.json}) and any repo-local {@code .mcp.json} via the
-         * SDK's config discovery. Only applied when {@code reviewProvider} is COPILOT.
+         * When true, the Copilot review/chat session inherits MCP servers from the user's trusted
+         * Copilot config ({@code ~/.copilot/mcp-config.json}, or {@code copilotConfigDir}). The
+         * SDK's on-disk config discovery is never enabled, so a PR's repo-local {@code .mcp.json}
+         * is deliberately ignored. Only applied when {@code reviewProvider} is COPILOT.
          */
         public boolean copilotInheritMcp = false;
 
@@ -72,6 +74,21 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
 
         /** Default extra instructions appended to every review prompt. */
         public String reviewCustomInstructions = "";
+
+        /**
+         * Newline-separated list of guidance files (literal relative paths or globs like {@code
+         * **}{@code /style.md}) scanned from the review working directory and folded into
+         * {@code <repo_guidelines>}. Blank falls back to {@link
+         * RepoGuidelinesReader#DEFAULT_GUIDANCE_GLOBS}.
+         */
+        public String reviewGuidanceGlobs = "";
+
+        /**
+         * When true, review generation runs a second self-critique pass that re-validates each
+         * finding against the diff and drops misattributed/unsupported ones. Off by default because
+         * it roughly doubles review latency.
+         */
+        public boolean reviewSelfCritique = false;
     }
 
     private State myState = new State();
@@ -165,11 +182,11 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
     public String getReviewEffort() {
         return myState.reviewEffort != null && !myState.reviewEffort.isBlank()
                 ? myState.reviewEffort
-                : "medium";
+                : "high";
     }
 
     public void setReviewEffort(String effort) {
-        myState.reviewEffort = effort != null ? effort : "medium";
+        myState.reviewEffort = effort != null ? effort : "high";
     }
 
     public boolean isCopilotInheritMcp() {
@@ -210,5 +227,39 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
 
     public void setReviewCustomInstructions(String value) {
         myState.reviewCustomInstructions = value != null ? value.trim() : "";
+    }
+
+    /** Raw newline-separated guidance-globs text, as edited in settings (may be blank). */
+    public String getReviewGuidanceGlobsRaw() {
+        return myState.reviewGuidanceGlobs != null ? myState.reviewGuidanceGlobs : "";
+    }
+
+    public void setReviewGuidanceGlobs(String value) {
+        myState.reviewGuidanceGlobs = value != null ? value.trim() : "";
+    }
+
+    /**
+     * Parsed guidance globs (one per non-blank line), falling back to {@link
+     * RepoGuidelinesReader#DEFAULT_GUIDANCE_GLOBS} when nothing is configured.
+     */
+    public java.util.List<String> getReviewGuidanceGlobs() {
+        String raw = getReviewGuidanceGlobsRaw();
+        if (raw.isBlank()) {
+            return RepoGuidelinesReader.DEFAULT_GUIDANCE_GLOBS;
+        }
+        java.util.List<String> globs =
+                raw.lines()
+                        .map(String::strip)
+                        .filter(s -> !s.isBlank())
+                        .collect(java.util.stream.Collectors.toList());
+        return globs.isEmpty() ? RepoGuidelinesReader.DEFAULT_GUIDANCE_GLOBS : globs;
+    }
+
+    public boolean isReviewSelfCritique() {
+        return myState.reviewSelfCritique;
+    }
+
+    public void setReviewSelfCritique(boolean value) {
+        myState.reviewSelfCritique = value;
     }
 }

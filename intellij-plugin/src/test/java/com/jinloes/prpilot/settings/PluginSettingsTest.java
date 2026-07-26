@@ -3,6 +3,7 @@ package com.jinloes.prpilot.settings;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.jinloes.prpilot.model.ReviewProvider;
+import com.jinloes.prpilot.review.RepoGuidelinesReader;
 import org.junit.jupiter.api.Test;
 
 class PluginSettingsTest {
@@ -71,30 +72,66 @@ class PluginSettingsTest {
     }
 
     @Test
-    void reviewEffortDefaultsToMedium() {
+    void reviewEffortDefaultsToHigh() {
         PluginSettings s = new PluginSettings();
-        assertThat(s.getReviewEffort()).isEqualTo("medium");
+        assertThat(s.getReviewEffort()).isEqualTo("high");
     }
 
     @Test
     void reviewEffortRoundTrips() {
         PluginSettings s = new PluginSettings();
-        s.setReviewEffort("high");
+        s.setReviewEffort("xhigh");
+        assertThat(s.getReviewEffort()).isEqualTo("xhigh");
+    }
+
+    @Test
+    void reviewEffortBlankFallsBackToHigh() {
+        PluginSettings s = new PluginSettings();
+        s.setReviewEffort("");
         assertThat(s.getReviewEffort()).isEqualTo("high");
     }
 
     @Test
-    void reviewEffortBlankFallsBackToMedium() {
+    void reviewEffortNullFallsBackToHigh() {
         PluginSettings s = new PluginSettings();
-        s.setReviewEffort("");
-        assertThat(s.getReviewEffort()).isEqualTo("medium");
+        s.setReviewEffort(null);
+        assertThat(s.getReviewEffort()).isEqualTo("high");
     }
 
     @Test
-    void reviewEffortNullFallsBackToMedium() {
+    void reviewGuidanceGlobsDefaultsToSharedDefaults() {
         PluginSettings s = new PluginSettings();
-        s.setReviewEffort(null);
-        assertThat(s.getReviewEffort()).isEqualTo("medium");
+        assertThat(s.getReviewGuidanceGlobs())
+                .isEqualTo(RepoGuidelinesReader.DEFAULT_GUIDANCE_GLOBS);
+    }
+
+    @Test
+    void reviewGuidanceGlobsParsesNonBlankLines() {
+        PluginSettings s = new PluginSettings();
+        s.setReviewGuidanceGlobs("**/style.md\n\n  .linkedin/ai-agent/*.md  \n");
+        assertThat(s.getReviewGuidanceGlobs())
+                .containsExactly("**/style.md", ".linkedin/ai-agent/*.md");
+    }
+
+    @Test
+    void reviewGuidanceGlobsBlankFallsBackToDefaults() {
+        PluginSettings s = new PluginSettings();
+        s.setReviewGuidanceGlobs("   \n  ");
+        assertThat(s.getReviewGuidanceGlobs())
+                .isEqualTo(RepoGuidelinesReader.DEFAULT_GUIDANCE_GLOBS);
+    }
+
+    @Test
+    void reviewSelfCritiqueDefaultsToFalse() {
+        PluginSettings s = new PluginSettings();
+        assertThat(s.isReviewSelfCritique()).isFalse();
+    }
+
+    @Test
+    void reviewSelfCritiqueRoundTrips() {
+        PluginSettings s = new PluginSettings();
+        s.setReviewSelfCritique(true);
+        assertThat(s.isReviewSelfCritique()).isTrue();
     }
 
     @Test

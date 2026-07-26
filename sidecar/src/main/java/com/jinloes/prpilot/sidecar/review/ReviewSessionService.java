@@ -44,6 +44,7 @@ public class ReviewSessionService {
             String effort,
             boolean inheritMcp,
             String configDir,
+            boolean selfCritique,
             PrParams pr,
             String diff,
             String knownPatterns,
@@ -108,7 +109,8 @@ public class ReviewSessionService {
                         onStatus,
                         onChunk,
                         params.inheritMcp(),
-                        params.configDir());
+                        params.configDir(),
+                        params.selfCritique());
             } finally {
                 activeCopilot.compareAndSet(service, null);
             }
@@ -116,7 +118,8 @@ public class ReviewSessionService {
         ClaudeService service = new ClaudeService(params.projectDir());
         activeClaude.set(service);
         try {
-            return service.reviewPR(request, params.model(), onStatus, onChunk);
+            return service.reviewPR(
+                    request, params.model(), params.selfCritique(), onStatus, onChunk);
         } finally {
             activeClaude.compareAndSet(service, null);
         }

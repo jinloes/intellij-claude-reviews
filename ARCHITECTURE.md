@@ -248,7 +248,7 @@ Both the IntelliJ plugin and the sidecar use the official Java Copilot SDK (`com
 ### Provider capability isolation
 Claude review/chat processes disable tools, use `permission-mode=dontAsk`, pass a strict empty MCP configuration, and read user settings only. The review prompt therefore embeds the bounded GitHub diff instead of asking the CLI to fetch repository data. Temporary stream output is owner-only and deleted in `finally`; raw model output is not retained in logs.
 
-Copilot review/chat sessions reject all SDK permission requests by default and disable config discovery. `copilotInheritMcp` is an explicit capability elevation: when enabled, config discovery loads MCP servers from the Copilot CLI config and repo-local `.mcp.json`, but the permission handler approves only MCP requests once and continues rejecting shell/write capabilities. The optional `copilotConfigDir` setting maps to `configDir`/`setConfigDirectory` for non-default Copilot homes. Never replace the explicit permission handler with blanket approval.
+Copilot review/chat sessions reject all SDK permission requests by default. On-disk config discovery (`setEnableConfigDiscovery`) is **never** enabled — unconditionally `false`, not derived from any setting — because the session working directory is the untrusted PR-branch worktree, and discovery would scan it for a repo-local `.mcp.json`. A malicious PR could ship an `.mcp.json` whose server `command` is an arbitrary process, which the SDK could launch at discovery time before any tool-call permission gate runs. `copilotInheritMcp` is an explicit capability elevation, but it never touches the worktree: when enabled, `CopilotMcpConfig.loadTrustedServers` reads MCP server definitions only from the user's own trusted config (`<configDir>/mcp-config.json`, default `~/.copilot`) and injects them via `SessionConfig.setMcpServers`. The permission handler still approves only `read` (always) and `mcp` (when elevated) and keeps rejecting shell/write/url. The optional `copilotConfigDir` setting maps to `configDir`/`setConfigDirectory` and also scopes which trusted config file is read. Never enable config discovery against the worktree and never replace the explicit permission handler with blanket approval.
 
 ### Reasoning effort normalization
 Persisted values are `none|low|medium|high|xhigh|max`; SDK accepts `low|medium|high|xhigh`. Normalize before session creation: `none -> low`, `max -> xhigh`, blank/unknown -> `medium`.
@@ -371,10 +371,10 @@ The `.vscode/launch.json` config `Run PR Pilot Extension Against Target Repo` pr
 - `reviewModel` (default `""`)
 - `reviewModelCopilot` (default `"claude-sonnet-4.6"`)
 - `reviewProvider` (default `"claude"`; values `claude|copilot`)
-- `reviewEffort` (default `"medium"`; values `none|low|medium|high|xhigh|max`)
-- `copilotInheritMcp` (default `false`) — explicit capability elevation that enables Copilot SDK config discovery for MCP servers while retaining the MCP-only permission allowlist. Copilot-only.
+- `reviewEffort` (default `"high"`; values `none|low|medium|high|xhigh|max`)
+- `copilotInheritMcp` (default `false`) — explicit capability elevation that injects MCP servers read from the user's trusted Copilot config (`<configDir>/mcp-config.json`) via `setMcpServers`, while retaining the read/MCP-only permission allowlist. On-disk config discovery stays disabled, so the untrusted PR-branch worktree's repo-local `.mcp.json` is never loaded. Copilot-only.
 - `copilotAutoEnableMcpOnReview` (default `false`) — review-only opt-in that forces MCP enablement for Copilot review generation even when `copilotInheritMcp` is off; chat still follows `copilotInheritMcp`. Copilot-only.
-- `copilotConfigDir` (default `""`) — optional override of the Copilot config directory used to discover MCP servers; empty uses the CLI default (`~/.copilot`). Copilot-only.
+- `copilotConfigDir` (default `""`) — optional override of the Copilot config directory used to read trusted MCP servers; empty uses the CLI default (`~/.copilot`). Copilot-only.
 - `reviewFocusAreas` (default `""`) — default reviewer focus areas; a non-empty per-review override takes precedence.
 - `reviewCustomInstructions` (default `""`) — default extra review instructions; a non-empty per-review override takes precedence.
 

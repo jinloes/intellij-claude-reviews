@@ -42,13 +42,20 @@ public class PluginSettingsComponent {
 
     /**
      * Reasoning-effort levels accepted by {@code copilot --reasoning-effort}, per the CLI help.
-     * "medium" is the default — balances catching real issues against latency.
+     * "high" is the default — favors catching real issues over latency.
      */
     private static final String[] COPILOT_EFFORTS = {
         "none", "low", "medium", "high", "xhigh", "max"
     };
 
+    /** Caps the settings form width (logical px, before HiDPI scaling) so fields don't sprawl. */
+    private static final int MAX_FORM_WIDTH = 560;
+
+    /** Caps the model dropdown width so it doesn't stretch to match the hint below it. */
+    private static final int MODEL_COMBO_WIDTH = 320;
+
     private final JPanel mainPanel;
+    private JPanel rootPanel;
     private final JBTextField baseUrlField = new JBTextField("https://github.com");
     private final JComboBox<String> claudeModelCombo =
             new JComboBox<>(CLAUDE_MODELS.stream().map(ModelOption::label).toArray(String[]::new));
@@ -61,6 +68,9 @@ public class PluginSettingsComponent {
     private final JBTextField copilotConfigDirField = new JBTextField();
     private final JBTextField reviewFocusAreasField = new JBTextField();
     private final JBTextArea reviewCustomInstructionsArea = new JBTextArea(3, 0);
+    private final JBTextArea reviewGuidanceGlobsArea = new JBTextArea(3, 0);
+    private final JCheckBox reviewSelfCritiqueBox =
+            new JCheckBox("Run a self-critique validation pass (slower, higher precision)");
     private final JComboBox<ReviewProvider> providerCombo =
             new JComboBox<>(ReviewProvider.values());
 
@@ -108,6 +118,8 @@ public class PluginSettingsComponent {
 
         copilotModelCombo.setEditable(true);
         copilotModelCombo.setAlignmentX(Component.LEFT_ALIGNMENT);
+        boundComboWidth(copilotModelCombo);
+        boundComboWidth(claudeModelCombo);
         JLabel copilotHint =
                 hintLabel(
                         "<html><small>Auto-populated from <code>copilot help config</code>;"
@@ -131,7 +143,13 @@ public class PluginSettingsComponent {
         copilotModelCard.add(copilotModelCombo);
         copilotModelCard.add(copilotHint);
 
-        modelComboPanel.add(claudeModelCombo, ReviewProvider.CLAUDE.getId());
+        // Wrap the Claude combo in a left-aligned BoxLayout card too: CardLayout ignores
+        // maximumSize and would otherwise stretch the bare combo to the full panel width.
+        JPanel claudeModelCard = new JPanel();
+        claudeModelCard.setLayout(new BoxLayout(claudeModelCard, BoxLayout.Y_AXIS));
+        claudeModelCard.add(claudeModelCombo);
+
+        modelComboPanel.add(claudeModelCard, ReviewProvider.CLAUDE.getId());
         modelComboPanel.add(copilotModelCard, ReviewProvider.COPILOT.getId());
         providerCombo.addActionListener(e -> updateActiveModelCombo());
 
@@ -149,9 +167,9 @@ public class PluginSettingsComponent {
 
         JLabel mcpHint =
                 hintLabel(
-                        "<html><small>When enabled, Copilot inherits MCP servers from"
-                                + " <code>~/.copilot/mcp-config.json</code> and any repo-local"
-                                + " <code>.mcp.json</code>.</small></html>");
+                        "<html><small>When enabled, Copilot inherits MCP servers from your trusted"
+                                + " <code>~/.copilot/mcp-config.json</code>. A pull request's"
+                                + " repo-local <code>.mcp.json</code> is never loaded.</small></html>");
         // BoxLayout centers children by default (alignmentX 0.5) unless each child explicitly opts
         // into LEFT_ALIGNMENT — every direct child added below needs it or the row floats to the
         // middle of the form, which is what was happening to the "Show advanced" checkbox.
@@ -243,6 +261,27 @@ public class PluginSettingsComponent {
                                         "<html><small>Extra instructions appended to every review"
                                                 + " prompt, such as team conventions.</small></html>"),
                                 1)
+                        .addLabeledComponent(
+                                new JBLabel("Review guidance files:"),
+                                new JBScrollPane(reviewGuidanceGlobsArea),
+                                1,
+                                false)
+                        .addComponent(
+                                hintLabel(
+                                        "<html><small>One path or glob per line, read from the review"
+                                                + " working directory into repo guidelines (for example"
+                                                + " <code>**/style.md</code> or"
+                                                + " <code>.linkedin/ai-agent/*.md</code>). Blank uses the"
+                                                + " defaults (AGENTS.md, CONTRIBUTING.md, …).</small></html>"),
+                                1)
+                        .addComponent(reviewSelfCritiqueBox, 1)
+                        .addComponent(
+                                hintLabel(
+                                        "<html><small>Runs a second pass that re-checks each finding"
+                                                + " against the diff and drops misattributed ones."
+                                                + " Higher precision, but roughly doubles review"
+                                                + " time.</small></html>"),
+                                1)
                         .addSeparator(8)
                         .addComponent(sectionTitle("Notifications"), 1)
                         .addComponent(notificationsEnabledBox, 1)
@@ -261,7 +300,20 @@ public class PluginSettingsComponent {
     }
 
     public JPanel getPanel() {
-        return mainPanel;
+        if (rootPanel == null) {
+            // Hard-cap the form width so input fields don't stretch across a wide Settings dialog.
+            // BoxLayout is the one standard layout that honors maximumSize, so it clamps the form to
+            // MAX_FORM_WIDTH even when its preferred width is larger; the trailing glue eats the
+            // remaining horizontal space. Height is left unbounded so toggling advanced options can
+            // still grow the panel.
+            mainPanel.setMaximumSize(new java.awt.Dimension(JBUI.scale(MAX_FORM_WIDTH), Integer.MAX_VALUE));
+            mainPanel.setAlignmentY(Component.TOP_ALIGNMENT);
+            rootPanel = new JPanel();
+            rootPanel.setLayout(new BoxLayout(rootPanel, BoxLayout.X_AXIS));
+            rootPanel.add(mainPanel);
+            rootPanel.add(Box.createHorizontalGlue());
+        }
+        return rootPanel;
     }
 
     public JComponent getPreferredFocusedComponent() {
@@ -388,14 +440,49 @@ public class PluginSettingsComponent {
         reviewCustomInstructionsArea.setText(value != null ? value : "");
     }
 
+    public String getReviewGuidanceGlobs() {
+        return reviewGuidanceGlobsArea.getText().trim();
+    }
+
+    public void setReviewGuidanceGlobs(String value) {
+        reviewGuidanceGlobsArea.setText(value != null ? value : "");
+    }
+
+    public boolean isReviewSelfCritique() {
+        return reviewSelfCritiqueBox.isSelected();
+    }
+
+    public void setReviewSelfCritique(boolean v) {
+        reviewSelfCritiqueBox.setSelected(v);
+    }
+
     private static JBLabel sectionTitle(String text) {
         JBLabel label = new JBLabel("<html><b>" + text + "</b></html>");
         label.setBorder(JBUI.Borders.emptyTop(8));
         return label;
     }
 
+    /** Left-aligns a model combo and caps its width so it doesn't stretch to the row/hint width. */
+    private static void boundComboWidth(JComboBox<?> combo) {
+        combo.setAlignmentX(Component.LEFT_ALIGNMENT);
+        combo.setMaximumSize(
+                new java.awt.Dimension(JBUI.scale(MODEL_COMBO_WIDTH), combo.getPreferredSize().height));
+    }
+
     private static JBLabel hintLabel(String html) {
-        JBLabel label = new JBLabel(html);
+        // Constrain hint width so long hints wrap instead of widening the whole settings panel
+        // (an unbounded single-line HTML label reports a huge preferred width, which forces a
+        // horizontal scrollbar and pushes full-width fields like the model dropdown off-screen).
+        String inner = html;
+        if (inner.startsWith("<html>")) {
+            inner = inner.substring("<html>".length());
+        }
+        if (inner.endsWith("</html>")) {
+            inner = inner.substring(0, inner.length() - "</html>".length());
+        }
+        JBLabel label =
+                new JBLabel(
+                        "<html><div style='width:" + JBUI.scale(480) + "px'>" + inner + "</div></html>");
         label.setBorder(JBUI.Borders.emptyTop(2));
         return label;
     }

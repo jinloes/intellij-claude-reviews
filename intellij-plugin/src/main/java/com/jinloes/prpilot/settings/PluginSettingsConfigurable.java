@@ -39,7 +39,9 @@ public class PluginSettingsConfigurable implements Configurable {
                 || component.isCopilotAutoEnableMcpOnReview() != s.isCopilotAutoEnableMcpOnReview()
                 || !component.getCopilotConfigDir().equals(s.getCopilotConfigDir())
                 || !component.getReviewFocusAreas().equals(s.getReviewFocusAreas())
-                || !component.getReviewCustomInstructions().equals(s.getReviewCustomInstructions());
+                || !component.getReviewCustomInstructions().equals(s.getReviewCustomInstructions())
+                || !component.getReviewGuidanceGlobs().equals(s.getReviewGuidanceGlobsRaw())
+                || component.isReviewSelfCritique() != s.isReviewSelfCritique();
     }
 
     @Override
@@ -70,6 +72,8 @@ public class PluginSettingsConfigurable implements Configurable {
         s.setCopilotConfigDir(component.getCopilotConfigDir());
         s.setReviewFocusAreas(component.getReviewFocusAreas());
         s.setReviewCustomInstructions(component.getReviewCustomInstructions());
+        s.setReviewGuidanceGlobs(component.getReviewGuidanceGlobs());
+        s.setReviewSelfCritique(component.isReviewSelfCritique());
 
         // Restart/stop polling to reflect the new settings immediately
         PRNotificationService svc = PRNotificationService.getInstance();
@@ -98,6 +102,8 @@ public class PluginSettingsConfigurable implements Configurable {
         component.setCopilotConfigDir(s.getCopilotConfigDir());
         component.setReviewFocusAreas(s.getReviewFocusAreas());
         component.setReviewCustomInstructions(s.getReviewCustomInstructions());
+        component.setReviewGuidanceGlobs(s.getReviewGuidanceGlobsRaw());
+        component.setReviewSelfCritique(s.isReviewSelfCritique());
     }
 
     @Override

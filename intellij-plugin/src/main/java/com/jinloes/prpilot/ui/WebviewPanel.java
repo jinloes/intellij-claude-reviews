@@ -29,6 +29,7 @@ import com.jinloes.prpilot.model.ReviewResult;
 import com.jinloes.prpilot.review.ClaudeService;
 import com.jinloes.prpilot.review.CopilotService;
 import com.jinloes.prpilot.review.GitWorktreeService;
+import com.jinloes.prpilot.review.RepoGuidelinesReader;
 import com.jinloes.prpilot.services.IntellijClaudeService;
 import com.jinloes.prpilot.services.IntellijGitHubService;
 import com.jinloes.prpilot.services.PendingReviewIndex;
@@ -42,7 +43,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
-import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -1310,56 +1310,15 @@ public class WebviewPanel implements Disposable {
                         key, bridgePrKey(pr.getNumber(), pr.getOwner(), pr.getRepo()));
     }
 
-    /** Candidate contributor-doc files, in priority order, scanned for repo review guidelines. */
-    private static final String[] GUIDELINE_FILES = {
-        "AGENTS.md",
-        "CONTRIBUTING.md",
-        ".github/CONTRIBUTING.md",
-        "docs/CONTRIBUTING.md",
-        ".github/pull_request_template.md",
-    };
-
-    /** Cap on guideline bytes fed to the prompt so a large doc can't blow up the context. */
-    private static final int MAX_GUIDELINES_BYTES = 6000;
-
     /**
-     * Reads repo contributor docs from {@code dir} (the PR-branch worktree or project base dir),
-     * concatenated and capped at {@link #MAX_GUIDELINES_BYTES}, so the model can weight findings
-     * against the project's own review conventions. Returns an empty string when none are found.
+     * Reads repo review-guidance docs from {@code dir} (the PR-branch worktree or project base
+     * dir) using the user-configured guidance globs, so the model can weight findings against the
+     * project's own review conventions. Returns an empty string when none are found. Delegates to
+     * the shared {@link RepoGuidelinesReader} (mirrored in VS Code's {@code guidelines.ts}).
      */
     private static String readRepoGuidelines(java.io.File dir) {
-        if (dir == null) {
-            return "";
-        }
-        StringBuilder sb = new StringBuilder();
-        int total = 0;
-        for (String rel : GUIDELINE_FILES) {
-            if (total >= MAX_GUIDELINES_BYTES) {
-                break;
-            }
-            java.io.File f = new java.io.File(dir, rel);
-            if (!f.isFile()) {
-                continue;
-            }
-            try {
-                String content = Files.readString(f.toPath()).trim();
-                if (content.isEmpty()) {
-                    continue;
-                }
-                int remaining = MAX_GUIDELINES_BYTES - total;
-                if (content.length() > remaining) {
-                    content = content.substring(0, remaining) + "\n...(truncated)";
-                }
-                if (sb.length() > 0) {
-                    sb.append("\n\n");
-                }
-                sb.append("## ").append(rel).append("\n").append(content);
-                total += content.length();
-            } catch (IOException e) {
-                // unreadable — skip
-            }
-        }
-        return sb.toString();
+        return RepoGuidelinesReader.read(
+                dir, PluginSettings.getInstance().getReviewGuidanceGlobs());
     }
 
     /** Formats a prior generated review as compact context for a re-generation prompt. */

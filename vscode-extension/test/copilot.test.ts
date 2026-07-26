@@ -37,8 +37,10 @@ test('normalizeReasoningEffort falls back to default on blank input', () => {
   assert.equal(normalizeReasoningEffort('   '), DEFAULT_REASONING_EFFORT);
 });
 
-test('permissionDecision denies tools by default', () => {
+test('permissionDecision allows read-only file access, denies mutating tools', () => {
+  assert.equal(permissionDecision('read', false).kind, 'approve-once');
   assert.equal(permissionDecision('shell', false).kind, 'reject');
+  assert.equal(permissionDecision('write', false).kind, 'reject');
   assert.equal(permissionDecision('mcp', false).kind, 'reject');
 });
 

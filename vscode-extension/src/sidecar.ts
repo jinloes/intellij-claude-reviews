@@ -196,6 +196,7 @@ export interface SidecarGenerateReviewParams {
     effort: string;
     inheritMcp: boolean;
     configDir?: string;
+    selfCritique: boolean;
     pr: SidecarPrInput;
     diff: string;
     knownPatterns: string;

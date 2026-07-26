@@ -15,6 +15,7 @@ import { resolveWebviewDistPath } from './webviewAssets';
 import { buildErrorHtml, buildLauncherHtml, buildMainWebviewHtml } from './webviewHtml';
 import { classifyHostTheme, type HostTheme } from './hostTheme';
 import { SidecarClient, resolveSidecarJarPath } from './sidecar';
+import { readRepoGuidelines, DEFAULT_GUIDANCE_GLOBS } from './guidelines';
 import type { LineComment, PR, PRSearchScope, ReviewResult } from './models';
 
 // Process-wide, lazily-started Java engine host. GitHub operations are never performed in the
@@ -581,8 +582,8 @@ function reviewModel(): string {
 }
 
 function reviewEffort(): string {
-    const value = config().get<string>('reviewEffort', 'medium');
-    return value && value.trim().length > 0 ? value : 'medium';
+    const value = config().get<string>('reviewEffort', 'high');
+    return value && value.trim().length > 0 ? value : 'high';
 }
 
 function copilotInheritMcp(): boolean {
@@ -605,41 +606,18 @@ function reviewCustomInstructions(): string {
     return config().get<string>('reviewCustomInstructions', '').trim();
 }
 
-/** Candidate contributor-doc files, in priority order, scanned for repo review guidelines. */
-const GUIDELINE_FILES = [
-    'AGENTS.md',
-    'CONTRIBUTING.md',
-    '.github/CONTRIBUTING.md',
-    'docs/CONTRIBUTING.md',
-    '.github/pull_request_template.md',
-];
+/** User-configured guidance globs, falling back to the defaults when unset/empty. */
+function reviewGuidanceGlobs(): string[] {
+    const globs = config().get<string[]>('reviewGuidanceGlobs', []);
+    const cleaned = Array.isArray(globs)
+        ? globs.map((g) => String(g).trim()).filter((g) => g.length > 0)
+        : [];
+    return cleaned.length > 0 ? cleaned : DEFAULT_GUIDANCE_GLOBS;
+}
 
-/** Total cap on guideline bytes fed to the prompt so a large doc can't blow up the context. */
-const MAX_GUIDELINES_BYTES = 6_000;
-
-/**
- * Reads repo contributor docs from the review working directory (the PR-branch worktree or the
- * open workspace) and concatenates them, capped at {@link MAX_GUIDELINES_BYTES}, so the model can
- * weight findings against the project's own review conventions. Returns '' when none are found.
- */
-function readRepoGuidelines(dir: string): string {
-    if (!dir) return '';
-    const parts: string[] = [];
-    let total = 0;
-    for (const rel of GUIDELINE_FILES) {
-        if (total >= MAX_GUIDELINES_BYTES) break;
-        try {
-            const full = path.join(dir, rel);
-            if (!fs.statSync(full).isFile()) continue;
-            let content = fs.readFileSync(full, 'utf8').trim();
-            if (!content) continue;
-            const remaining = MAX_GUIDELINES_BYTES - total;
-            if (content.length > remaining) content = `${content.substring(0, remaining)}\n…(truncated)`;
-            parts.push(`## ${rel}\n${content}`);
-            total += content.length;
-        } catch { /* unreadable or missing — skip */ }
-    }
-    return parts.join('\n\n');
+/** When true, review generation runs a second self-critique validation pass. Default off. */
+function reviewSelfCritique(): boolean {
+    return config().get<boolean>('reviewSelfCritique', false);
 }
 
 /** Formats a prior generated review as compact context for a re-generation prompt. */
@@ -892,6 +870,7 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
                     ? copilot.resolveReviewInheritMcp(copilotInheritMcp(), copilotAutoEnableMcpOnReview())
                     : false,
                 configDir: isCopilot ? copilotConfigDir() : undefined,
+                selfCritique: reviewSelfCritique(),
                 pr: {
                     title,
                     // htmlUrl/author/createdAt/isDraft aren't used by ClaudeService/CopilotService's
@@ -911,7 +890,7 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
                 knownPatterns: '',
                 priorReview: formatPriorReview(state.activeReviewResult),
                 existingReviews,
-                repoGuidelines: readRepoGuidelines(reviewDir),
+                repoGuidelines: readRepoGuidelines(reviewDir, reviewGuidanceGlobs()),
                 focusAreas,
                 customInstructions,
             },

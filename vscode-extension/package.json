@@ -161,13 +161,13 @@
             "xhigh",
             "max"
           ],
-          "default": "medium",
-          "description": "Reasoning effort passed to `copilot --reasoning-effort`. Higher = deeper review, slower. Only applied when `pr-pilot.reviewProvider` is `copilot`. Default `medium` balances catching real issues against latency."
+          "default": "high",
+          "description": "Reasoning effort passed to `copilot --reasoning-effort`. Higher = deeper review, slower. Only applied when `pr-pilot.reviewProvider` is `copilot`. Default `high` favors catching real issues over latency."
         },
         "pr-pilot.copilotInheritMcp": {
           "type": "boolean",
           "default": false,
-          "description": "Advanced capability elevation. When enabled, Copilot may call MCP tools discovered from the CLI and repository configuration while processing untrusted pull-request content. Disabled by default."
+          "description": "Advanced capability elevation. When enabled, Copilot may call MCP servers defined in your trusted Copilot config (`~/.copilot/mcp-config.json`, or `pr-pilot.copilotConfigDir`). A pull request's own repo-local `.mcp.json` is never loaded, since PR content is untrusted. Disabled by default."
         },
         "pr-pilot.copilotAutoEnableMcpOnReview": {
           "type": "boolean",
@@ -188,6 +188,19 @@
           "type": "string",
           "default": "",
           "description": "Default extra instructions appended to every review prompt (e.g. team conventions to enforce). A per-review override in the PR Pilot view takes precedence when set."
+        },
+        "pr-pilot.reviewGuidanceGlobs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Guidance files (literal relative paths or globs like `**/style.md`, `.linkedin/ai-agent/*.md`) read from the review working directory and folded into the model's repo-guidelines context. One entry per array item. Empty uses the defaults (AGENTS.md, CONTRIBUTING.md, .github/CONTRIBUTING.md, docs/CONTRIBUTING.md, .github/pull_request_template.md)."
+        },
+        "pr-pilot.reviewSelfCritique": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run a second self-critique pass that re-validates each finding against the diff and drops misattributed/unsupported ones. Higher precision, but roughly doubles review latency."
         }
       }
     }

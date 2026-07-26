@@ -23,7 +23,7 @@ function readState(): SettingsState {
         provider: normalizeProvider(c.get<string>('reviewProvider', 'claude')),
         reviewModel: c.get<string>('reviewModel', ''),
         reviewModelCopilot: c.get<string>('reviewModelCopilot', ''),
-        reviewEffort: c.get<string>('reviewEffort', 'medium'),
+        reviewEffort: c.get<string>('reviewEffort', 'high'),
         githubBaseUrl: c.get<string>('githubBaseUrl', 'https://github.com'),
         copilotInheritMcp: c.get<boolean>('copilotInheritMcp', false),
         copilotAutoEnableMcpOnReview: c.get<boolean>('copilotAutoEnableMcpOnReview', false),

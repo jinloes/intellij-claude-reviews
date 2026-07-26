@@ -8,6 +8,7 @@ import com.github.copilot.generated.SessionErrorEvent;
 import com.github.copilot.generated.ToolExecutionStartEvent;
 import com.github.copilot.rpc.CopilotClientMode;
 import com.github.copilot.rpc.CopilotClientOptions;
+import com.github.copilot.rpc.McpServerConfig;
 import com.github.copilot.rpc.MessageOptions;
 import com.github.copilot.rpc.PermissionHandler;
 import com.github.copilot.rpc.PermissionRequestResult;
@@ -54,11 +55,11 @@ public class CopilotService {
     private static final long SDK_BOOT_TIMEOUT_MS = 60L * 1000L;
 
     /**
-     * Sane default for PR review work: enough depth to catch real bugs and follow the strict JSON
-     * schema, without burning the latency of {@code high}/{@code xhigh}/{@code max}. Exposed as a
-     * constant so the IntelliJ adapter and VS Code extension can mirror it.
+     * Default for PR review work: {@code high} trades some latency for materially deeper reasoning,
+     * which catches more real correctness/security issues while still following the strict JSON
+     * schema. Exposed as a constant so the IntelliJ adapter and VS Code extension can mirror it.
      */
-    public static final String DEFAULT_REASONING_EFFORT = "medium";
+    public static final String DEFAULT_REASONING_EFFORT = "high";
 
     private final File workingDir;
     private RuntimeFactory runtimeFactory = new SdkRuntimeFactory();
@@ -81,9 +82,10 @@ public class CopilotService {
     }
 
     /**
-     * @param inheritMcp when true, the Copilot session enables config discovery so it inherits MCP
-     *     servers from the Copilot CLI config ({@code ~/.copilot/mcp-config.json}) and any
-     *     repo-local {@code .mcp.json} in the working directory.
+     * @param inheritMcp when true, the review inherits MCP servers from the user's <em>trusted</em>
+     *     Copilot config ({@code <configDir>/mcp-config.json}, default {@code ~/.copilot}) via
+     *     {@link CopilotMcpConfig}. The SDK's on-disk config discovery is never enabled, so the
+     *     untrusted PR-branch worktree's repo-local {@code .mcp.json} is deliberately ignored.
      * @param configDir optional override of the Copilot config directory; blank uses the CLI
      *     default ({@code ~/.copilot}).
      */
@@ -94,7 +96,8 @@ public class CopilotService {
             Consumer<String> onStatus,
             BiConsumer<String, String> onChunk,
             boolean inheritMcp,
-            String configDir)
+            String configDir,
+            boolean selfCritique)
             throws IOException, InterruptedException {
         String prompt = ClaudeService.buildPrompt(request);
         log.info(
@@ -102,13 +105,44 @@ public class CopilotService {
                 prompt.length(),
                 StringUtils.length(request.getDiff()),
                 StringUtils.length(request.getKnownPatterns()));
-        return runReview(prompt, model, effort, inheritMcp, configDir, onStatus, onChunk);
+        ReviewResult draft = runReview(prompt, model, effort, inheritMcp, configDir, onStatus, onChunk);
+        if (!selfCritique) {
+            return draft;
+        }
+        onStatus.accept(ClaudeService.STATUS_REFINING);
+        try {
+            return runReview(
+                    ClaudeService.buildCritiquePrompt(request, draft),
+                    model,
+                    effort,
+                    inheritMcp,
+                    configDir,
+                    onStatus,
+                    onChunk);
+        } catch (InterruptedException interrupted) {
+            throw interrupted;
+        } catch (Exception e) {
+            log.warn("Copilot self-critique pass failed; keeping first-pass review", e);
+            return draft;
+        }
+    }
+
+    public ReviewResult reviewPR(
+            PRReviewRequest request,
+            String model,
+            String effort,
+            Consumer<String> onStatus,
+            BiConsumer<String, String> onChunk,
+            boolean inheritMcp,
+            String configDir)
+            throws IOException, InterruptedException {
+        return reviewPR(request, model, effort, onStatus, onChunk, inheritMcp, configDir, false);
     }
 
     public ReviewResult reviewPR(
             PRReviewRequest request, String model, String effort, Consumer<String> onStatus)
             throws IOException, InterruptedException {
-        return reviewPR(request, model, effort, onStatus, null, false, null);
+        return reviewPR(request, model, effort, onStatus, null, false, null, false);
     }
 
     private ReviewResult runReview(
@@ -333,7 +367,7 @@ public class CopilotService {
             String model,
             String effort,
             File workingDir,
-            boolean enableConfigDiscovery,
+            boolean inheritMcp,
             String configDir) {}
 
     interface RuntimeFactory {
@@ -403,14 +437,26 @@ public class CopilotService {
                             CompletableFuture.completedFuture(
                                     permissionDecision(
                                             permissionRequest.getKind(),
-                                            sessionRequest.enableConfigDiscovery()));
+                                            sessionRequest.inheritMcp()));
             SessionConfig config =
                     new SessionConfig()
                             .setOnPermissionRequest(permissionHandler)
                             .setStreaming(true)
                             .setWorkingDirectory(sessionRequest.workingDir().getAbsolutePath())
                             .setReasoningEffort(sessionRequest.effort())
-                            .setEnableConfigDiscovery(sessionRequest.enableConfigDiscovery());
+                            // Never enable on-disk config discovery: for a review the working
+                            // directory is the untrusted PR-branch worktree, so discovery would
+                            // load an attacker-controlled repo-local .mcp.json (which can launch
+                            // an arbitrary process). Trusted MCP servers are injected explicitly
+                            // below from the user's own config dir instead.
+                            .setEnableConfigDiscovery(false);
+            if (sessionRequest.inheritMcp()) {
+                Map<String, McpServerConfig> trusted =
+                        CopilotMcpConfig.loadTrustedServers(sessionRequest.configDir());
+                if (!trusted.isEmpty()) {
+                    config.setMcpServers(trusted);
+                }
+            }
             if (StringUtils.isNotBlank(sessionRequest.model())) {
                 config.setModel(sessionRequest.model());
             }
@@ -536,11 +582,15 @@ public class CopilotService {
     }
 
     static PermissionRequestResult permissionDecision(String kind, boolean allowMcp) {
+        if ("read".equals(kind)) {
+            return PermissionRequestResult.approveOnce();
+        }
         if (allowMcp && "mcp".equals(kind)) {
             return PermissionRequestResult.approveOnce();
         }
         return PermissionRequestResult.reject(
-                "PR Pilot runs reviews with read-only embedded context; external tools are disabled.");
+                "PR Pilot reviews allow read-only file access only; write, shell, and network tools"
+                        + " are disabled.");
     }
 
     static String normalizeReasoningEffort(String effort) {

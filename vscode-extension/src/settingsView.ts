@@ -216,13 +216,13 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
         </div>
 
         <div class="field" id="mcpField">
-          <label><input type="checkbox" id="inheritMcp" style="width:auto;margin-right:6px;">Allow MCP tools for untrusted PR content</label>
-          <div class="hint">Capability elevation: MCP tools from user and repository configuration may access external systems while Copilot processes pull-request content.</div>
+          <label><input type="checkbox" id="inheritMcp" style="width:auto;margin-right:6px;">Allow MCP tools from your trusted Copilot config</label>
+          <div class="hint">Capability elevation: lets Copilot call MCP servers defined in your own Copilot config (<code>~/.copilot/mcp-config.json</code>). A pull request's repo-local <code>.mcp.json</code> is never loaded, since PR content is untrusted.</div>
           <label style="margin-top:8px;"><input type="checkbox" id="reviewAutoEnableMcp" style="width:auto;margin-right:6px;">Always enable MCP for Copilot reviews</label>
           <div class="hint">Review-only override. Chat still follows the general MCP toggle above.</div>
           <label for="copilotConfigDir" style="margin-top:8px;">Copilot config directory</label>
           <input type="text" id="copilotConfigDir" aria-describedby="copilotConfigDirHint" placeholder="Empty uses ~/.copilot">
-          <div class="hint" id="copilotConfigDirHint">Optional override of the Copilot config directory used to discover MCP servers.</div>
+          <div class="hint" id="copilotConfigDirHint">Optional override of the Copilot config directory the trusted MCP servers are loaded from.</div>
         </div>
       </div>
     </details>

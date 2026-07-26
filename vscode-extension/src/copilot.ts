@@ -10,19 +10,22 @@ import { existsOnPath } from './claude';
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /**
- * Sane default for PR review work: enough depth to catch real bugs and follow the strict JSON
- * schema, without burning the latency of `high`/`xhigh`/`max`.
+ * Default for PR review work: `high` trades some latency for materially deeper reasoning, which
+ * catches more real correctness/security issues while still following the strict JSON schema.
  */
-export const DEFAULT_REASONING_EFFORT = 'medium';
+export const DEFAULT_REASONING_EFFORT = 'high';
 export const SDK_BOOT_TIMEOUT_MS = 60 * 1000;
 
 export function permissionDecision(kind: string, allowMcp: boolean): PermissionRequestResult {
+    if (kind === 'read') {
+        return { kind: 'approve-once' };
+    }
     if (allowMcp && kind === 'mcp') {
         return { kind: 'approve-once' };
     }
     return {
         kind: 'reject',
-        feedback: 'PR Pilot runs reviews with read-only embedded context; external tools are disabled.',
+        feedback: 'PR Pilot reviews allow read-only file access only; write, shell, and network tools are disabled.',
     };
 }
 

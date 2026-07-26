@@ -38,6 +38,7 @@ public class IntellijClaudeService {
         private final boolean inheritMcp;
         private final boolean forceMcpOnReview;
         private final String configDir;
+        private final boolean selfCritique;
 
         private RuntimeSettings(
                 ReviewProvider provider,
@@ -45,13 +46,15 @@ public class IntellijClaudeService {
                 String effort,
                 boolean inheritMcp,
                 boolean forceMcpOnReview,
-                String configDir) {
+                String configDir,
+                boolean selfCritique) {
             this.provider = provider;
             this.model = model;
             this.effort = effort;
             this.inheritMcp = inheritMcp;
             this.forceMcpOnReview = forceMcpOnReview;
             this.configDir = configDir;
+            this.selfCritique = selfCritique;
         }
     }
 
@@ -100,9 +103,14 @@ public class IntellijClaudeService {
                                         wrappedChunk,
                                         resolveReviewInheritMcp(
                                                 settings.inheritMcp, settings.forceMcpOnReview),
-                                        settings.configDir)
+                                        settings.configDir,
+                                        settings.selfCritique)
                                 : claude.reviewPR(
-                                        request, settings.model, wrappedStatus, wrappedChunk),
+                                        request,
+                                        settings.model,
+                                        settings.selfCritique,
+                                        wrappedStatus,
+                                        wrappedChunk),
                 onComplete);
     }
 
@@ -196,7 +204,8 @@ public class IntellijClaudeService {
                 settings.getReviewEffort(),
                 settings.isCopilotInheritMcp(),
                 settings.isCopilotAutoEnableMcpOnReview(),
-                settings.getCopilotConfigDir());
+                settings.getCopilotConfigDir(),
+                settings.isReviewSelfCritique());
     }
 
     private static <T> void runOnPooledThread(

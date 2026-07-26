@@ -46,6 +46,7 @@ mirror only the IntelliJ direct adapter and VS Code sidecar RPC wiring when capa
 | `WebviewPanel.resolvePrClaudeService`/worktree lifecycle | `vscode-extension/src/extension.ts` `resolveWorkingDir`/`clearWorktree` |
 | `PRNotificationService` poll/source-labeling/merge logic | `vscode-extension/src/notifications.ts` + `extension.ts` `PRNotificationPoller.poll` |
 | `review-engine/BinaryLocator.java` | `vscode-extension/src/claude.ts` + `vscode-extension/src/copilot.ts` binary-probing candidates |
+| `review-engine/RepoGuidelinesReader.java` glob/scan/read logic | `vscode-extension/src/guidelines.ts` same functions (`globToRegex`, `resolvePaths`, `readRepoGuidelines`) |
 | `review-engine/CopilotService.java` SDK session setup, stream events, effort normalization | `sidecar/review/ReviewSessionService.java` call sites |
 | `review-engine/CopilotModelDiscovery.java` model probing / `PluginSettingsComponent` model combo | `vscode-extension/src/copilot.ts` `listModels`/`filterModelIds` + `extension.ts` `selectCopilotModel` command |
 | `PluginSettingsComponent` settings UI (provider-aware model selector, effort, base URL) | `vscode-extension/src/settings.ts` + `settingsView.ts` settings webview |

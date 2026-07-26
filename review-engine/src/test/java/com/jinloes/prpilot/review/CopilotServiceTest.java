@@ -192,8 +192,12 @@ class CopilotServiceTest {
     class PermissionDecision {
 
         @Test
-        void deniesAllToolsByDefault() {
+        void allowsReadOnlyDeniesMutatingTools() {
+            assertThat(CopilotService.permissionDecision("read", false).getKind())
+                    .isEqualTo("approve-once");
             assertThat(CopilotService.permissionDecision("shell", false).getKind())
+                    .isEqualTo("reject");
+            assertThat(CopilotService.permissionDecision("write", false).getKind())
                     .isEqualTo("reject");
             assertThat(CopilotService.permissionDecision("mcp", false).getKind())
                     .isEqualTo("reject");
@@ -212,11 +216,11 @@ class CopilotServiceTest {
     class NormalizeReasoningEffort {
 
         @Test
-        void blankOrUnknownDefaultsToMedium() {
-            assertThat(CopilotService.normalizeReasoningEffort("")).isEqualTo("medium");
-            assertThat(CopilotService.normalizeReasoningEffort("  ")).isEqualTo("medium");
-            assertThat(CopilotService.normalizeReasoningEffort(null)).isEqualTo("medium");
-            assertThat(CopilotService.normalizeReasoningEffort("turbo")).isEqualTo("medium");
+        void blankOrUnknownDefaultsToHigh() {
+            assertThat(CopilotService.normalizeReasoningEffort("")).isEqualTo("high");
+            assertThat(CopilotService.normalizeReasoningEffort("  ")).isEqualTo("high");
+            assertThat(CopilotService.normalizeReasoningEffort(null)).isEqualTo("high");
+            assertThat(CopilotService.normalizeReasoningEffort("turbo")).isEqualTo("high");
         }
 
         @Test
@@ -271,7 +275,7 @@ class CopilotServiceTest {
             assertThat(sessionRequest.model()).isEqualTo("claude-sonnet-4.6");
             assertThat(sessionRequest.effort()).isEqualTo("high");
             assertThat(sessionRequest.workingDir()).isEqualTo(new File("/tmp/pr-pilot-repo"));
-            assertThat(sessionRequest.enableConfigDiscovery()).isFalse();
+            assertThat(sessionRequest.inheritMcp()).isFalse();
             assertThat(sessionRequest.configDir()).isNull();
 
             FakeRuntimeSession session = client.lastSession;
@@ -303,7 +307,7 @@ class CopilotServiceTest {
                     "  /custom/.copilot  ");
 
             CopilotService.SessionRequest sessionRequest = factory.lastClient.lastSessionRequest;
-            assertThat(sessionRequest.enableConfigDiscovery()).isFalse();
+            assertThat(sessionRequest.inheritMcp()).isFalse();
             assertThat(sessionRequest.configDir()).isEqualTo("/custom/.copilot");
         }
 
@@ -322,6 +326,41 @@ class CopilotServiceTest {
             svc.reviewPR(fakeRequest(), "", "medium", ignored -> {}, null, false, "   ");
 
             assertThat(factory.lastClient.lastSessionRequest.configDir()).isNull();
+        }
+
+        @Test
+        void selfCritiqueRunsSecondPassEmbeddingTheFirstReview() throws Exception {
+            FakeRuntimeFactory factory =
+                    factoryFor(
+                            () -> {
+                                FakeRuntimeSession s = new FakeRuntimeSession();
+                                s.sendAction =
+                                        session -> session.emitMessage(reviewJson("APPROVE"));
+                                return s;
+                            });
+            CopilotService svc = new CopilotService(null, factory);
+
+            svc.reviewPR(fakeRequest(), "", "high", ignored -> {}, null, false, null, true);
+
+            // The second (critique) pass is the last client/session; its prompt embeds the draft.
+            assertThat(factory.lastClient.lastSession.lastPrompt).contains("<draft_review>");
+        }
+
+        @Test
+        void selfCritiqueDisabledRunsSinglePassWithoutDraftReview() throws Exception {
+            FakeRuntimeFactory factory =
+                    factoryFor(
+                            () -> {
+                                FakeRuntimeSession s = new FakeRuntimeSession();
+                                s.sendAction =
+                                        session -> session.emitMessage(reviewJson("APPROVE"));
+                                return s;
+                            });
+            CopilotService svc = new CopilotService(null, factory);
+
+            svc.reviewPR(fakeRequest(), "", "high", ignored -> {}, null, false, null, false);
+
+            assertThat(factory.lastClient.lastSession.lastPrompt).doesNotContain("<draft_review>");
         }
 
         @Test
@@ -642,8 +681,8 @@ class CopilotServiceTest {
     class DefaultReasoningEffort {
 
         @Test
-        void isMediumSaneBalanceOfDepthAndLatency() {
-            assertThat(CopilotService.DEFAULT_REASONING_EFFORT).isEqualTo("medium");
+        void isHighForDeeperReviewReasoning() {
+            assertThat(CopilotService.DEFAULT_REASONING_EFFORT).isEqualTo("high");
         }
     }
 
