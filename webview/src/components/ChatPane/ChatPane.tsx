@@ -14,15 +14,23 @@ interface Message {
   role: 'user' | 'assistant'
   content: string
   isError?: boolean
+  /**
+   * Opaque caller token copied from the `pendingMessage` this reply answers. ChatPane never
+   * interprets it — it exists so the caller can map a verify result back to the exact comment
+   * that prompted it, rather than to "whatever was verified most recently".
+   */
+  token?: string
 }
 
 interface Props {
   pr: PR
   selectedContext?: string
   onContextUsed?: () => void
-  pendingMessage?: { q: string; ctx: string; id: number }
+  pendingMessage?: { q: string; ctx: string; id: number; token?: string }
   onPendingMessageSent?: () => void
   contextSummary?: string[]
+  /** Applies a verify verdict's suggested action to the comment identified by `token`. */
+  onApplyVerifyAction?: (result: VerifyResult, token: string) => void
 }
 
 function prKey(pr: Pick<PR, 'owner' | 'repo' | 'number'>): string {
@@ -36,20 +44,25 @@ export function ChatPane({
   pendingMessage,
   onPendingMessageSent,
   contextSummary = [],
+  onApplyVerifyAction,
 }: Props) {
   const t = useI18n()
   const [messages, setMessages] = useState<Message[]>([])
   const [streaming, setStreaming] = useState('')
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  const [appliedTokens, setAppliedTokens] = useState<Set<string>>(new Set())
   const messagesRef = useRef<HTMLDivElement>(null)
   const sentPendingMessageIdRef = useRef<number | null>(null)
+  const pendingTokenRef = useRef<string | undefined>(undefined)
 
   useEffect(() => {
     setMessages([])
     setStreaming('')
     setInput('')
     setBusy(false)
+    setAppliedTokens(new Set())
+    pendingTokenRef.current = undefined
   }, [pr.number, pr.owner, pr.repo])
 
   useEffect(() => {
@@ -60,12 +73,16 @@ export function ChatPane({
         case 'chatChunk':
           setStreaming((s) => s + msg.chunk)
           break
-        case 'chatResponse':
+        case 'chatResponse': {
+          const token = pendingTokenRef.current
+          pendingTokenRef.current = undefined
           setStreaming('')
-          setMessages((prev) => [...prev, { role: 'assistant', content: msg.response }])
+          setMessages((prev) => [...prev, { role: 'assistant', content: msg.response, token }])
           setBusy(false)
           break
+        }
         case 'chatError':
+          pendingTokenRef.current = undefined
           setStreaming('')
           setMessages((prev) => [
             ...prev,
@@ -81,13 +98,19 @@ export function ChatPane({
 
   useEffect(() => {
     if (!pendingMessage || busy || sentPendingMessageIdRef.current === pendingMessage.id) return
-    const { q, ctx, id } = pendingMessage
+    const { q, ctx, id, token } = pendingMessage
     sentPendingMessageIdRef.current = id
+    pendingTokenRef.current = token
     setMessages((prev) => [...prev, { role: 'user', content: q }])
     setBusy(true)
     onPendingMessageSent?.()
     sendToHost({ type: 'askClaude', context: ctx, question: q })
   }, [pendingMessage, busy, onPendingMessageSent])
+
+  function handleApplyVerifyAction(result: VerifyResult, token: string) {
+    onApplyVerifyAction?.(result, token)
+    setAppliedTokens((prev) => new Set(prev).add(token))
+  }
 
   useEffect(() => {
     const messagesElement = messagesRef.current
@@ -154,7 +177,15 @@ export function ChatPane({
                   {m.role === 'user' ? 'you' : 'ai'}
                 </span>
                 {structured ? (
-                  <StructuredResultCard result={structured} />
+                  <StructuredResultCard
+                    result={structured}
+                    onApplyVerifyAction={
+                      m.token && onApplyVerifyAction
+                        ? (verify) => handleApplyVerifyAction(verify, m.token!)
+                        : undefined
+                    }
+                    applied={!!m.token && appliedTokens.has(m.token)}
+                  />
                 ) : (
                   <div
                     className={cn(
@@ -282,16 +313,47 @@ const ACTION_LABEL: Record<VerifyResult['action'], string> = {
   delete: 'Delete',
 }
 
-function StructuredResultCard({ result }: { result: StructuredResult }) {
+function StructuredResultCard({
+  result,
+  onApplyVerifyAction,
+  applied = false,
+}: {
+  result: StructuredResult
+  onApplyVerifyAction?: (result: VerifyResult) => void
+  applied?: boolean
+}) {
   return (
     <div className="w-full max-w-[90%] rounded-md border border-border bg-secondary text-secondary-foreground overflow-hidden">
-      {result.kind === 'verify' ? <VerifyResultCard result={result} /> : <ExampleFixResultCard result={result} />}
+      {result.kind === 'verify' ? (
+        <VerifyResultCard result={result} onApply={onApplyVerifyAction} applied={applied} />
+      ) : (
+        <ExampleFixResultCard result={result} />
+      )}
     </div>
   )
 }
 
-function VerifyResultCard({ result }: { result: VerifyResult }) {
+/**
+ * True when the verdict's action changes the review. `keep` is a no-op, and `revise` without a
+ * replacement has nothing to write, so neither offers a button — an "Apply" that does nothing is
+ * worse than no button at all.
+ */
+function isApplicable(result: VerifyResult): boolean {
+  if (result.action === 'delete') return true
+  return result.action === 'revise' && !!result.replacementComment?.trim()
+}
+
+function VerifyResultCard({
+  result,
+  onApply,
+  applied = false,
+}: {
+  result: VerifyResult
+  onApply?: (result: VerifyResult) => void
+  applied?: boolean
+}) {
   const { label, className, Icon } = VERDICT_STYLE[result.verdict]
+  const canApply = !!onApply && isApplicable(result)
   return (
     <div className="p-3 space-y-2 text-sm">
       <div className="flex flex-wrap items-center gap-2">
@@ -306,6 +368,26 @@ function VerifyResultCard({ result }: { result: VerifyResult }) {
         <div>
           <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground mb-1">Suggested replacement</p>
           <p className="whitespace-pre-wrap rounded bg-background/50 px-2 py-1.5 text-sm">{result.replacementComment}</p>
+        </div>
+      )}
+      {canApply && (
+        <div className="flex items-center gap-2 pt-1">
+          <Button
+            variant="outline"
+            size="sm"
+            className="text-xs"
+            disabled={applied}
+            onClick={() => onApply?.(result)}
+          >
+            {applied
+              ? 'Applied'
+              : result.action === 'delete'
+                ? 'Delete this comment'
+                : 'Replace comment text'}
+          </Button>
+          {!applied && (
+            <span className="text-[11px] text-muted-foreground">Updates the draft review</span>
+          )}
         </div>
       )}
     </div>

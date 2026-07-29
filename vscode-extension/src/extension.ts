@@ -14,7 +14,7 @@ import { toUserFacingError, providerNotInstalledMessage } from './userFacingErro
 import { resolveWebviewDistPath } from './webviewAssets';
 import { buildErrorHtml, buildLauncherHtml, buildMainWebviewHtml } from './webviewHtml';
 import { classifyHostTheme, type HostTheme } from './hostTheme';
-import { SidecarClient, resolveSidecarJarPath } from './sidecar';
+import { SidecarClient, resolveSidecarJarPath, type OutcomeComment } from './sidecar';
 import { readRepoGuidelines, DEFAULT_GUIDANCE_GLOBS } from './guidelines';
 import type { LineComment, PR, PRSearchScope, ReviewResult } from './models';
 
@@ -300,6 +300,8 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
             activeDiff: '',
             activeValidationDiff: '',
             activeReviewResult: null,
+            generatedReviewResult: null,
+            editedReviewResult: null,
             pendingReviewId: null,
             pendingReviewKey: null,
             selectionRevision: 0,
@@ -441,6 +443,17 @@ interface ViewState {
     activeDiff: string;
     activeValidationDiff: string;
     activeReviewResult: ReviewResult | null;
+    /**
+     * The review exactly as the model produced it, set *only* on generation — never when a draft is
+     * loaded from GitHub, which was not generated in this session and would otherwise record every
+     * comment as "kept". Mirrors WebviewPanel.java's `generatedResult`.
+     */
+    generatedReviewResult: ReviewResult | null;
+    /**
+     * The review as the reviewer edited it, captured from `saveDraft` — the only message that
+     * carries it. Outcome logging diffs this against `generatedReviewResult`.
+     */
+    editedReviewResult: ReviewResult | null;
     pendingReviewId: string | null;
     pendingReviewKey: string | null;
     selectionRevision: number;
@@ -499,9 +512,9 @@ function clearWorktree(state: ViewState): void {
 
 /**
  * Resolves the working directory for a review/chat against `pr`. Creates a detached git worktree
- * checked out to the PR's head branch so the CLI can read PR-branch source for type lookups and
- * cross-file references, then caches it for reuse. Falls back to the open workspace folder when a
- * worktree can't be created (no git root, different repo, fork fetch fails, etc.).
+ * pinned to the PR's head commit so the CLI reads exactly the code under review — not the branch
+ * tip, which can move mid-review — then caches it for reuse. Falls back to the open workspace
+ * folder when a worktree can't be created (no git root, different repo, fork fetch fails, etc.).
  *
  * Mirrors WebviewPanel.resolvePrClaudeService. Only builds a worktree when the open workspace is
  * the same repo as the PR — the worktree shares that repo's local object store.
@@ -536,9 +549,9 @@ async function resolveWorkingDir(
 
         const wt = worktree.worktreePath(pr.number);
         if (isFork) {
-            await worktree.createWorktreeFromFork(gitRoot, head.cloneUrl ?? '', head.ref, wt);
+            await worktree.createWorktreeFromFork(gitRoot, head.cloneUrl ?? '', head.ref, head.sha ?? '', wt);
         } else {
-            await worktree.createWorktree(gitRoot, head.ref, wt);
+            await worktree.createWorktree(gitRoot, head.ref, head.sha ?? '', wt);
         }
 
         // The PR may have changed while we awaited git; discard the worktree if so.
@@ -615,9 +628,12 @@ function reviewGuidanceGlobs(): string[] {
     return cleaned.length > 0 ? cleaned : DEFAULT_GUIDANCE_GLOBS;
 }
 
-/** When true, review generation runs a second self-critique validation pass. Default off. */
+/**
+ * When true, review generation runs a second self-critique validation pass. Default on; the
+ * fallback here must match the `pr-pilot.reviewSelfCritique` default in package.json.
+ */
 function reviewSelfCritique(): boolean {
-    return config().get<boolean>('reviewSelfCritique', false);
+    return config().get<boolean>('reviewSelfCritique', true);
 }
 
 /** Formats a prior generated review as compact context for a re-generation prompt. */
@@ -703,6 +719,8 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
     state.activeDiff = '';
     state.activeValidationDiff = '';
     state.activeReviewResult = null;
+    state.generatedReviewResult = null;
+    state.editedReviewResult = null;
     state.pendingReviewId = null;
     state.pendingReviewKey = null;
     push(state, { type: 'draftLoading', prKey: key });
@@ -740,6 +758,10 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
         state.activeDiff = diff;
         state.activeValidationDiff = validationDiff;
         state.activeReviewResult = draft?.result ?? null;
+        // A draft fetched from GitHub was not generated in this session, so there is no
+        // model-authored baseline to diff against. Leave both outcome-logging halves empty.
+        state.generatedReviewResult = null;
+        state.editedReviewResult = null;
         state.pendingReviewId = draft?.id ?? null;
         state.pendingReviewKey = draft ? key : null;
 
@@ -850,6 +872,23 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
             key,
         );
 
+        // Phase 1 prompt context. Fetched in parallel and best-effort: every one of these degrades
+        // to an omitted prompt section rather than failing the review, so none is awaited
+        // individually or allowed to reject. Mirrors WebviewPanel's context block.
+        const headSha = await sidecarClient
+            .getPullRequestDetail(base, owner, repo, number)
+            .then((d) => (d.status === 'ok' ? d.detail?.head?.sha ?? '' : ''))
+            .catch(() => '');
+        const [checkStatus, commits, linkedIssue, repoProfile] = await Promise.all([
+            headSha
+                ? sidecarClient.getCheckStatus(base, owner, repo, headSha)
+                : Promise.resolve({ summary: '', annotations: [] }),
+            sidecarClient.getCommits(base, owner, repo, number),
+            sidecarClient.getLinkedIssues(base, owner, repo, number),
+            sidecarClient.getRepoProfile(reviewDir),
+        ]);
+        if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
+
         // Per-review overrides from the webview take precedence over the saved settings defaults.
         const focusAreas = typeof msg.focusAreas === 'string' && msg.focusAreas.trim()
             ? msg.focusAreas.trim()
@@ -887,12 +926,21 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
                     isDraft: false,
                 },
                 diff,
-                knownPatterns: '',
                 priorReview: formatPriorReview(state.activeReviewResult),
                 existingReviews,
                 repoGuidelines: readRepoGuidelines(reviewDir, reviewGuidanceGlobs()),
                 focusAreas,
                 customInstructions,
+                ciStatus: checkStatus.summary,
+                commits,
+                linkedIssue,
+                repoProfile,
+                ciAnnotations: checkStatus.annotations.map((a) => ({
+                    file: a.path,
+                    line: a.startLine,
+                    level: a.level,
+                    message: a.message,
+                })),
             },
             (status) => push(state, { type: 'reviewGenerating', prKey: key, message: status }),
             (kind, chunk) => push(state, { type: 'reviewChunk', prKey: key, kind, chunk }),
@@ -901,6 +949,8 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
         if (!result) throw new Error('Provider produced no output.');
         if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
         state.activeReviewResult = result;
+        state.generatedReviewResult = result;
+        state.editedReviewResult = null;
         push(state, { type: 'reviewResult', prKey: key, result, diff, validationDiff });
     } catch (err) {
         if (isCancellationError(err)) return;
@@ -916,6 +966,10 @@ async function handleSaveDraft(state: ViewState, msg: Record<string, unknown>): 
     const orphansFromMsg = (msg.orphans as LineComment[] | undefined) ?? [];
     const review = resultFromMsg ?? state.activeReviewResult;
     if (!number || !owner || !repo || !review) return;
+    // The edited review only ever arrives here. Retain it so submit can diff it against the
+    // generated one for outcome logging; activeReviewResult must keep holding the *generated*
+    // review, which is the other half of that diff.
+    state.editedReviewResult = review;
     const key = prKeyFromParts(number, owner, repo);
     if (prKey(state.activePR) !== key) {
         push(state, { type: 'draftSaveError', prKey: key, message: 'The selected pull request changed before the draft could be saved.' });
@@ -965,6 +1019,7 @@ async function handleSubmitReview(state: ViewState, msg: Record<string, unknown>
         const mutation = await sidecarClient.submitReview(
             githubBaseUrl(), owner, repo, number, reviewId, verdict, comment);
         if (mutation.status !== 'ok') throw new Error(mutation.message);
+        void recordReviewOutcome(state);
         if (state.pendingReviewId === reviewId && state.pendingReviewKey === key) {
             state.pendingReviewId = null;
             state.pendingReviewKey = null;
@@ -978,6 +1033,35 @@ async function handleSubmitReview(state: ViewState, msg: Record<string, unknown>
             message: toUserFacingError(err, 'submit draft review'),
         });
     }
+}
+
+/**
+ * Logs what the reviewer did with each generated comment. Deliberately not awaited: the review has
+ * already been submitted, so instrumentation must not delay the UI or be able to fail the submit.
+ * A no-op when no generated review is held — a draft loaded from GitHub in a later session was
+ * never generated locally, so there is nothing to compare it against.
+ *
+ * Mirrors WebviewPanel.recordReviewOutcome.
+ */
+async function recordReviewOutcome(state: ViewState): Promise<void> {
+    const generated = state.generatedReviewResult;
+    if (!generated) return;
+    const submitted = state.editedReviewResult ?? generated;
+    const toOutcome = (comments: LineComment[] | undefined): OutcomeComment[] =>
+        (comments ?? []).map((c) => ({
+            file: c.file,
+            line: c.line,
+            type: c.type,
+            body: c.body,
+            severity: c.severity,
+            confidence: c.confidence,
+        }));
+    await sidecarClient.recordReviewOutcome(
+        provider() === 'copilot' ? 'copilot' : 'claude',
+        reviewModel(),
+        toOutcome(generated.lineComments),
+        toOutcome(submitted.lineComments),
+    );
 }
 
 async function handleDeleteDraft(state: ViewState, msg: Record<string, unknown>): Promise<void> {

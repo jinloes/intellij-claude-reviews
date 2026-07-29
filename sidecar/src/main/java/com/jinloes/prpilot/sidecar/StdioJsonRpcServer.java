@@ -4,19 +4,20 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
+import com.jinloes.prpilot.engine.GitHubEngineApi;
+import com.jinloes.prpilot.engine.ReviewEngineApi;
+import com.jinloes.prpilot.sidecar.pr.CheckRunService;
 import com.jinloes.prpilot.sidecar.pr.DraftReviewMutationService;
-import com.jinloes.prpilot.sidecar.pr.DraftReviewService;
+import com.jinloes.prpilot.sidecar.pr.LinkedIssueService;
 import com.jinloes.prpilot.sidecar.pr.PrDetailService;
 import com.jinloes.prpilot.sidecar.pr.PrDiffService;
 import com.jinloes.prpilot.sidecar.pr.PrListService;
 import com.jinloes.prpilot.sidecar.pr.PrSupplementalService;
-import com.jinloes.prpilot.sidecar.repo.RepoDetector;
-import com.jinloes.prpilot.sidecar.review.ReviewSessionService;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -26,19 +27,19 @@ import java.util.concurrent.ExecutorService;
 final class StdioJsonRpcServer {
     private static final String JSON_RPC_VERSION = "2.0";
 
+    /** Handles one decoded request; returns {@code null} when the reply is sent asynchronously. */
+    @FunctionalInterface
+    private interface MethodHandler {
+        JsonNode handle(JsonNode request);
+    }
+
     private final ObjectMapper objectMapper;
     private final StdioFrameCodec frameCodec;
     private final SidecarBootstrapService bootstrapService;
-    private final RepoDetector repoDetector;
-    private final GitHubAuthService gitHubAuthService;
-    private final PrListService prListService;
-    private final PrDetailService prDetailService;
-    private final PrDiffService prDiffService;
-    private final DraftReviewService draftReviewService;
-    private final DraftReviewMutationService draftReviewMutationService;
-    private final PrSupplementalService prSupplementalService;
-    private final ReviewSessionService reviewSessionService;
+    private final GitHubEngineApi github;
+    private final ReviewEngineApi review;
     private final ExecutorService reviewExecutor;
+    private final Map<String, MethodHandler> handlers = new LinkedHashMap<>();
     private final Object writeLock = new Object();
     private volatile OutputStream currentOutput;
 
@@ -46,29 +47,52 @@ final class StdioJsonRpcServer {
             ObjectMapper objectMapper,
             StdioFrameCodec frameCodec,
             SidecarBootstrapService bootstrapService,
-            RepoDetector repoDetector,
-            GitHubAuthService gitHubAuthService,
-            PrListService prListService,
-            PrDetailService prDetailService,
-            PrDiffService prDiffService,
-            DraftReviewService draftReviewService,
-            DraftReviewMutationService draftReviewMutationService,
-            PrSupplementalService prSupplementalService,
-            ReviewSessionService reviewSessionService,
+            GitHubEngineApi github,
+            ReviewEngineApi review,
             ExecutorService reviewExecutor) {
         this.objectMapper = Objects.requireNonNull(objectMapper);
         this.frameCodec = Objects.requireNonNull(frameCodec);
         this.bootstrapService = Objects.requireNonNull(bootstrapService);
-        this.repoDetector = Objects.requireNonNull(repoDetector);
-        this.gitHubAuthService = Objects.requireNonNull(gitHubAuthService);
-        this.prListService = Objects.requireNonNull(prListService);
-        this.prDetailService = Objects.requireNonNull(prDetailService);
-        this.prDiffService = Objects.requireNonNull(prDiffService);
-        this.draftReviewService = Objects.requireNonNull(draftReviewService);
-        this.draftReviewMutationService = Objects.requireNonNull(draftReviewMutationService);
-        this.prSupplementalService = Objects.requireNonNull(prSupplementalService);
-        this.reviewSessionService = Objects.requireNonNull(reviewSessionService);
+        this.github = Objects.requireNonNull(github);
+        this.review = Objects.requireNonNull(review);
         this.reviewExecutor = Objects.requireNonNull(reviewExecutor);
+        registerHandlers();
+    }
+
+    /**
+     * Binds every wire method to its handler. The names here must cover {@link
+     * GitHubEngineApi#RPC_METHODS} and {@link ReviewEngineApi#RPC_METHODS} completely — {@code
+     * EngineCapabilityCoverageTest} fails the build otherwise, which is what keeps a host from
+     * quietly re-implementing an engine capability locally.
+     */
+    private void registerHandlers() {
+        handlers.put(
+                "initialize", request -> result(requestId(request), bootstrapService.initialize()));
+        handlers.put("repo/detect", this::detectRepo);
+        handlers.put("github/checkAuth", this::checkGitHubAuth);
+        handlers.put("prs/list", this::listPullRequests);
+        handlers.put("prs/search", this::searchPullRequests);
+        handlers.put("repos/listStarred", this::listStarredRepositories);
+        handlers.put("prs/getDetail", this::getPullRequestDetail);
+        handlers.put("prs/getDiff", this::getPullRequestDiff);
+        handlers.put("prs/getExistingReviews", this::getExistingReviews);
+        handlers.put("prs/getDraftReview", this::getDraftReview);
+        handlers.put("prs/saveDraftReview", this::saveDraftReview);
+        handlers.put("prs/submitReview", this::submitReview);
+        handlers.put("prs/deleteDraftReview", this::deleteDraftReview);
+        handlers.put("prs/getCheckStatus", this::getCheckStatus);
+        handlers.put("prs/getCommits", this::getCommits);
+        handlers.put("prs/getLinkedIssues", this::getLinkedIssues);
+        handlers.put("repo/getProfile", this::getRepoProfile);
+        handlers.put("reviews/generate", this::generateReview);
+        handlers.put("reviews/chat", this::chatReview);
+        handlers.put("reviews/cancel", this::cancelReview);
+        handlers.put("reviews/recordOutcome", this::recordReviewOutcome);
+    }
+
+    /** Wire method names this server answers. Used by the engine capability coverage test. */
+    Set<String> registeredMethodNames() {
+        return Set.copyOf(handlers.keySet());
     }
 
     void run(InputStream input, OutputStream output) {
@@ -100,30 +124,13 @@ final class StdioJsonRpcServer {
         }
 
         boolean notification = !request.has("id");
-        String method = request.path("method").asText();
+        MethodHandler handler = handlers.get(request.path("method").asText());
         JsonNode response;
         try {
             response =
-                    switch (method) {
-                        case "initialize" ->
-                                result(requestId(request), bootstrapService.initialize());
-                        case "repo/detect" -> detectRepo(request);
-                        case "github/checkAuth" -> checkGitHubAuth(request);
-                        case "prs/list" -> listPullRequests(request);
-                        case "prs/search" -> searchPullRequests(request);
-                        case "repos/listStarred" -> listStarredRepositories(request);
-                        case "prs/getDetail" -> getPullRequestDetail(request);
-                        case "prs/getDiff" -> getPullRequestDiff(request);
-                        case "prs/getExistingReviews" -> getExistingReviews(request);
-                        case "prs/getDraftReview" -> getDraftReview(request);
-                        case "prs/saveDraftReview" -> saveDraftReview(request);
-                        case "prs/submitReview" -> submitReview(request);
-                        case "prs/deleteDraftReview" -> deleteDraftReview(request);
-                        case "reviews/generate" -> generateReview(request);
-                        case "reviews/chat" -> chatReview(request);
-                        case "reviews/cancel" -> cancelReview(request);
-                        default -> error(requestId(request), -32601, "Method not found");
-                    };
+                    handler == null
+                            ? error(requestId(request), -32601, "Method not found")
+                            : handler.handle(request);
         } catch (RuntimeException exception) {
             response = error(requestId(request), -32603, "Internal error");
         }
@@ -139,26 +146,25 @@ final class StdioJsonRpcServer {
      */
     private JsonNode generateReview(JsonNode request) {
         JsonNode id = requestId(request);
-        ReviewSessionService.GenerateReviewParams params;
+        ReviewEngineApi.GenerateReviewParams params;
         try {
             params =
                     objectMapper.treeToValue(
-                            request.get("params"), ReviewSessionService.GenerateReviewParams.class);
+                            request.get("params"), ReviewEngineApi.GenerateReviewParams.class);
         } catch (Exception exception) {
             return error(id, -32602, "Invalid params");
         }
         if (params == null
                 || params.pr() == null
                 || params.provider() == null
-                || params.diff() == null
-                || params.knownPatterns() == null) {
+                || params.diff() == null) {
             return error(id, -32602, "Invalid params");
         }
         reviewExecutor.submit(
                 () -> {
                     try {
                         var result =
-                                reviewSessionService.generate(
+                                review.generate(
                                         params,
                                         status ->
                                                 sendNotification(
@@ -181,11 +187,11 @@ final class StdioJsonRpcServer {
     /** Same async-dispatch pattern as {@link #generateReview}, for chat requests. */
     private JsonNode chatReview(JsonNode request) {
         JsonNode id = requestId(request);
-        ReviewSessionService.ChatParams params;
+        ReviewEngineApi.ChatParams params;
         try {
             params =
                     objectMapper.treeToValue(
-                            request.get("params"), ReviewSessionService.ChatParams.class);
+                            request.get("params"), ReviewEngineApi.ChatParams.class);
         } catch (Exception exception) {
             return error(id, -32602, "Invalid params");
         }
@@ -199,7 +205,7 @@ final class StdioJsonRpcServer {
                 () -> {
                     try {
                         var result =
-                                reviewSessionService.chat(
+                                review.chat(
                                         params,
                                         text ->
                                                 sendNotification(
@@ -218,7 +224,7 @@ final class StdioJsonRpcServer {
 
     /** Synchronous: cancelling only touches a flag/process reference, no CLI I/O. */
     private ObjectNode cancelReview(JsonNode request) {
-        reviewSessionService.cancel();
+        review.cancel();
         return result(requestId(request), Map.of("ok", true));
     }
 
@@ -284,7 +290,7 @@ final class StdioJsonRpcServer {
                 || !params.path("path").isTextual()) {
             return error(requestId(request), -32602, "Invalid params");
         }
-        return result(requestId(request), repoDetector.detect(params.path("path").textValue()));
+        return result(requestId(request), github.detectRepo(params.path("path").textValue()));
     }
 
     private ObjectNode checkGitHubAuth(JsonNode request) {
@@ -296,8 +302,7 @@ final class StdioJsonRpcServer {
             return error(requestId(request), -32602, "Invalid params");
         }
         return result(
-                requestId(request),
-                gitHubAuthService.check(params.path("githubBaseUrl").textValue()));
+                requestId(request), github.checkAuth(params.path("githubBaseUrl").textValue()));
     }
 
     private ObjectNode listPullRequests(JsonNode request) {
@@ -312,7 +317,7 @@ final class StdioJsonRpcServer {
         }
         return result(
                 requestId(request),
-                prListService.list(
+                github.listPullRequests(
                         new PrListService.PrListParams(
                                 params.path("githubBaseUrl").textValue(),
                                 optionalText(params, "state"),
@@ -334,7 +339,7 @@ final class StdioJsonRpcServer {
         }
         return result(
                 requestId(request),
-                prDetailService.get(
+                github.getPullRequestDetail(
                         new PrDetailService.PrDetailParams(
                                 params.path("githubBaseUrl").textValue(),
                                 params.path("owner").textValue(),
@@ -356,7 +361,7 @@ final class StdioJsonRpcServer {
             return error(requestId(request), -32602, "Invalid params");
         return result(
                 requestId(request),
-                prDiffService.get(
+                github.getPullRequestDiff(
                         new PrDiffService.Params(
                                 params.path("githubBaseUrl").textValue(),
                                 params.path("owner").textValue(),
@@ -378,7 +383,7 @@ final class StdioJsonRpcServer {
         }
         return result(
                 requestId(request),
-                prSupplementalService.search(
+                github.searchPullRequests(
                         new PrSupplementalService.SearchParams(
                                 params.path("githubBaseUrl").textValue(),
                                 params.path("query").textValue(),
@@ -395,7 +400,7 @@ final class StdioJsonRpcServer {
         }
         return result(
                 requestId(request),
-                prSupplementalService.starred(params.path("githubBaseUrl").textValue()));
+                github.listStarredRepositories(params.path("githubBaseUrl").textValue()));
     }
 
     private ObjectNode getExistingReviews(JsonNode request) {
@@ -412,7 +417,7 @@ final class StdioJsonRpcServer {
         }
         return result(
                 requestId(request),
-                prSupplementalService.existingReviews(
+                github.getExistingReviews(
                         new PrSupplementalService.IdentityParams(
                                 params.path("githubBaseUrl").textValue(),
                                 params.path("owner").textValue(),
@@ -434,7 +439,7 @@ final class StdioJsonRpcServer {
         }
         return result(
                 requestId(request),
-                draftReviewService.load(
+                github.getDraftReview(
                         params.path("githubBaseUrl").textValue(),
                         params.path("owner").textValue(),
                         params.path("repo").textValue(),
@@ -474,7 +479,7 @@ final class StdioJsonRpcServer {
         }
         return result(
                 requestId(request),
-                draftReviewMutationService.save(
+                github.saveDraftReview(
                         new DraftReviewMutationService.SaveParams(
                                 params.path("githubBaseUrl").textValue(),
                                 params.path("owner").textValue(),
@@ -512,7 +517,7 @@ final class StdioJsonRpcServer {
         }
         return result(
                 requestId(request),
-                draftReviewMutationService.submit(
+                github.submitReview(
                         new DraftReviewMutationService.SubmitParams(
                                 params.path("githubBaseUrl").textValue(),
                                 params.path("owner").textValue(),
@@ -539,13 +544,157 @@ final class StdioJsonRpcServer {
         }
         return result(
                 requestId(request),
-                draftReviewMutationService.delete(
+                github.deleteDraftReview(
                         new DraftReviewMutationService.DeleteParams(
                                 params.path("githubBaseUrl").textValue(),
                                 params.path("owner").textValue(),
                                 params.path("repo").textValue(),
                                 params.path("number").intValue(),
                                 params.path("reviewId").textValue())));
+    }
+
+    private ObjectNode getCheckStatus(JsonNode request) {
+        JsonNode params = request.get("params");
+        if (params == null
+                || !params.isObject()
+                || !hasOnlyFields(params, Set.of("githubBaseUrl", "owner", "repo", "headSha"))
+                || !hasOnlyTextValues(params)
+                || !params.path("githubBaseUrl").isTextual()
+                || !params.path("owner").isTextual()
+                || !params.path("repo").isTextual()
+                || !params.path("headSha").isTextual()) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        return result(
+                requestId(request),
+                github.getCheckStatus(
+                        new CheckRunService.Params(
+                                params.path("githubBaseUrl").textValue(),
+                                params.path("owner").textValue(),
+                                params.path("repo").textValue(),
+                                params.path("headSha").textValue())));
+    }
+
+    private ObjectNode getCommits(JsonNode request) {
+        JsonNode params = request.get("params");
+        if (params == null
+                || !params.isObject()
+                || !hasOnlyFields(params, Set.of("githubBaseUrl", "owner", "repo", "number"))
+                || !params.path("githubBaseUrl").isTextual()
+                || !params.path("owner").isTextual()
+                || !params.path("repo").isTextual()
+                || !params.path("number").isIntegralNumber()
+                || !params.path("number").canConvertToInt()) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        return result(
+                requestId(request),
+                github.getCommits(
+                        new PrSupplementalService.IdentityParams(
+                                params.path("githubBaseUrl").textValue(),
+                                params.path("owner").textValue(),
+                                params.path("repo").textValue(),
+                                params.path("number").intValue())));
+    }
+
+    private ObjectNode getLinkedIssues(JsonNode request) {
+        JsonNode params = request.get("params");
+        if (params == null
+                || !params.isObject()
+                || !hasOnlyFields(params, Set.of("githubBaseUrl", "owner", "repo", "prBody"))
+                || !hasOnlyTextValues(params)
+                || !params.path("githubBaseUrl").isTextual()
+                || !params.path("owner").isTextual()
+                || !params.path("repo").isTextual()
+                || !params.path("prBody").isTextual()) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        return result(
+                requestId(request),
+                github.getLinkedIssues(
+                        new LinkedIssueService.Params(
+                                params.path("githubBaseUrl").textValue(),
+                                params.path("owner").textValue(),
+                                params.path("repo").textValue(),
+                                params.path("prBody").textValue())));
+    }
+
+    private ObjectNode getRepoProfile(JsonNode request) {
+        JsonNode params = request.get("params");
+        if (params == null
+                || !params.isObject()
+                || params.size() != 1
+                || !params.path("projectDir").isTextual()) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        return result(
+                requestId(request), github.getRepoProfile(params.path("projectDir").textValue()));
+    }
+
+    /**
+     * Records review outcomes. Instrumentation: a malformed payload is rejected, but a write
+     * failure inside the engine is swallowed there rather than surfaced as an RPC error, because
+     * the submission this follows has already succeeded.
+     */
+    private ObjectNode recordReviewOutcome(JsonNode request) {
+        JsonNode params = request.get("params");
+        if (params == null
+                || !params.isObject()
+                || !hasOnlyFields(params, Set.of("provider", "model", "generated", "submitted"))
+                || !params.path("provider").isTextual()
+                || !params.path("model").isTextual()) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        List<ReviewEngineApi.OutcomeCommentParam> generated =
+                parseOutcomeComments(params.path("generated"));
+        List<ReviewEngineApi.OutcomeCommentParam> submitted =
+                parseOutcomeComments(params.path("submitted"));
+        if (generated == null || submitted == null) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        return result(
+                requestId(request),
+                review.recordOutcome(
+                        new ReviewEngineApi.RecordOutcomeParams(
+                                params.path("provider").textValue(),
+                                params.path("model").textValue(),
+                                generated,
+                                submitted)));
+    }
+
+    /**
+     * Parses an outcome comment array, or returns {@code null} if the shape is invalid. A missing
+     * array is treated as empty: one side of the diff being absent is meaningful (an all-deleted or
+     * all-added review), not an error.
+     */
+    private List<ReviewEngineApi.OutcomeCommentParam> parseOutcomeComments(JsonNode array) {
+        if (array == null || array.isMissingNode() || array.isNull()) return List.of();
+        if (!array.isArray()) return null;
+        List<ReviewEngineApi.OutcomeCommentParam> comments = new ArrayList<>();
+        for (JsonNode comment : array) {
+            if (!comment.isObject()
+                    || !hasOnlyFields(
+                            comment,
+                            Set.of("file", "line", "type", "body", "severity", "confidence"))
+                    || !comment.path("file").isTextual()
+                    || !comment.path("line").isIntegralNumber()
+                    || !comment.path("line").canConvertToInt()
+                    || !comment.path("body").isTextual()
+                    || (comment.has("type") && !comment.path("type").isTextual())
+                    || (comment.has("severity") && !comment.path("severity").isTextual())
+                    || (comment.has("confidence") && !comment.path("confidence").isTextual())) {
+                return null;
+            }
+            comments.add(
+                    new ReviewEngineApi.OutcomeCommentParam(
+                            comment.path("file").textValue(),
+                            comment.path("line").intValue(),
+                            optionalText(comment, "type"),
+                            comment.path("body").textValue(),
+                            optionalText(comment, "severity"),
+                            optionalText(comment, "confidence")));
+        }
+        return comments;
     }
 
     /**

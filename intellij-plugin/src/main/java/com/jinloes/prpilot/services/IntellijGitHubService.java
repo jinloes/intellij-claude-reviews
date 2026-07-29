@@ -2,16 +2,23 @@ package com.jinloes.prpilot.services;
 
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.components.Service;
+import com.jinloes.prpilot.model.CiAnnotation;
 import com.jinloes.prpilot.model.LineComment;
 import com.jinloes.prpilot.model.PullRequest;
 import com.jinloes.prpilot.model.ReviewResult;
 import com.jinloes.prpilot.settings.PluginSettings;
+import com.jinloes.prpilot.sidecar.pr.CheckRunService;
+import com.jinloes.prpilot.sidecar.pr.CheckStatusResult;
 import com.jinloes.prpilot.sidecar.pr.DraftReviewCodec;
 import com.jinloes.prpilot.sidecar.pr.DraftReviewMutationResult;
 import com.jinloes.prpilot.sidecar.pr.DraftReviewMutationService;
 import com.jinloes.prpilot.sidecar.pr.DraftReviewResult;
 import com.jinloes.prpilot.sidecar.pr.DraftReviewService;
 import com.jinloes.prpilot.sidecar.pr.ExistingReviewsResult;
+import com.jinloes.prpilot.sidecar.pr.LinkedIssueResult;
+import com.jinloes.prpilot.sidecar.pr.LinkedIssueService;
+import com.jinloes.prpilot.sidecar.pr.PrCommitsResult;
+import com.jinloes.prpilot.sidecar.pr.PrCommitsService;
 import com.jinloes.prpilot.sidecar.pr.PrDetail;
 import com.jinloes.prpilot.sidecar.pr.PrDetailResult;
 import com.jinloes.prpilot.sidecar.pr.PrDetailService;
@@ -26,6 +33,8 @@ import com.jinloes.prpilot.sidecar.pr.StarredReposResult;
 import com.jinloes.prpilot.sidecar.repo.DetectResult;
 import com.jinloes.prpilot.sidecar.repo.DetectStatus;
 import com.jinloes.prpilot.sidecar.repo.RepoDetector;
+import com.jinloes.prpilot.sidecar.repo.RepoFingerprint;
+import com.jinloes.prpilot.sidecar.repo.RepoProfileResult;
 import java.io.IOException;
 import java.util.List;
 
@@ -39,6 +48,10 @@ public final class IntellijGitHubService {
     private final PrDetailService detailService = new PrDetailService();
     private final DraftReviewService draftReviewService = new DraftReviewService();
     private final DraftReviewMutationService mutationService = new DraftReviewMutationService();
+    private final CheckRunService checkRunService = new CheckRunService();
+    private final PrCommitsService commitsService = new PrCommitsService();
+    private final LinkedIssueService linkedIssueService = new LinkedIssueService();
+    private final RepoFingerprint repoFingerprint = new RepoFingerprint();
 
     public static IntellijGitHubService getInstance() {
         return ApplicationManager.getApplication().getService(IntellijGitHubService.class);
@@ -162,13 +175,71 @@ public final class IntellijGitHubService {
     public PRHeadInfo getPRHeadInfo(String owner, String repo, int number) throws IOException {
         PrDetail detail = detail(owner, repo, number);
         PrDetail.Head head = detail.head();
-        if (head == null) return new PRHeadInfo("", false, "");
+        if (head == null) return new PRHeadInfo("", "", false, "");
         boolean fork =
                 head.repoFullName() != null
                         && !head.repoFullName().isBlank()
                         && !head.repoFullName().equals(detail.baseRepoFullName());
         return new PRHeadInfo(
-                head.ref(), fork, fork && head.cloneUrl() != null ? head.cloneUrl() : "");
+                head.ref(),
+                head.sha() == null ? "" : head.sha(),
+                fork,
+                fork && head.cloneUrl() != null ? head.cloneUrl() : "");
+    }
+
+    /*
+     * The four prompt-context reads below deliberately do NOT call requireOk. Unlike the diff, this
+     * context is purely additive: a review without it is exactly as good as before it existed, so a
+     * CI outage or a missing token must degrade the prompt rather than fail the review.
+     */
+
+    /**
+     * Rendered CI state plus the structured annotations behind it, in one request. The rendered
+     * form goes into the prompt; the annotations are machine-comparable, which is what lets
+     * duplicate review comments be dropped rather than merely discouraged in the prompt.
+     */
+    public CheckContext getCheckContext(String owner, String repo, String headSha) {
+        CheckStatusResult result =
+                checkRunService.checkStatus(
+                        new CheckRunService.Params(baseUrl(), owner, repo, headSha));
+        java.util.List<CiAnnotation> annotations =
+                result.annotations() == null
+                        ? java.util.List.of()
+                        : result.annotations().stream()
+                                .map(
+                                        a ->
+                                                new CiAnnotation(
+                                                        a.path(),
+                                                        a.startLine(),
+                                                        a.level(),
+                                                        a.message()))
+                                .toList();
+        return new CheckContext(result.summary(), annotations);
+    }
+
+    /** Rendered CI state and the structured findings behind it. */
+    public record CheckContext(String summary, java.util.List<CiAnnotation> annotations) {}
+
+    /** Rendered commit messages for a PR, or empty when they could not be read. */
+    public String getCommitsSummary(String owner, String repo, int number) {
+        PrCommitsResult result =
+                commitsService.commits(
+                        new PrSupplementalService.IdentityParams(baseUrl(), owner, repo, number));
+        return result.summary();
+    }
+
+    /** Rendered issues the PR declares it closes, or empty when there are none. */
+    public String getLinkedIssueSummary(String owner, String repo, String prBody) {
+        LinkedIssueResult result =
+                linkedIssueService.linkedIssues(
+                        new LinkedIssueService.Params(baseUrl(), owner, repo, prBody));
+        return result.summary();
+    }
+
+    /** Rendered language/build-tooling profile for a working tree; performs no network call. */
+    public String getRepoProfileSummary(String projectDir) {
+        RepoProfileResult result = repoFingerprint.profile(projectDir);
+        return result.summary();
     }
 
     private String getDiff(String owner, String repo, int number, String mode) throws IOException {
@@ -234,7 +305,12 @@ public final class IntellijGitHubService {
     public record PendingReview(
             String id, ReviewResult result, boolean importedFromGitHub, String commitId) {}
 
-    public record PRHeadInfo(String ref, boolean isFork, String forkCloneUrl) {}
+    /**
+     * PR head coordinates for worktree creation. {@code sha} is the commit the reviewed diff was
+     * rendered at; the worktree pins to it so a mid-review push cannot change the tree under the
+     * agent.
+     */
+    public record PRHeadInfo(String ref, String sha, boolean isFork, String forkCloneUrl) {}
 
     public record PullRequestList(
             List<PullRequest> pullRequests, boolean limited, String currentRepo, String query) {}

@@ -77,18 +77,20 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
 
         /**
          * Newline-separated list of guidance files (literal relative paths or globs like {@code
-         * **}{@code /style.md}) scanned from the review working directory and folded into
-         * {@code <repo_guidelines>}. Blank falls back to {@link
+         * **}{@code /style.md}) scanned from the review working directory and folded into {@code
+         * <repo_guidelines>}. Blank falls back to {@link
          * RepoGuidelinesReader#DEFAULT_GUIDANCE_GLOBS}.
          */
         public String reviewGuidanceGlobs = "";
 
         /**
          * When true, review generation runs a second self-critique pass that re-validates each
-         * finding against the diff and drops misattributed/unsupported ones. Off by default because
-         * it roughly doubles review latency.
+         * finding against the diff and the same context the first pass saw, dropping misattributed,
+         * unsupported, and CI-duplicated ones. On by default: a misattributed comment costs a
+         * reviewer more than the extra latency does, and precision is what makes the review worth
+         * reading. Turn it off to roughly halve review latency.
          */
-        public boolean reviewSelfCritique = false;
+        public boolean reviewSelfCritique = true;
     }
 
     private State myState = new State();

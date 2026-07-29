@@ -28,8 +28,9 @@ import org.slf4j.LoggerFactory;
  * server whose {@code command} is an arbitrary process — code execution triggered merely by
  * generating a review, bypassing the read-only permission gate (which only sees later tool-call
  * kinds, not server launch). Reading only the trusted config file and injecting the servers via
- * {@link com.github.copilot.rpc.SessionConfig#setMcpServers} closes that vector while preserving the
- * "inherit my MCP servers" behavior. See {@code ARCHITECTURE.md} "Provider capability isolation".
+ * {@link com.github.copilot.rpc.SessionConfig#setMcpServers} closes that vector while preserving
+ * the "inherit my MCP servers" behavior. See {@code ARCHITECTURE.md} "Provider capability
+ * isolation".
  */
 final class CopilotMcpConfig {
 
@@ -42,8 +43,8 @@ final class CopilotMcpConfig {
     private CopilotMcpConfig() {}
 
     /**
-     * Resolves the trusted {@code mcp-config.json} for an optional {@code configDir} override. Blank
-     * falls back to {@code ~/.copilot}. The returned file is not guaranteed to exist.
+     * Resolves the trusted {@code mcp-config.json} for an optional {@code configDir} override.
+     * Blank falls back to {@code ~/.copilot}. The returned file is not guaranteed to exist.
      */
     static File resolveConfigFile(String configDir) {
         File dir =
@@ -162,6 +163,3 @@ final class CopilotMcpConfig {
         return out;
     }
 }
-
-
-

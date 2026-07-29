@@ -1,7 +1,7 @@
 import { validateComments } from '@/lib/validateComments'
 import type { LineComment, ReviewResult } from '../bridge/types'
 
-export type ReviewQualityAction = 'removeUnanchored' | 'addMissingRationale' | 'downgradeHighRisk'
+export type ReviewQualityAction = 'removeUnanchored' | 'dropMissingRationale' | 'downgradeHighRisk'
 
 export interface ReviewQualityIssue {
   id: 'hallucinationRisk' | 'outdatedAnchors' | 'missingRationale'
@@ -52,15 +52,23 @@ function parseDiffFileStats(diff: string): DiffFileStat[] {
   })
 }
 
+/**
+ * Flags a high-severity finding the model did not actually back up.
+ *
+ * Evidence is judged by what the model reported, not by how much it typed. The previous rule
+ * treated any issue whose body was under 35 characters as unsupported, which is a proxy for
+ * "unjustified" that fails in both directions: a precise one-line finding ("Deadlock: B locks A
+ * here") was flagged, while a verbose but baseless paragraph passed. `confidence` and `rationale`
+ * are the real signals and are now populated on every comment, so the character count is gone.
+ */
 function isHighRiskLowEvidence(comment: LineComment, changedFiles: Set<string>): boolean {
   if (!changedFiles.has(comment.file)) return true
   const severity = comment.severity ?? 'minor'
-  const confidence = comment.confidence ?? 'medium'
-  const shortIssueBody = comment.type === 'issue' && comment.body.trim().length < 35
-  return (
-    (severity === 'blocker' || severity === 'major')
-    && (confidence === 'low' || shortIssueBody)
-  )
+  if (severity !== 'blocker' && severity !== 'major') return false
+  // A model that rates its own high-severity claim "low" has told us it is unsure.
+  if ((comment.confidence ?? 'medium') === 'low') return true
+  // Otherwise a serious claim needs stated evidence — the rationale field exists for exactly this.
+  return (comment.rationale ?? '').trim().length === 0
 }
 
 function issueWeight(issue: ReviewQualityIssue): number {
@@ -114,7 +122,7 @@ export function runReviewQualityCheck(result: ReviewResult, validationDiff: stri
   const score = Math.max(0, 100 - penalty)
   const suggestions: ReviewQualityAction[] = []
   if (orphans.length > 0) suggestions.push('removeUnanchored')
-  if (missingRationaleComments.length > 0) suggestions.push('addMissingRationale')
+  if (missingRationaleComments.length > 0) suggestions.push('dropMissingRationale')
   if (riskyComments.length > 0) suggestions.push('downgradeHighRisk')
 
   return {
@@ -145,17 +153,14 @@ export function applyReviewQualityRepairs(
     repaired = repaired.filter((comment) => !report.orphanComments.some((orphan) => matchesComment(orphan, comment)))
   }
 
-  if (repairSet.has('addMissingRationale')) {
-    repaired = repaired.map((comment) => {
-      const needsRationale = report.missingRationaleComments.some((target) => matchesComment(target, comment))
-      if (!needsRationale) return comment
-      return {
-        ...comment,
-        rationale:
-          comment.rationale?.trim()
-          || `Evidence needs verification in ${comment.file}:${comment.line}.`,
-      }
-    })
+  // Deliberately drops rather than fabricates. An earlier version filled the gap with
+  // "Evidence needs verification in <file>:<line>." — that cleared the warning and raised the
+  // score while adding no evidence, which is worse than leaving the comment flagged. A comment
+  // whose evidence the model would not state is either re-asked for or removed.
+  if (repairSet.has('dropMissingRationale')) {
+    repaired = repaired.filter(
+      (comment) => !report.missingRationaleComments.some((target) => matchesComment(target, comment)),
+    )
   }
 
   if (repairSet.has('downgradeHighRisk')) {

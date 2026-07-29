@@ -1,14 +1,11 @@
 package com.jinloes.prpilot.sidecar.pr;
 
+import com.jinloes.prpilot.sidecar.github.GitHubApiBase;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
+import com.jinloes.prpilot.sidecar.github.GitHubHttpClient;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
@@ -17,7 +14,6 @@ public final class PrDiffService {
     static final int REVIEW_LIMIT_BYTES = 250_000;
     static final int VALIDATION_LIMIT_BYTES = 1_000_000;
     private static final String TRUNCATION_MARKER = "\n\n[... diff truncated at 250 KB ...]";
-    private static final Duration TIMEOUT = Duration.ofSeconds(15);
     private static final int MAX_ATTEMPTS = 3;
     private static final Pattern SEGMENT = Pattern.compile("[A-Za-z0-9_.-]+");
     private final GitHubAuthService.TokenResolver tokenResolver;
@@ -49,11 +45,11 @@ public final class PrDiffService {
                 || !("review".equals(params.mode()) || "validation".equals(params.mode()))) {
             return PrDiffResult.failure("invalid_request", "Pull request diff request is invalid.");
         }
-        Base base = Base.from(params.githubBaseUrl());
+        GitHubApiBase base = GitHubApiBase.parse(params.githubBaseUrl());
         if (base == null)
             return PrDiffResult.failure(
                     "invalid_base_url", "GitHub base URL must be an HTTPS origin.");
-        GitHubAuthService.TokenResolution token = tokenResolver.resolve(base.hostname());
+        GitHubAuthService.TokenResolution token = tokenResolver.resolve(base.hostnameArgument());
         if (token.status() == GitHubAuthService.TokenStatus.NOT_INSTALLED)
             return PrDiffResult.failure("not_installed", "GitHub CLI is not installed.");
         if (token.status() != GitHubAuthService.TokenStatus.RESOLVED)
@@ -65,7 +61,7 @@ public final class PrDiffService {
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             response =
                     diffClient.get(
-                            base.api(),
+                            base.apiBaseUrl(),
                             token.token(),
                             params.owner(),
                             params.repo(),
@@ -125,36 +121,27 @@ public final class PrDiffService {
     }
 
     private static final class HttpDiffClient implements DiffClient {
-        private final HttpClient client = HttpClient.newBuilder().connectTimeout(TIMEOUT).build();
+        private final GitHubHttpClient httpClient = new GitHubHttpClient();
 
+        @Override
         public Response get(
                 String api, String token, String owner, String repo, int number, int limitBytes) {
+            String url = api + "/repos/" + owner + "/" + repo + "/pulls/" + number;
             try {
-                HttpRequest request =
-                        HttpRequest.newBuilder()
-                                .uri(
-                                        URI.create(
-                                                api + "/repos/" + owner + "/" + repo + "/pulls/"
-                                                        + number))
-                                .timeout(TIMEOUT)
-                                .header("Authorization", "Bearer " + token)
-                                .header("Accept", "application/vnd.github.v3.diff")
-                                .header("X-GitHub-Api-Version", "2022-11-28")
-                                .header("User-Agent", "pr-pilot-sidecar/0.1")
-                                .GET()
-                                .build();
-                HttpResponse<InputStream> response =
-                        client.send(request, HttpResponse.BodyHandlers.ofInputStream());
-                if (response.statusCode() == 401 || response.statusCode() == 403)
-                    return Response.of(Status.UNAUTHENTICATED);
-                if (response.statusCode() == 429) return Response.of(Status.RATE_LIMITED);
-                if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                    return Response.of(
-                            response.statusCode() >= 500 ? Status.TRANSIENT_API : Status.API);
-                }
-                try (InputStream input = response.body()) {
-                    return read(input, limitBytes);
-                }
+                return httpClient.stream(
+                        url,
+                        token,
+                        GitHubHttpClient.ACCEPT_DIFF,
+                        (statusCode, body) -> {
+                            if (statusCode == 401 || statusCode == 403)
+                                return Response.of(Status.UNAUTHENTICATED);
+                            if (statusCode == 429) return Response.of(Status.RATE_LIMITED);
+                            if (statusCode < 200 || statusCode >= 300) {
+                                return Response.of(
+                                        statusCode >= 500 ? Status.TRANSIENT_API : Status.API);
+                            }
+                            return read(body, limitBytes);
+                        });
             } catch (IOException e) {
                 return Response.of(Status.NETWORK);
             } catch (InterruptedException e) {
@@ -194,30 +181,5 @@ public final class PrDiffService {
 
     private static boolean valid(String value) {
         return value != null && SEGMENT.matcher(value).matches();
-    }
-
-    private record Base(String api, String hostname) {
-        static Base from(String value) {
-            try {
-                URI uri =
-                        URI.create(
-                                value == null || value.isBlank()
-                                        ? "https://github.com"
-                                        : value.trim());
-                if (!"https".equalsIgnoreCase(uri.getScheme())
-                        || uri.getHost() == null
-                        || uri.getUserInfo() != null
-                        || uri.getPort() != -1
-                        || (!uri.getPath().isEmpty() && !"/".equals(uri.getPath()))
-                        || uri.getQuery() != null
-                        || uri.getFragment() != null) return null;
-                String origin = "https://" + uri.getHost().toLowerCase();
-                return "https://github.com".equals(origin)
-                        ? new Base("https://api.github.com", null)
-                        : new Base(origin + "/api/v3", uri.getHost());
-            } catch (IllegalArgumentException e) {
-                return null;
-            }
-        }
     }
 }

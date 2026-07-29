@@ -30,7 +30,7 @@ class CopilotServiceTest {
     }
 
     private static PRReviewRequest fakeRequest() {
-        return new PRReviewRequest(fakePr(), "", "");
+        return new PRReviewRequest(fakePr(), "");
     }
 
     private static String reviewJson(String verdict) {

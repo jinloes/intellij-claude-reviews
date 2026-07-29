@@ -494,3 +494,65 @@ test('SidecarClient cannot restart after disposal', async () => {
   await assert.rejects(client.restart(), /has been disposed/);
   assert.equal(harness.commands.length, 1);
 });
+
+// ── Phase 1 prompt context (best-effort reads) ────────────────────────────────
+
+test('getCheckStatus returns the rendered summary and structured annotations', async () => {
+  const harness = createSidecarHarness((method) => method === 'initialize'
+    ? initializeResult
+    : {
+      status: 'ok',
+      state: 'complete',
+      summary: 'CI: 1 failing',
+      annotations: [
+        { path: 'src/A.java', startLine: 12, endLine: 12, level: 'failure', message: 'boom' },
+        { path: 'src/B.java', startLine: 3, endLine: 3, level: 'warning', message: 'lint' },
+      ],
+    });
+  const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar);
+
+  const result = await client.getCheckStatus('https://github.com', 'o', 'r', 'abc123');
+
+  assert.equal(result.summary, 'CI: 1 failing');
+  assert.equal(result.annotations.length, 2);
+  assert.deepEqual(result.annotations[0], {
+    path: 'src/A.java', startLine: 12, endLine: 12, level: 'failure', message: 'boom',
+  });
+  assert.ok(harness.methods.includes('prs/getCheckStatus'));
+  client.dispose();
+});
+
+// Prompt context is purely additive: a review without it is exactly as good as before it existed,
+// so every one of these must degrade to empty rather than reject. A missing jar is used because it
+// fails fast and is a real deployment failure — throwing inside the responder would instead leave
+// the request unanswered and test the request timeout, which is a different (and very slow) thing.
+test('context reads degrade to empty instead of rejecting when the sidecar is unavailable', async () => {
+  const harness = createSidecarHarness(() => initializeResult);
+  const client = new SidecarClient(path.join(tempRoot, 'missing.jar'), 'java', harness.spawnSidecar);
+
+  assert.deepEqual(await client.getCheckStatus('https://github.com', 'o', 'r', 'sha'), {
+    summary: '', annotations: [],
+  });
+  assert.equal(await client.getCommits('https://github.com', 'o', 'r', 1), '');
+  assert.equal(await client.getLinkedIssues('https://github.com', 'o', 'r', 1), '');
+  assert.equal(await client.getRepoProfile('/tmp/x'), '');
+  assert.equal(harness.commands.length, 0);
+  client.dispose();
+});
+
+test('context reads tolerate a malformed payload without throwing', async () => {
+  const harness = createSidecarHarness((method) => method === 'initialize'
+    ? initializeResult
+    : { summary: 42, annotations: [{ path: 'ok.java', message: 'm' }, { nope: true }, 'junk'] });
+  const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar);
+
+  const status = await client.getCheckStatus('https://github.com', 'o', 'r', 'sha');
+  assert.equal(status.summary, '');
+  // Only the well-formed annotation survives; defaults fill the absent numeric/level fields.
+  assert.deepEqual(status.annotations, [
+    { path: 'ok.java', startLine: 0, endLine: 0, level: 'warning', message: 'm' },
+  ]);
+  assert.equal(await client.getCommits('https://github.com', 'o', 'r', 1), '');
+  client.dispose();
+});
+

@@ -33,25 +33,37 @@ export function findGitRoot(startDir: string): string | null {
     }
 }
 
+/** Abbreviated or full hex object name; anything else is never passed to git as a revision. */
+const HEX_OBJECT_NAME = /^[0-9a-f]{7,64}$/i;
+
 /**
- * Creates a git worktree at `worktreeDir` checked out to `origin/<branch>`.
+ * Creates a git worktree at `worktreeDir` pinned to `headSha`, the commit the reviewed diff was
+ * rendered at.
  *
- * Runs `git fetch origin <branch>` first so the ref is current, then
- * `git worktree add --detach <worktreeDir> origin/<branch>`.
+ * Runs `git fetch origin <branch>` first so the commit is available, then
+ * `git worktree add --detach <worktreeDir> <headSha>`, falling back to `origin/<branch>` when the
+ * SHA is unusable (see `pinnedCommitish`).
  *
  * @throws Error if a git command fails or times out
  */
-export async function createWorktree(repoDir: string, branch: string, worktreeDir: string): Promise<void> {
+export async function createWorktree(
+    repoDir: string,
+    branch: string,
+    headSha: string,
+    worktreeDir: string,
+): Promise<void> {
     await runGit(repoDir, 60, ['fetch', 'origin', branch]);
-    await runGit(repoDir, 30, ['worktree', 'add', '--detach', worktreeDir, `origin/${branch}`]);
+    const commitish = await pinnedCommitish(repoDir, headSha, `origin/${branch}`);
+    await runGit(repoDir, 30, ['worktree', 'add', '--detach', worktreeDir, commitish]);
 }
 
 /**
  * Creates a git worktree at `worktreeDir` by fetching a branch from a fork's remote URL.
  * Use this for fork PRs where the branch is not available on `origin`.
  *
- * Runs `git fetch <forkCloneUrl> <branch>` then
- * `git worktree add --detach <worktreeDir> FETCH_HEAD`.
+ * Runs `git fetch <forkCloneUrl> <branch>` then pins to `headSha`, falling back to `FETCH_HEAD`.
+ * Forks need the same pinning as origin branches: `FETCH_HEAD` is the fork branch's tip at fetch
+ * time, which is exactly the moving target being avoided.
  *
  * @throws Error if a git command fails or times out
  */
@@ -59,10 +71,48 @@ export async function createWorktreeFromFork(
     repoDir: string,
     forkCloneUrl: string,
     branch: string,
+    headSha: string,
     worktreeDir: string,
 ): Promise<void> {
     await runGit(repoDir, 120, ['fetch', forkCloneUrl, branch]);
-    await runGit(repoDir, 30, ['worktree', 'add', '--detach', worktreeDir, 'FETCH_HEAD']);
+    const commitish = await pinnedCommitish(repoDir, headSha, 'FETCH_HEAD');
+    await runGit(repoDir, 30, ['worktree', 'add', '--detach', worktreeDir, commitish]);
+}
+
+/**
+ * Returns `headSha` when the fetch made that exact commit available locally, otherwise
+ * `branchTipRef`.
+ *
+ * The reviewed diff was rendered at `headSha`, but a branch tip is a *moving* target: a push
+ * between rendering the diff and building the worktree would otherwise leave the agent grepping
+ * code that is not under review. Normally the tip is a descendant of the reviewed commit, so the
+ * fetch brings the commit along and pinning succeeds.
+ *
+ * Falls back rather than failing. A force-push can orphan the reviewed commit, and a slightly-stale
+ * worktree is still far better than the alternative — callers treat worktree creation failure as
+ * "use the user's own checkout", which is a much worse tree to read.
+ */
+export async function pinnedCommitish(
+    repoDir: string,
+    headSha: string,
+    branchTipRef: string,
+): Promise<string> {
+    if (!headSha || !headSha.trim()) return branchTipRef;
+    if (!HEX_OBJECT_NAME.test(headSha)) {
+        // headSha comes from the GitHub API response; never hand git an argument that could be
+        // read as an option or a different revision.
+        console.warn(`[pr-pilot] Ignoring malformed head SHA '${headSha}'; using ${branchTipRef}`);
+        return branchTipRef;
+    }
+    try {
+        await runGit(repoDir, 15, ['cat-file', '-e', `${headSha}^{commit}`]);
+        return headSha;
+    } catch {
+        console.warn(
+            `[pr-pilot] Head commit ${headSha} unavailable after fetch (force-push?); using ${branchTipRef} instead`,
+        );
+        return branchTipRef;
+    }
 }
 
 /**

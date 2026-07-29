@@ -11,7 +11,7 @@
   "version": "0.1.0",
   "engines": {
     "vscode": "^1.90.0",
-    "node": ">=20.17.0"
+    "node": ">=24.15.0"
   },
   "categories": [
     "Other"
@@ -199,8 +199,8 @@
         },
         "pr-pilot.reviewSelfCritique": {
           "type": "boolean",
-          "default": false,
-          "description": "Run a second self-critique pass that re-validates each finding against the diff and drops misattributed/unsupported ones. Higher precision, but roughly doubles review latency."
+          "default": true,
+          "description": "Run a second self-critique pass that re-validates each finding against the diff and the same context the first pass saw, dropping misattributed, unsupported, and CI-duplicated ones. On by default for precision; turn it off to roughly halve review latency."
         }
       }
     }
@@ -228,5 +228,8 @@
     "globals": "^17.6.0",
     "typescript": "^5.3.0",
     "typescript-eslint": "^8.59.4"
+  },
+  "volta": {
+    "node": "24.15.0"
   }
 }

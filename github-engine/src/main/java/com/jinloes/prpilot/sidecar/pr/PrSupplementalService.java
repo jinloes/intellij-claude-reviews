@@ -2,15 +2,13 @@ package com.jinloes.prpilot.sidecar.pr;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jinloes.prpilot.sidecar.github.GitHubApiBase;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
+import com.jinloes.prpilot.sidecar.github.GitHubHttpClient;
+import com.jinloes.prpilot.sidecar.github.GitHubResponse;
 import java.io.IOException;
-import java.net.URI;
 import java.net.URLEncoder;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -18,8 +16,6 @@ import java.util.regex.Pattern;
 
 /** Provides token-safe GitHub reads used by notifications and review prompt context. */
 public final class PrSupplementalService {
-    private static final Duration TIMEOUT = Duration.ofSeconds(15);
-    private static final int MAX_ATTEMPTS = 3;
     private static final int MAX_QUERY_LENGTH = 8 * 1024;
     private static final int STARRED_LIMIT = 200;
     private static final Pattern SEGMENT = Pattern.compile("[A-Za-z0-9_.-]+");
@@ -60,7 +56,7 @@ public final class PrSupplementalService {
                         + "&per_page="
                         + (limit + 1)
                         + "&sort=updated";
-        ApiResponse response = client.get(session.apiBase(), session.token(), path);
+        GitHubResponse response = client.get(session.apiBase(), session.token(), path);
         Failure failure = failure(response);
         if (failure != null)
             return PrSearchResult.failure(failure.status(), failure.message(), limit);
@@ -124,7 +120,7 @@ public final class PrSupplementalService {
         }
         List<String> repositories = new ArrayList<>();
         for (int page = 1; repositories.size() < STARRED_LIMIT; page++) {
-            ApiResponse response =
+            GitHubResponse response =
                     client.get(
                             session.apiBase(),
                             session.token(),
@@ -167,7 +163,7 @@ public final class PrSupplementalService {
                         + "/pulls/"
                         + params.number()
                         + "/reviews";
-        ApiResponse response = client.get(session.apiBase(), session.token(), reviewsPath);
+        GitHubResponse response = client.get(session.apiBase(), session.token(), reviewsPath);
         Failure failure = failure(response);
         if (failure != null)
             return ExistingReviewsResult.failure(failure.status(), failure.message());
@@ -193,7 +189,7 @@ public final class PrSupplementalService {
                                 + "):");
                 String body = oneLine(review.path("body").asText(""), 300);
                 if (!body.isEmpty()) lines.add("  Overall: \"" + body + "\"");
-                ApiResponse comments =
+                GitHubResponse comments =
                         client.get(
                                 session.apiBase(),
                                 session.token(),
@@ -224,13 +220,13 @@ public final class PrSupplementalService {
     }
 
     private Session openSession(String githubBaseUrl) {
-        Base base = Base.from(githubBaseUrl);
+        GitHubApiBase base = GitHubApiBase.parse(githubBaseUrl);
         if (base == null)
             return new Session(
                     null,
                     null,
                     new Failure("invalid_base_url", "GitHub base URL must be an HTTPS origin."));
-        GitHubAuthService.TokenResolution token = tokenResolver.resolve(base.hostname());
+        GitHubAuthService.TokenResolution token = tokenResolver.resolve(base.hostnameArgument());
         if (token.status() == GitHubAuthService.TokenStatus.NOT_INSTALLED)
             return new Session(
                     null, null, new Failure("not_installed", "GitHub CLI is not installed."));
@@ -241,10 +237,10 @@ public final class PrSupplementalService {
                     new Failure(
                             "not_authenticated",
                             "Run 'gh auth login' in a terminal for this GitHub host."));
-        return new Session(base.api(), token.token(), null);
+        return new Session(base.apiBaseUrl(), token.token(), null);
     }
 
-    private static Failure failure(ApiResponse response) {
+    private static Failure failure(GitHubResponse response) {
         if (response.isSuccess()) return null;
         if (response.statusCode() == 401 || response.statusCode() == 403)
             return new Failure(
@@ -274,82 +270,20 @@ public final class PrSupplementalService {
     public record IdentityParams(String githubBaseUrl, String owner, String repo, int number) {}
 
     interface ApiClient {
-        ApiResponse get(String apiBase, String token, String path);
-    }
-
-    record ApiResponse(int statusCode, String body) {
-        boolean isSuccess() {
-            return statusCode >= 200 && statusCode < 300;
-        }
+        GitHubResponse get(String apiBase, String token, String path);
     }
 
     private record Session(String apiBase, String token, Failure failure) {}
 
     private record Failure(String status, String message) {}
 
-    private record Base(String api, String hostname) {
-        static Base from(String value) {
-            try {
-                URI uri =
-                        URI.create(
-                                value == null || value.isBlank()
-                                        ? "https://github.com"
-                                        : value.trim());
-                if (!"https".equalsIgnoreCase(uri.getScheme())
-                        || uri.getHost() == null
-                        || uri.getUserInfo() != null
-                        || uri.getPort() != -1
-                        || (!uri.getPath().isEmpty() && !"/".equals(uri.getPath()))
-                        || uri.getQuery() != null
-                        || uri.getFragment() != null) return null;
-                String origin = "https://" + uri.getHost().toLowerCase();
-                return "https://github.com".equals(origin)
-                        ? new Base("https://api.github.com", null)
-                        : new Base(origin + "/api/v3", uri.getHost());
-            } catch (IllegalArgumentException exception) {
-                return null;
-            }
-        }
-    }
-
+    /** Issues path-relative GETs through the shared GitHub transport. */
     private static final class HttpApiClient implements ApiClient {
-        private final HttpClient client = HttpClient.newBuilder().connectTimeout(TIMEOUT).build();
+        private final GitHubHttpClient httpClient = new GitHubHttpClient();
 
         @Override
-        public ApiResponse get(String apiBase, String token, String path) {
-            for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-                try {
-                    HttpRequest request =
-                            HttpRequest.newBuilder()
-                                    .uri(URI.create(apiBase + path))
-                                    .timeout(TIMEOUT)
-                                    .header("Authorization", "Bearer " + token)
-                                    .header("Accept", "application/vnd.github+json")
-                                    .header("X-GitHub-Api-Version", "2022-11-28")
-                                    .header("User-Agent", "pr-pilot-engine/0.1")
-                                    .GET()
-                                    .build();
-                    HttpResponse<String> response =
-                            client.send(request, HttpResponse.BodyHandlers.ofString());
-                    if (response.statusCode() >= 500 && attempt < MAX_ATTEMPTS) {
-                        Thread.sleep(250L * attempt);
-                        continue;
-                    }
-                    return new ApiResponse(response.statusCode(), response.body());
-                } catch (InterruptedException exception) {
-                    Thread.currentThread().interrupt();
-                    return new ApiResponse(0, "");
-                } catch (IOException | IllegalArgumentException exception) {
-                    if (attempt == MAX_ATTEMPTS) return new ApiResponse(0, "");
-                    try {
-                        Thread.sleep(250L * attempt);
-                    } catch (InterruptedException interrupted) {
-                        Thread.currentThread().interrupt();
-                        return new ApiResponse(0, "");
-                    }
-                }
-            }
-            return new ApiResponse(0, "");
+        public GitHubResponse get(String apiBase, String token, String path) {
+            return httpClient.get(apiBase + path, token);
         }
     }
 }

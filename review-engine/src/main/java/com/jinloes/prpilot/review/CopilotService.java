@@ -101,29 +101,33 @@ public class CopilotService {
             throws IOException, InterruptedException {
         String prompt = ClaudeService.buildPrompt(request);
         log.info(
-                "Copilot review prompt: {} chars — diff {} chars, knownPatterns {} chars",
+                "Copilot review prompt: {} chars — diff {} chars, CI {} chars, commits {} chars",
                 prompt.length(),
                 StringUtils.length(request.getDiff()),
-                StringUtils.length(request.getKnownPatterns()));
-        ReviewResult draft = runReview(prompt, model, effort, inheritMcp, configDir, onStatus, onChunk);
+                StringUtils.length(request.getCiStatus()),
+                StringUtils.length(request.getCommits()));
+        ReviewResult draft =
+                runReview(prompt, model, effort, inheritMcp, configDir, onStatus, onChunk);
         if (!selfCritique) {
-            return draft;
+            return CiFindingSuppressor.suppress(draft, request.getCiAnnotations());
         }
         onStatus.accept(ClaudeService.STATUS_REFINING);
         try {
-            return runReview(
-                    ClaudeService.buildCritiquePrompt(request, draft),
-                    model,
-                    effort,
-                    inheritMcp,
-                    configDir,
-                    onStatus,
-                    onChunk);
+            return CiFindingSuppressor.suppress(
+                    runReview(
+                            ClaudeService.buildCritiquePrompt(request, draft),
+                            model,
+                            effort,
+                            inheritMcp,
+                            configDir,
+                            onStatus,
+                            onChunk),
+                    request.getCiAnnotations());
         } catch (InterruptedException interrupted) {
             throw interrupted;
         } catch (Exception e) {
             log.warn("Copilot self-critique pass failed; keeping first-pass review", e);
-            return draft;
+            return CiFindingSuppressor.suppress(draft, request.getCiAnnotations());
         }
     }
 
@@ -364,11 +368,7 @@ public class CopilotService {
     record ClientRequest(String cliPath, File workingDir, Map<String, String> environment) {}
 
     record SessionRequest(
-            String model,
-            String effort,
-            File workingDir,
-            boolean inheritMcp,
-            String configDir) {}
+            String model, String effort, File workingDir, boolean inheritMcp, String configDir) {}
 
     interface RuntimeFactory {
         RuntimeClient createClient(ClientRequest request);

@@ -110,6 +110,34 @@ export interface SidecarPrDetailHead {
     cloneUrl: string | null;
 }
 
+/**
+ * One comment in an outcome-logging request. Only the fields classification and segmentation need —
+ * the engine's outcome log persists a fingerprint, never comment text.
+ */
+export interface OutcomeComment {
+    file: string;
+    line: number;
+    type?: string;
+    body: string;
+    severity?: string;
+    confidence?: string;
+}
+
+/** A file-anchored CI finding, machine-comparable against generated review comments. */
+export interface SidecarCheckAnnotation {
+    path: string;
+    startLine: number;
+    endLine: number;
+    level: string;
+    message: string;
+}
+
+/** Rendered CI state plus the structured annotations behind it. */
+export interface SidecarCheckStatus {
+    summary: string;
+    annotations: SidecarCheckAnnotation[];
+}
+
 export interface SidecarPrDiffResult {
     status: 'ok' | 'not_installed' | 'not_authenticated' | 'invalid_base_url' | 'invalid_request' | 'rate_limited' | 'network_error' | 'api_failed';
     message: string;
@@ -199,12 +227,24 @@ export interface SidecarGenerateReviewParams {
     selfCritique: boolean;
     pr: SidecarPrInput;
     diff: string;
-    knownPatterns: string;
     priorReview?: string;
     existingReviews?: string;
     repoGuidelines?: string;
     focusAreas?: string;
     customInstructions?: string;
+    /** Pre-rendered CI state from `prs/getCheckStatus`. */
+    ciStatus?: string;
+    /** Pre-rendered commit messages from `prs/getCommits`. */
+    commits?: string;
+    /** Pre-rendered linked-issue context from `prs/getLinkedIssues`. */
+    linkedIssue?: string;
+    /** Pre-rendered language/build profile from `repo/getProfile`. */
+    repoProfile?: string;
+    /**
+     * Structured form of `ciStatus`. Machine-comparable, so the engine can drop review comments
+     * that merely restate a CI finding instead of only asking the model not to produce them.
+     */
+    ciAnnotations?: Array<{ file: string; line: number; level: string; message: string }>;
 }
 
 export interface SidecarChatMessage {
@@ -890,6 +930,24 @@ export class SidecarClient {
         await this.request('reviews/cancel', {});
     }
 
+    /**
+     * Records what the reviewer did with each generated comment. Instrumentation: failures are
+     * swallowed because the submission this follows has already succeeded, and a metrics write
+     * must never surface as a user-visible error.
+     */
+    async recordReviewOutcome(
+        provider: string,
+        model: string,
+        generated: OutcomeComment[],
+        submitted: OutcomeComment[],
+    ): Promise<void> {
+        try {
+            await this.request('reviews/recordOutcome', { provider, model, generated, submitted });
+        } catch (err) {
+            console.warn('[pr-pilot] Review outcome logging failed:', err instanceof Error ? err.message : String(err));
+        }
+    }
+
     /** Returns null only when the shared detector reports that no repository was found. */
     async detectRepo(path: string): Promise<string | null> {
         const result = (await this.request('repo/detect', { path })) as
@@ -982,6 +1040,69 @@ export class SidecarClient {
     ): Promise<SidecarDraftReviewResult> {
         return this.parseResult('draft review', parseDraftReviewResult,
             await this.request('prs/getDraftReview', { githubBaseUrl, owner, repo, number }));
+    }
+
+    /*
+     * The four prompt-context reads below are deliberately best-effort and untyped beyond `summary`:
+     * a review without them is exactly as good as before they existed, so a CI outage or missing
+     * token must degrade the prompt rather than fail the review. Mirrors the same decision on the
+     * IntelliJ side (IntellijGitHubService's "do NOT call requireOk" block).
+     */
+
+    /** Rendered CI state plus the structured annotations behind it, or empty on any failure. */
+    async getCheckStatus(
+        githubBaseUrl: string,
+        owner: string,
+        repo: string,
+        headSha: string,
+    ): Promise<SidecarCheckStatus> {
+        try {
+            const value = await this.request('prs/getCheckStatus', { githubBaseUrl, owner, repo, headSha }) as
+                { summary?: unknown; annotations?: unknown };
+            return {
+                summary: typeof value?.summary === 'string' ? value.summary : '',
+                annotations: Array.isArray(value?.annotations)
+                    ? value.annotations.flatMap((raw) => {
+                        const a = raw as Record<string, unknown>;
+                        return typeof a?.path === 'string' && typeof a?.message === 'string'
+                            ? [{
+                                path: a.path,
+                                startLine: typeof a.startLine === 'number' ? a.startLine : 0,
+                                endLine: typeof a.endLine === 'number' ? a.endLine : 0,
+                                level: typeof a.level === 'string' ? a.level : 'warning',
+                                message: a.message,
+                            }]
+                            : [];
+                    })
+                    : [],
+            };
+        } catch {
+            return { summary: '', annotations: [] };
+        }
+    }
+
+    /** Rendered commit messages, or empty on any failure. */
+    async getCommits(githubBaseUrl: string, owner: string, repo: string, number: number): Promise<string> {
+        return this.contextSummary('prs/getCommits', { githubBaseUrl, owner, repo, number });
+    }
+
+    /** Rendered linked-issue context, or empty on any failure. */
+    async getLinkedIssues(githubBaseUrl: string, owner: string, repo: string, number: number): Promise<string> {
+        return this.contextSummary('prs/getLinkedIssues', { githubBaseUrl, owner, repo, number });
+    }
+
+    /** Rendered language/build profile for a checkout, or empty on any failure. */
+    async getRepoProfile(projectDir: string): Promise<string> {
+        return this.contextSummary('repo/getProfile', { projectDir });
+    }
+
+    private async contextSummary(method: string, params: Record<string, unknown>): Promise<string> {
+        try {
+            const value = await this.request(method, params) as { summary?: unknown };
+            return typeof value?.summary === 'string' ? value.summary : '';
+        } catch {
+            return '';
+        }
     }
 
     /** Saves a pending review without returning a GitHub token to the extension. */

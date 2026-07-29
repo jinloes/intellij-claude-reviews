@@ -122,14 +122,16 @@ class PluginSettingsTest {
     }
 
     @Test
-    void reviewSelfCritiqueDefaultsToFalse() {
+    void reviewSelfCritiqueDefaultsToTrue() {
         PluginSettings s = new PluginSettings();
-        assertThat(s.isReviewSelfCritique()).isFalse();
+        assertThat(s.isReviewSelfCritique()).isTrue();
     }
 
     @Test
     void reviewSelfCritiqueRoundTrips() {
         PluginSettings s = new PluginSettings();
+        s.setReviewSelfCritique(false);
+        assertThat(s.isReviewSelfCritique()).isFalse();
         s.setReviewSelfCritique(true);
         assertThat(s.isReviewSelfCritique()).isTrue();
     }

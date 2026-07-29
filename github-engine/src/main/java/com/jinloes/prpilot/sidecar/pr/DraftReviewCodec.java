@@ -123,6 +123,22 @@ public final class DraftReviewCodec {
      * Builds the deduplicated inline-comment array from a review's line comments, excluding any
      * pre-known {@code orphans} (comments the caller already determined have no valid diff position
      * — those belong in the body's "Comments not attached inline" section instead).
+     *
+     * <p>Two different keys are used here on purpose, and they are not interchangeable:
+     *
+     * <ul>
+     *   <li>{@link #orphanKey} matches a comment against the caller's orphan list. Both lists hold
+     *       the same objects, so it keys on the raw fields including {@code type} — it is an
+     *       identity check, not a payload concern.
+     *   <li>{@code dedupeKey} collapses comments that would produce identical GitHub comments. The
+     *       posted payload is only {@code path}/{@code line}/{@code side}/{@code body}, so {@code
+     *       type} is deliberately excluded: two findings differing only in type would post as two
+     *       byte-identical comments on the same line. It also keys on the normalized path, since
+     *       {@code b/Foo.java} and {@code Foo.java} post to the same place.
+     * </ul>
+     *
+     * <p>The webview's chunk-merge key ({@code file|line|type|body}) intentionally differs again —
+     * it dedupes model <em>findings</em>, where the type is part of the finding's identity.
      */
     ArrayNode buildCommentArray(List<LineComment> lineComments, List<LineComment> orphans) {
         Set<String> seen = new LinkedHashSet<>();

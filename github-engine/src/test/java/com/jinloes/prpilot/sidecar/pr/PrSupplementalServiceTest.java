@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
+import com.jinloes.prpilot.sidecar.github.GitHubResponse;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -133,16 +134,16 @@ class PrSupplementalServiceTest {
                 new ObjectMapper());
     }
 
-    private static PrSupplementalService.ApiResponse ok(String body) {
-        return new PrSupplementalService.ApiResponse(200, body);
+    private static GitHubResponse ok(String body) {
+        return new GitHubResponse(200, body);
     }
 
     private static final class FakeClient implements PrSupplementalService.ApiClient {
-        private final Deque<PrSupplementalService.ApiResponse> responses = new ArrayDeque<>();
+        private final Deque<GitHubResponse> responses = new ArrayDeque<>();
         private final List<String> paths = new ArrayList<>();
 
         @Override
-        public PrSupplementalService.ApiResponse get(String apiBase, String token, String path) {
+        public GitHubResponse get(String apiBase, String token, String path) {
             assertThat(apiBase).isEqualTo("https://api.github.com");
             assertThat(token).isEqualTo("secret-token");
             paths.add(path);

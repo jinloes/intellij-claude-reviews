@@ -83,7 +83,8 @@ class CopilotMcpConfigTest {
 
         @Test
         void skipsEntriesWithNeitherCommandNorUrl() {
-            String json = "{\"mcpServers\":{\"bad\":{\"tools\":[\"x\"]},\"ok\":{\"command\":\"y\"}}}";
+            String json =
+                    "{\"mcpServers\":{\"bad\":{\"tools\":[\"x\"]},\"ok\":{\"command\":\"y\"}}}";
             Map<String, McpServerConfig> servers = CopilotMcpConfig.parseServers(json);
             assertThat(servers).containsOnlyKeys("ok");
         }
@@ -146,4 +147,3 @@ class CopilotMcpConfigTest {
         }
     }
 }
-

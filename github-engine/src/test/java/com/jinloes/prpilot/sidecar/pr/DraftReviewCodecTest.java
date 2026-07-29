@@ -96,6 +96,54 @@ class DraftReviewCodecTest {
     }
 
     @Test
+    void buildCommentArrayCollapsesCommentsDifferingOnlyByType() {
+        // type is not part of the posted payload (path/line/side/body), so two findings that
+        // differ only by type would post as two byte-identical GitHub comments. Collapsing them
+        // is intentional and must not be "unified" with the webview's type-aware merge key.
+        List<DraftReviewCodec.LineComment> comments =
+                List.of(
+                        new DraftReviewCodec.LineComment(
+                                "x.java", 1, "issue", "same body", null, null, null, null),
+                        new DraftReviewCodec.LineComment(
+                                "x.java", 1, "suggestion", "same body", null, null, null, null));
+
+        var array = codec.buildCommentArray(comments, List.of());
+
+        assertThat(array).hasSize(1);
+        assertThat(array.get(0).path("body").asText()).isEqualTo("same body");
+    }
+
+    @Test
+    void buildCommentArrayKeepsCommentsOnTheSameLineWithDifferentBodies() {
+        List<DraftReviewCodec.LineComment> comments =
+                List.of(
+                        new DraftReviewCodec.LineComment(
+                                "x.java", 1, "issue", "first", null, null, null, null),
+                        new DraftReviewCodec.LineComment(
+                                "x.java", 1, "issue", "second", null, null, null, null));
+
+        var array = codec.buildCommentArray(comments, List.of());
+
+        assertThat(array).hasSize(2);
+    }
+
+    @Test
+    void buildCommentArrayOrphanExclusionDistinguishesByType() {
+        // orphanKey includes type, so an orphaned "note" must not suppress a same-line "issue".
+        DraftReviewCodec.LineComment orphan =
+                new DraftReviewCodec.LineComment(
+                        "x.java", 1, "note", "same body", null, null, null, null);
+        DraftReviewCodec.LineComment kept =
+                new DraftReviewCodec.LineComment(
+                        "x.java", 1, "issue", "same body", null, null, null, null);
+
+        var array = codec.buildCommentArray(List.of(orphan, kept), List.of(orphan));
+
+        assertThat(array).hasSize(1);
+        assertThat(array.get(0).path("body").asText()).isEqualTo("same body");
+    }
+
+    @Test
     void buildOrphanAndDroppedSectionsFormatDetachedComments() {
         DraftReviewCodec.LineComment orphan =
                 new DraftReviewCodec.LineComment(

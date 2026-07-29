@@ -24,13 +24,46 @@ const result: ReviewResult = {
   }],
 }
 
-void test('quality check identifies and repairs missing rationale', () => {
+void test('quality check flags missing rationale and drops those comments rather than fabricating it', () => {
   const report = runReviewQualityCheck(result, diff)
 
   assert.equal(report.missingRationaleComments.length, 1)
-  assert.ok(report.suggestions.includes('addMissingRationale'))
-  const repaired = applyReviewQualityRepairs(result, report, ['addMissingRationale'])
-  assert.match(repaired.lineComments[0].rationale ?? '', /Evidence needs verification/)
+  assert.ok(report.suggestions.includes('dropMissingRationale'))
+
+  const repaired = applyReviewQualityRepairs(result, report, ['dropMissingRationale'])
+  assert.equal(repaired.lineComments.length, 0)
+})
+
+void test('missing-rationale repair never invents evidence text', () => {
+  const report = runReviewQualityCheck(result, diff)
+  const repaired = applyReviewQualityRepairs(result, report, ['dropMissingRationale'])
+
+  for (const comment of repaired.lineComments) {
+    assert.doesNotMatch(comment.rationale ?? '', /Evidence needs verification/)
+  }
+})
+
+void test('missing-rationale repair leaves comments that already have rationale', () => {
+  const withRationale: ReviewResult = {
+    ...result,
+    lineComments: [
+      result.lineComments[0],
+      {
+        file: 'src/a.ts',
+        line: 2,
+        type: 'suggestion',
+        body: 'Export the value explicitly.',
+        severity: 'minor',
+        confidence: 'high',
+        rationale: 'Line 2 re-exports the constant.',
+      },
+    ],
+  }
+  const report = runReviewQualityCheck(withRationale, diff)
+  const repaired = applyReviewQualityRepairs(withRationale, report, ['dropMissingRationale'])
+
+  assert.equal(repaired.lineComments.length, 1)
+  assert.equal(repaired.lineComments[0].line, 2)
 })
 
 void test('diff batches prioritize larger changed files', () => {
@@ -94,3 +127,59 @@ void test('diff batch limits must be positive', () => {
   assert.throws(() => buildDiffBatches(diff, 0), /must be positive/)
   assert.throws(() => buildDiffBatches(diff, 1, 0), /must be positive/)
 })
+
+// ── high-risk / low-evidence detection ────────────────────────────────────────
+
+function withComment(overrides: Partial<ReviewResult['lineComments'][number]>): ReviewResult {
+  return {
+    summary: 'Summary',
+    verdict: 'COMMENT',
+    lineComments: [{
+      file: 'src/a.ts',
+      line: 1,
+      type: 'issue',
+      body: 'Deadlock: B locks A here.',
+      severity: 'blocker',
+      confidence: 'high',
+      rationale: 'Lock order inverted versus acquire() above.',
+      ...overrides,
+    }],
+  }
+}
+
+// Regression guard for the retired `body.length < 35` rule: a terse but fully justified finding
+// was previously flagged purely for being short.
+void test('a short but justified high-severity finding is not flagged as low evidence', () => {
+  const report = runReviewQualityCheck(withComment({}), diff)
+
+  assert.equal(report.riskyComments.length, 0)
+})
+
+void test('a high-severity finding with no stated rationale is flagged', () => {
+  const report = runReviewQualityCheck(withComment({ rationale: '   ' }), diff)
+
+  assert.equal(report.riskyComments.length, 1)
+})
+
+void test('a high-severity finding the model itself rates low-confidence is flagged', () => {
+  const report = runReviewQualityCheck(withComment({ confidence: 'low' }), diff)
+
+  assert.equal(report.riskyComments.length, 1)
+})
+
+// Only serious claims need to carry evidence; a nit without rationale is not a quality problem.
+void test('a low-severity finding without rationale is not flagged', () => {
+  const report = runReviewQualityCheck(
+    withComment({ severity: 'minor', rationale: undefined }),
+    diff,
+  )
+
+  assert.equal(report.riskyComments.length, 0)
+})
+
+void test('a finding on a file absent from the diff is always flagged', () => {
+  const report = runReviewQualityCheck(withComment({ file: 'src/never-touched.ts' }), diff)
+
+  assert.equal(report.riskyComments.length, 1)
+})
+

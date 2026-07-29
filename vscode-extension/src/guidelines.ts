@@ -7,8 +7,11 @@ import * as path from 'path';
  * conventions. Mirrors the JVM `RepoGuidelinesReader` (review-engine) used by the IntelliJ host.
  *
  * The set of files is configurable rather than hardcoded: each entry is either a literal relative
- * path (e.g. `AGENTS.md`, `.linkedin/ai-agent/coding-pattern.md`) or a glob (e.g. `**​/style.md`,
- * `.linkedin/**​/*.md`), so teams surface repo-specific guidance without a code change.
+ * path (e.g. `AGENTS.md`, `.linkedin/ai-agent/coding-pattern.md`) or a glob (e.g. `**\/style.md`,
+ * `.linkedin/**\/*.md`), so teams surface repo-specific guidance without a code change.
+ *
+ * The `\/` above is an escape so the example globs don't terminate this comment block; the
+ * patterns themselves contain no backslash.
  */
 
 /** Default guidance files scanned when the user has not configured their own list. */
@@ -35,7 +38,7 @@ export function isGlob(pattern: string): boolean {
 
 /**
  * Translates a minimal glob (`**`, `*`, `?`) into a regex matched against a '/'-joined relative
- * path. `**​/` matches zero or more leading segments so `**​/style.md` also matches `style.md` at
+ * path. `**\/` matches zero or more leading segments so `**\/style.md` also matches `style.md` at
  * the root. Mirrors RepoGuidelinesReader.globToRegex.
  */
 export function globToRegex(glob: string): RegExp {

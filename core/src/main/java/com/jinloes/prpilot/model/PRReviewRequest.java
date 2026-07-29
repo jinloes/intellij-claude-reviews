@@ -1,58 +1,57 @@
 package com.jinloes.prpilot.model;
 
 /**
- * Bundles the data needed to generate a PR review: the pull-request metadata, the unified diff, any
- * previously-verified patterns that should be excluded from re-flagging, an optional prior review
- * result to use as refinement context on re-generation, and a formatted summary of reviews already
- * submitted by other reviewers so Claude avoids repeating their findings.
+ * Bundles the data needed to generate a PR review: the pull-request metadata and unified diff, plus
+ * the optional context sections that let a review be judged against something more than the diff
+ * alone — CI results, commit messages, the issue the PR claims to close, the repository's stack,
+ * project guidelines, and reviews already submitted.
+ *
+ * <p>Every context field is optional. A null or blank value omits its prompt section entirely, so a
+ * caller that cannot supply one degrades to exactly the previous behavior rather than failing.
+ *
+ * <p>Built through {@link #builder}: the fields are almost all strings, so positional construction
+ * would silently accept a wrong argument order.
  */
 public final class PRReviewRequest {
 
     private final PullRequest pr;
     private final String diff;
-    private final String knownPatterns;
     private final String priorReview;
     private final String existingReviews;
     private final String repoGuidelines;
     private final String focusAreas;
     private final String customInstructions;
+    private final String ciStatus;
+    private final String commits;
+    private final String linkedIssue;
+    private final String repoProfile;
+    private final java.util.List<CiAnnotation> ciAnnotations;
 
-    /** Convenience constructor with no prior review or existing reviews. */
-    public PRReviewRequest(PullRequest pr, String diff, String knownPatterns) {
-        this(pr, diff, knownPatterns, null, null);
+    private PRReviewRequest(Builder builder) {
+        this.pr = builder.pr;
+        this.diff = builder.diff;
+        this.priorReview = builder.priorReview;
+        this.existingReviews = builder.existingReviews;
+        this.repoGuidelines = builder.repoGuidelines;
+        this.focusAreas = builder.focusAreas;
+        this.customInstructions = builder.customInstructions;
+        this.ciStatus = builder.ciStatus;
+        this.commits = builder.commits;
+        this.linkedIssue = builder.linkedIssue;
+        this.repoProfile = builder.repoProfile;
+        this.ciAnnotations =
+                builder.ciAnnotations == null
+                        ? java.util.List.of()
+                        : java.util.List.copyOf(builder.ciAnnotations);
     }
 
-    /** Convenience constructor with no existing reviews. */
-    public PRReviewRequest(PullRequest pr, String diff, String knownPatterns, String priorReview) {
-        this(pr, diff, knownPatterns, priorReview, null);
+    /** Creates a request with only the two required inputs and no optional context. */
+    public PRReviewRequest(PullRequest pr, String diff) {
+        this(builder(pr, diff));
     }
 
-    public PRReviewRequest(
-            PullRequest pr,
-            String diff,
-            String knownPatterns,
-            String priorReview,
-            String existingReviews) {
-        this(pr, diff, knownPatterns, priorReview, existingReviews, null, null, null);
-    }
-
-    public PRReviewRequest(
-            PullRequest pr,
-            String diff,
-            String knownPatterns,
-            String priorReview,
-            String existingReviews,
-            String repoGuidelines,
-            String focusAreas,
-            String customInstructions) {
-        this.pr = pr;
-        this.diff = diff;
-        this.knownPatterns = knownPatterns;
-        this.priorReview = priorReview;
-        this.existingReviews = existingReviews;
-        this.repoGuidelines = repoGuidelines;
-        this.focusAreas = focusAreas;
-        this.customInstructions = customInstructions;
+    public static Builder builder(PullRequest pr, String diff) {
+        return new Builder(pr, diff);
     }
 
     public PullRequest getPr() {
@@ -61,10 +60,6 @@ public final class PRReviewRequest {
 
     public String getDiff() {
         return diff;
-    }
-
-    public String getKnownPatterns() {
-        return knownPatterns;
     }
 
     public String getPriorReview() {
@@ -85,5 +80,110 @@ public final class PRReviewRequest {
 
     public String getCustomInstructions() {
         return customInstructions;
+    }
+
+    /** Rendered CI check state for the head commit; empty when CI reported nothing. */
+    public String getCiStatus() {
+        return ciStatus;
+    }
+
+    /** Rendered commit-message list, carrying the author's stated intent. */
+    public String getCommits() {
+        return commits;
+    }
+
+    /** Rendered summary of the issues this PR declares it closes. */
+    public String getLinkedIssue() {
+        return linkedIssue;
+    }
+
+    /** Rendered language and build-tooling profile of the repository. */
+    public String getRepoProfile() {
+        return repoProfile;
+    }
+
+    /**
+     * Structured CI findings behind {@link #getCiStatus()}. Unlike the rendered summary these are
+     * machine-comparable, which is what lets duplicate review comments be dropped
+     * deterministically. Never null.
+     */
+    public java.util.List<CiAnnotation> getCiAnnotations() {
+        return ciAnnotations;
+    }
+
+    /** Fluent builder; every context setter is optional. */
+    public static final class Builder {
+        private final PullRequest pr;
+        private final String diff;
+        private String priorReview;
+        private String existingReviews;
+        private String repoGuidelines;
+        private String focusAreas;
+        private String customInstructions;
+        private String ciStatus;
+        private String commits;
+        private String linkedIssue;
+        private String repoProfile;
+        private java.util.List<CiAnnotation> ciAnnotations = java.util.List.of();
+
+        private Builder(PullRequest pr, String diff) {
+            this.pr = pr;
+            this.diff = diff;
+        }
+
+        public Builder priorReview(String value) {
+            this.priorReview = value;
+            return this;
+        }
+
+        public Builder existingReviews(String value) {
+            this.existingReviews = value;
+            return this;
+        }
+
+        public Builder repoGuidelines(String value) {
+            this.repoGuidelines = value;
+            return this;
+        }
+
+        public Builder focusAreas(String value) {
+            this.focusAreas = value;
+            return this;
+        }
+
+        public Builder customInstructions(String value) {
+            this.customInstructions = value;
+            return this;
+        }
+
+        public Builder ciStatus(String value) {
+            this.ciStatus = value;
+            return this;
+        }
+
+        public Builder commits(String value) {
+            this.commits = value;
+            return this;
+        }
+
+        public Builder linkedIssue(String value) {
+            this.linkedIssue = value;
+            return this;
+        }
+
+        public Builder repoProfile(String value) {
+            this.repoProfile = value;
+            return this;
+        }
+
+        /** Structured CI findings, used to drop review comments that merely restate them. */
+        public Builder ciAnnotations(java.util.List<CiAnnotation> value) {
+            this.ciAnnotations = value;
+            return this;
+        }
+
+        public PRReviewRequest build() {
+            return new PRReviewRequest(this);
+        }
     }
 }

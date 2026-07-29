@@ -68,6 +68,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { ChatPane } from '../ChatPane'
+import type { VerifyResult } from '../ChatPane/structuredResult'
 import { DiffViewer } from '../DiffViewer'
 import { ReviewDisplay } from '../ReviewDisplay'
 import { AccessibleResizer } from '../layout/AccessibleResizer'
@@ -79,7 +80,7 @@ import {
   MIN_CHAT_HEIGHT,
   loadChatHeight,
 } from './chatHeight'
-import { buildExampleFixPrompt, buildVerifyCommentPrompt } from './verifyPrompt'
+import { buildExampleFixPrompt, buildVerifyCommentPrompt, resolveVerifyTarget } from './verifyPrompt'
 
 interface Props {
   pr: PR | null
@@ -323,14 +324,20 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   const [focusedCommentIdx, setFocusedCommentIdx] = useState(0)
   const [chatVisible, setChatVisible] = useState(false)
   const [selectedContext, setSelectedContext] = useState('')
-  const [pendingChatMessage, setPendingChatMessage] = useState<{ q: string; ctx: string; id: number } | null>(null)
+  const [pendingChatMessage, setPendingChatMessage] = useState<{ q: string; ctx: string; id: number; token?: string } | null>(null)
   const [chunkedOverride, setChunkedOverride] = useState<boolean | null>(null)
   const [chunkedProgress, setChunkedProgress] = useState<ChunkedProgress | null>(null)
   const [qualityExpanded, setQualityExpanded] = useState(false)
   const [chatHeight, setChatHeight] = useState(loadChatHeight)
   const chatHeightRef = useRef(chatHeight)
   const chatDragRef = useRef<{ startY: number; startHeight: number } | null>(null)
+  /** Verify-request token → the comment that request was made for. See handleVerifyComment. */
+  const verifyTargetsRef = useRef<Map<string, LineComment>>(new Map())
   const pendingSubmit = useRef<{ verdict: Verdict; comment: string } | null>(null)
+  // React state updates asynchronously, so `submitting` alone cannot stop two rapid clicks from
+  // both sending submitReview before the button rerenders. This lock is set synchronously before
+  // either the save-then-submit or direct-submit path begins.
+  const submitInFlightRef = useRef(false)
   const currentPrRef = useRef(pr)
   const chunkSessionRef = useRef<ChunkSession | null>(null)
   // Autosave bookkeeping. The draft IS the autosave target: a generated review
@@ -372,6 +379,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     setCustomInstructionsOverride('')
     setChunkedOverride(null)
     pendingSubmit.current = null
+    submitInFlightRef.current = false
     setSaving(false)
     setSubmitting(false)
     setDeleting(false)
@@ -630,6 +638,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
             pendingSubmit.current = null
             setSubmitting(true)
             armWatchdog(submitWatchdogRef, () => {
+              submitInFlightRef.current = false
               setSubmitting(false)
               setState((prev) => ({
                 kind: 'submitError',
@@ -664,6 +673,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
           lastSavedSnapshotRef.current = null
           lastSaveWasAutoRef.current = false
           pendingSubmit.current = null
+          submitInFlightRef.current = false
           setState((prev) => ({
             kind: 'saveError',
             message: msg.message,
@@ -680,12 +690,14 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
 
         case 'reviewSubmitted':
           clearWatchdog(submitWatchdogRef)
+          submitInFlightRef.current = false
           setSubmitting(false)
           setState({ kind: 'submitted' })
           break
 
         case 'reviewSubmitError':
           clearWatchdog(submitWatchdogRef)
+          submitInFlightRef.current = false
           setSubmitting(false)
           setState((prev) => ({
             kind: 'submitError',
@@ -801,6 +813,9 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
       }
       setSaving(true)
       armWatchdog(saveWatchdogRef, () => {
+        // A pending submit is blocked behind this save. Release its synchronous lock as well as
+        // the visual saving state so the reviewer can retry after a dropped host message.
+        if (pendingSubmit.current !== null) submitInFlightRef.current = false
         setSaving(false)
         lastSavedSnapshotRef.current = null
         lastSaveWasAutoRef.current = false
@@ -1063,6 +1078,8 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   }
 
   function handleSubmit(verdict: Verdict, comment = '') {
+    if (submitInFlightRef.current) return
+    submitInFlightRef.current = true
     const r = resultOf(state)
     // Save first whenever the in-memory review may differ from the GitHub draft
     // (never-saved review, unsaved edits, or a prior save error) so the submit
@@ -1076,6 +1093,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     }
     setSubmitting(true)
     armWatchdog(submitWatchdogRef, () => {
+      submitInFlightRef.current = false
       setSubmitting(false)
       setState((prev) => ({
         kind: 'submitError',
@@ -1096,7 +1114,37 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   function handleVerifyComment(comment: LineComment) {
     const { question, context } = buildVerifyCommentPrompt(comment, validationDiff || diff)
     if (!chatVisible) setChatVisible(true)
-    setPendingChatMessage({ q: question, ctx: context, id: Date.now() })
+    const id = Date.now()
+    const token = `verify-${id}`
+    // Bind the token to this specific comment. The reviewer can verify several comments before
+    // acting on any of them, so the reply must resolve to the comment that prompted it rather
+    // than to the most recent request.
+    verifyTargetsRef.current.set(token, comment)
+    setPendingChatMessage({ q: question, ctx: context, id, token })
+  }
+
+  /**
+   * Applies a verify verdict's action to the comment it was requested for.
+   *
+   * An unresolvable target is a no-op — see `resolveVerifyTarget`. Silently mutating a different
+   * comment would be far worse than doing nothing.
+   */
+  function handleApplyVerifyAction(verify: VerifyResult, token: string) {
+    const target = verifyTargetsRef.current.get(token)
+    if (!target || !result) return
+
+    const index = resolveVerifyTarget(result.lineComments, target)
+    if (index < 0) return
+
+    if (verify.action === 'delete') {
+      mutateAtOriginal(index, () => null)
+      setFocusedCommentIdx((f) => (f > 0 ? f - 1 : 0))
+      return
+    }
+    const replacement = verify.replacementComment?.trim()
+    if (verify.action === 'revise' && replacement) {
+      mutateAtOriginal(index, (c) => ({ ...c, body: replacement }))
+    }
   }
 
   function handleSuggestFixComment(comment: LineComment) {
@@ -1423,6 +1471,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
               pendingMessage={pendingChatMessage ?? undefined}
               onPendingMessageSent={handlePendingMessageSent}
               contextSummary={contextSummary}
+              onApplyVerifyAction={handleApplyVerifyAction}
             />
           </div>
         )}
@@ -1598,9 +1647,9 @@ function ReviewQualityCheckCard({
               Remove unanchored comments
             </Button>
           )}
-          {report.suggestions.includes('addMissingRationale') && (
-            <Button variant="outline" size="sm" className="text-xs" onClick={() => onApplyRepair('addMissingRationale')}>
-              Add rationale placeholders
+          {report.suggestions.includes('dropMissingRationale') && (
+            <Button variant="outline" size="sm" className="text-xs" onClick={() => onApplyRepair('dropMissingRationale')}>
+              Drop comments without rationale
             </Button>
           )}
           {report.suggestions.includes('downgradeHighRisk') && (
@@ -2443,7 +2492,7 @@ function SubmitSplitButton({
           <AlertDialogFooter>
             <AlertDialogCancel onClick={() => setComment('')}>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              disabled={riskCount > 0 && !risksAcknowledged}
+              disabled={submitting || disabled || (riskCount > 0 && !risksAcknowledged)}
               onClick={() => {
                 if (confirming) onSubmit(confirming, comment.trim())
                 setComment('')

@@ -63,8 +63,7 @@ public final class RepoGuidelinesReader {
         if (dir == null || !dir.isDirectory()) {
             return "";
         }
-        List<String> patterns =
-                (globs == null || globs.isEmpty()) ? DEFAULT_GUIDANCE_GLOBS : globs;
+        List<String> patterns = (globs == null || globs.isEmpty()) ? DEFAULT_GUIDANCE_GLOBS : globs;
         StringBuilder sb = new StringBuilder();
         int total = 0;
         for (String rel : resolvePaths(dir, patterns)) {
@@ -130,7 +129,9 @@ public final class RepoGuidelinesReader {
         return StringUtils.containsAny(pattern, '*', '?', '[', '{');
     }
 
-    /** Bounded breadth-first walk returning '/'-joined relative paths, skipping heavy directories. */
+    /**
+     * Bounded breadth-first walk returning '/'-joined relative paths, skipping heavy directories.
+     */
     private static List<String> collectRelativeFiles(File root) {
         List<String> files = new ArrayList<>();
         Deque<Entry> queue = new ArrayDeque<>();
@@ -142,7 +143,10 @@ public final class RepoGuidelinesReader {
                 continue;
             }
             for (File child : children) {
-                String rel = entry.prefix.isEmpty() ? child.getName() : entry.prefix + "/" + child.getName();
+                String rel =
+                        entry.prefix.isEmpty()
+                                ? child.getName()
+                                : entry.prefix + "/" + child.getName();
                 if (child.isDirectory()) {
                     if (entry.depth < MAX_DEPTH && !SKIP_DIRS.contains(child.getName())) {
                         queue.add(new Entry(child, rel, entry.depth + 1));
@@ -196,4 +200,3 @@ public final class RepoGuidelinesReader {
 
     private record Entry(File dir, String prefix, int depth) {}
 }
-

@@ -2,27 +2,21 @@ package com.jinloes.prpilot.sidecar.pr;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jinloes.prpilot.sidecar.github.GitHubApiBase;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
+import com.jinloes.prpilot.sidecar.github.GitHubHttpClient;
+import com.jinloes.prpilot.sidecar.github.GitHubResponse;
 import java.io.IOException;
-import java.net.URI;
 import java.net.URLEncoder;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
 /** Lists pull requests without exposing the GitHub token outside the sidecar process. */
 public final class PrListService {
-    private static final Duration TIMEOUT = Duration.ofSeconds(15);
     private static final int RESULT_LIMIT = 50;
     private static final int REQUEST_LIMIT = RESULT_LIMIT + 1;
-    private static final int MAX_ATTEMPTS = 3;
-    private static final String DEFAULT_BASE_URL = "https://github.com";
-    private static final String DEFAULT_API_URL = "https://api.github.com";
 
     private final GitHubAuthService.TokenResolver tokenResolver;
     private final SearchClient searchClient;
@@ -45,9 +39,9 @@ public final class PrListService {
     }
 
     public PrListResult list(PrListParams params) {
-        BaseUrls baseUrls;
+        GitHubApiBase baseUrls;
         try {
-            baseUrls = BaseUrls.from(params.githubBaseUrl());
+            baseUrls = GitHubApiBase.require(params.githubBaseUrl());
         } catch (IllegalArgumentException exception) {
             return PrListResult.failure(
                     "invalid_base_url", "GitHub base URL must be an HTTPS origin.");
@@ -113,73 +107,31 @@ public final class PrListService {
     }
 
     private static final class HttpSearchClient implements SearchClient {
-        private final HttpClient httpClient =
-                HttpClient.newBuilder().connectTimeout(TIMEOUT).build();
+        private final GitHubHttpClient httpClient = new GitHubHttpClient();
 
         @Override
         public SearchResponse search(String apiBaseUrl, String token, String query) {
-            URI uri =
-                    URI.create(
-                            apiBaseUrl
-                                    + "/search/issues?q="
-                                    + URLEncoder.encode(query, StandardCharsets.UTF_8)
-                                    + "&per_page="
-                                    + REQUEST_LIMIT
-                                    + "&sort=updated");
-            for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-                try {
-                    HttpRequest request =
-                            HttpRequest.newBuilder()
-                                    .uri(uri)
-                                    .timeout(TIMEOUT)
-                                    .header("Authorization", "Bearer " + token)
-                                    .header("Accept", "application/vnd.github.v3+json")
-                                    .header("X-GitHub-Api-Version", "2022-11-28")
-                                    .header("User-Agent", "pr-pilot-sidecar/0.1")
-                                    .GET()
-                                    .build();
-                    HttpResponse<String> response =
-                            httpClient.send(
-                                    request,
-                                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-                    int statusCode = response.statusCode();
-                    if (statusCode == 401 || statusCode == 403) {
-                        return SearchResponse.of(SearchStatus.NOT_AUTHENTICATED);
-                    }
-                    if (statusCode == 429) {
-                        if (attempt < MAX_ATTEMPTS) {
-                            backoff(attempt);
-                            continue;
-                        }
-                        return SearchResponse.of(SearchStatus.RATE_LIMITED);
-                    }
-                    if (statusCode < 200 || statusCode >= 300) {
-                        if (statusCode >= 500 && attempt < MAX_ATTEMPTS) {
-                            backoff(attempt);
-                            continue;
-                        }
-                        return SearchResponse.of(SearchStatus.API_FAILED);
-                    }
-                    return parseSearchResponse(response.body());
-                } catch (IOException exception) {
-                    if (attempt == MAX_ATTEMPTS) {
-                        return SearchResponse.of(SearchStatus.NETWORK_ERROR);
-                    }
-                    backoff(attempt);
-                } catch (InterruptedException exception) {
-                    Thread.currentThread().interrupt();
-                    return SearchResponse.of(SearchStatus.NETWORK_ERROR);
-                }
+            String url =
+                    apiBaseUrl
+                            + "/search/issues?q="
+                            + URLEncoder.encode(query, StandardCharsets.UTF_8)
+                            + "&per_page="
+                            + REQUEST_LIMIT
+                            + "&sort=updated";
+            GitHubResponse response = httpClient.get(url, token);
+            if (response.isUnauthenticated()) {
+                return SearchResponse.of(SearchStatus.NOT_AUTHENTICATED);
             }
-            return SearchResponse.of(SearchStatus.NETWORK_ERROR);
-        }
-
-        private void backoff(int attempt) {
-            try {
-                Thread.sleep(250L * attempt);
-            } catch (InterruptedException exception) {
-                Thread.currentThread().interrupt();
+            if (response.isRateLimited()) {
+                return SearchResponse.of(SearchStatus.RATE_LIMITED);
             }
+            if (response.isNetworkError()) {
+                return SearchResponse.of(SearchStatus.NETWORK_ERROR);
+            }
+            if (!response.isSuccess()) {
+                return SearchResponse.of(SearchStatus.API_FAILED);
+            }
+            return parseSearchResponse(response.body());
         }
     }
 
@@ -237,30 +189,5 @@ public final class PrListService {
 
     private static String text(JsonNode node, String field) {
         return node.path(field).textValue();
-    }
-
-    private record BaseUrls(String apiBaseUrl, String hostnameArgument) {
-        private static BaseUrls from(String value) {
-            String candidate = value == null || value.isBlank() ? DEFAULT_BASE_URL : value.trim();
-            URI uri;
-            try {
-                uri = URI.create(candidate);
-            } catch (IllegalArgumentException exception) {
-                throw new IllegalArgumentException("Invalid GitHub base URL", exception);
-            }
-            if (!"https".equalsIgnoreCase(uri.getScheme())
-                    || uri.getHost() == null
-                    || uri.getUserInfo() != null
-                    || uri.getPort() != -1
-                    || (!"/".equals(uri.getPath()) && !uri.getPath().isEmpty())
-                    || uri.getQuery() != null
-                    || uri.getFragment() != null) {
-                throw new IllegalArgumentException("Invalid GitHub base URL");
-            }
-            String normalized = "https://" + uri.getHost().toLowerCase();
-            return DEFAULT_BASE_URL.equals(normalized)
-                    ? new BaseUrls(DEFAULT_API_URL, null)
-                    : new BaseUrls(normalized + "/api/v3", uri.getHost());
-        }
     }
 }

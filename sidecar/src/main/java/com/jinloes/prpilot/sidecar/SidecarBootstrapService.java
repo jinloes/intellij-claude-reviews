@@ -19,6 +19,10 @@ final class SidecarBootstrapService {
                         Map.entry("prSearch", true),
                         Map.entry("starredRepos", true),
                         Map.entry("existingReviews", true),
+                        Map.entry("checkStatus", true),
+                        Map.entry("prCommits", true),
+                        Map.entry("linkedIssues", true),
+                        Map.entry("repoProfile", true),
                         Map.entry("reviewGeneration", true)));
     }
 

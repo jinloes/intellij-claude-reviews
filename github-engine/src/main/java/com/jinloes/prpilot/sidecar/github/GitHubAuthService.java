@@ -3,10 +3,6 @@ package com.jinloes.prpilot.sidecar.github;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -19,8 +15,6 @@ import java.util.concurrent.TimeUnit;
 /** Performs a token-safe GitHub CLI and API authentication check. */
 public final class GitHubAuthService {
     private static final Duration TIMEOUT = Duration.ofSeconds(15);
-    private static final String DEFAULT_BASE_URL = "https://github.com";
-    private static final String DEFAULT_API_URL = "https://api.github.com";
 
     private final TokenResolver tokenResolver;
     private final UserLookup userLookup;
@@ -35,9 +29,9 @@ public final class GitHubAuthService {
     }
 
     public CheckAuthResult check(String githubBaseUrl) {
-        BaseUrls baseUrls;
+        GitHubApiBase baseUrls;
         try {
-            baseUrls = BaseUrls.from(githubBaseUrl);
+            baseUrls = GitHubApiBase.require(githubBaseUrl);
         } catch (IllegalArgumentException exception) {
             return CheckAuthResult.invalidBaseUrl();
         }
@@ -165,70 +159,26 @@ public final class GitHubAuthService {
     }
 
     private static final class HttpUserLookup implements UserLookup {
-        private final HttpClient httpClient =
-                HttpClient.newBuilder().connectTimeout(TIMEOUT).build();
+        private final GitHubHttpClient httpClient = new GitHubHttpClient();
         private final ObjectMapper objectMapper = new ObjectMapper();
 
         @Override
         public UserResolution lookup(String apiBaseUrl, String token) {
-            HttpRequest request =
-                    HttpRequest.newBuilder()
-                            .uri(URI.create(apiBaseUrl + "/user"))
-                            .timeout(TIMEOUT)
-                            .header("Authorization", "Bearer " + token)
-                            .header("Accept", "application/vnd.github.v3+json")
-                            .header("X-GitHub-Api-Version", "2022-11-28")
-                            .header("User-Agent", "pr-pilot-sidecar/0.1")
-                            .GET()
-                            .build();
+            GitHubResponse response = httpClient.get(apiBaseUrl + "/user", token);
+            if (response.isUnauthenticated()) {
+                return UserResolution.notAuthenticated();
+            }
+            if (!response.isSuccess()) {
+                return UserResolution.apiFailed();
+            }
             try {
-                HttpResponse<String> response =
-                        httpClient.send(
-                                request,
-                                HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-                if (response.statusCode() == 401 || response.statusCode() == 403) {
-                    return UserResolution.notAuthenticated();
-                }
-                if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                    return UserResolution.apiFailed();
-                }
                 JsonNode login = objectMapper.readTree(response.body()).path("login");
                 return login.isTextual() && !login.textValue().isBlank()
                         ? UserResolution.authenticated(login.textValue())
                         : UserResolution.apiFailed();
             } catch (IOException exception) {
                 return UserResolution.apiFailed();
-            } catch (InterruptedException exception) {
-                Thread.currentThread().interrupt();
-                return UserResolution.apiFailed();
             }
-        }
-    }
-
-    private record BaseUrls(String apiBaseUrl, String hostnameArgument) {
-        private static BaseUrls from(String value) {
-            String candidate = value == null || value.isBlank() ? DEFAULT_BASE_URL : value.trim();
-            URI uri;
-            try {
-                uri = URI.create(candidate);
-            } catch (IllegalArgumentException exception) {
-                throw new IllegalArgumentException("Invalid GitHub base URL", exception);
-            }
-            String path = uri.getPath();
-            boolean pathIsRootOrEmpty = "/".equals(path) || (path != null && path.isEmpty());
-            if (!"https".equalsIgnoreCase(uri.getScheme())
-                    || uri.getHost() == null
-                    || uri.getUserInfo() != null
-                    || uri.getPort() != -1
-                    || !pathIsRootOrEmpty
-                    || uri.getQuery() != null
-                    || uri.getFragment() != null) {
-                throw new IllegalArgumentException("Invalid GitHub base URL");
-            }
-            String normalized = "https://" + uri.getHost().toLowerCase();
-            return DEFAULT_BASE_URL.equals(normalized)
-                    ? new BaseUrls(DEFAULT_API_URL, null)
-                    : new BaseUrls(normalized + "/api/v3", uri.getHost());
         }
     }
 }

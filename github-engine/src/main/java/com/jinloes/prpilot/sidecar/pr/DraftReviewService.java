@@ -2,15 +2,13 @@ package com.jinloes.prpilot.sidecar.pr;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.jinloes.prpilot.sidecar.github.GitHubApiBase;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
+import com.jinloes.prpilot.sidecar.github.GitHubHttpClient;
+import com.jinloes.prpilot.sidecar.github.GitHubResponse;
 import java.io.IOException;
-import java.net.URI;
 import java.net.URLEncoder;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -18,8 +16,6 @@ import java.util.regex.Pattern;
 
 /** Read-only pending-review orchestration; tokens never leave the sidecar process. */
 public final class DraftReviewService {
-    private static final Duration TIMEOUT = Duration.ofSeconds(15);
-    private static final int MAX_ATTEMPTS = 3;
     private static final Pattern SEGMENT = Pattern.compile("[A-Za-z0-9_.-]+");
 
     private final GitHubAuthService.TokenResolver tokenResolver;
@@ -46,11 +42,11 @@ public final class DraftReviewService {
         if (!valid(owner) || !valid(repo) || number <= 0)
             return DraftReviewResult.failure(
                     "invalid_request", "Pull request identity is invalid.");
-        BaseUrls urls = BaseUrls.from(baseUrl);
+        GitHubApiBase urls = GitHubApiBase.parse(baseUrl);
         if (urls == null)
             return DraftReviewResult.failure(
                     "invalid_base_url", "GitHub base URL must be an HTTPS origin.");
-        GitHubAuthService.TokenResolution token = tokenResolver.resolve(urls.hostname());
+        GitHubAuthService.TokenResolution token = tokenResolver.resolve(urls.hostnameArgument());
         if (token.status() == GitHubAuthService.TokenStatus.NOT_INSTALLED)
             return DraftReviewResult.failure("not_installed", "GitHub CLI is not installed.");
         if (token.status() != GitHubAuthService.TokenStatus.RESOLVED)
@@ -93,38 +89,12 @@ public final class DraftReviewService {
         }
     }
 
-    private record BaseUrls(String apiBaseUrl, String hostname) {
-        static BaseUrls from(String value) {
-            try {
-                URI uri =
-                        URI.create(
-                                value == null || value.isBlank()
-                                        ? "https://github.com"
-                                        : value.trim());
-                if (!"https".equalsIgnoreCase(uri.getScheme())
-                        || uri.getHost() == null
-                        || uri.getUserInfo() != null
-                        || uri.getPort() != -1
-                        || (!uri.getPath().isEmpty() && !"/".equals(uri.getPath()))
-                        || uri.getQuery() != null
-                        || uri.getFragment() != null) return null;
-                String origin = "https://" + uri.getHost().toLowerCase();
-                return "https://github.com".equals(origin)
-                        ? new BaseUrls("https://api.github.com", null)
-                        : new BaseUrls(origin + "/api/v3", uri.getHost());
-            } catch (IllegalArgumentException exception) {
-                return null;
-            }
-        }
-    }
-
     /**
      * Fetches the PENDING review (if any) for a pull request over the GitHub REST API, plus its
      * inline comments. Never returns or logs the token used to authenticate.
      */
     private static final class HttpPendingReviewClient implements PendingReviewClient {
-        private final HttpClient httpClient =
-                HttpClient.newBuilder().connectTimeout(TIMEOUT).build();
+        private final GitHubHttpClient httpClient = new GitHubHttpClient();
         private final ObjectMapper mapper = new ObjectMapper();
 
         @Override
@@ -189,72 +159,27 @@ public final class DraftReviewService {
         }
 
         private JsonNode fetchJson(String url, String token) {
-            URI uri = URI.create(url);
-            for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-                try {
-                    HttpRequest request =
-                            HttpRequest.newBuilder()
-                                    .uri(uri)
-                                    .timeout(TIMEOUT)
-                                    .header("Authorization", "Bearer " + token)
-                                    .header("Accept", "application/vnd.github.v3+json")
-                                    .header("X-GitHub-Api-Version", "2022-11-28")
-                                    .header("User-Agent", "pr-pilot-sidecar/0.1")
-                                    .GET()
-                                    .build();
-                    HttpResponse<String> response =
-                            httpClient.send(
-                                    request,
-                                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-                    int statusCode = response.statusCode();
-                    if (statusCode == 401 || statusCode == 403) {
-                        throw new PendingReviewFetchException(
-                                "not_authenticated",
-                                "Run 'gh auth login' in a terminal for this GitHub host.");
-                    }
-                    if (statusCode == 429) {
-                        if (attempt < MAX_ATTEMPTS) {
-                            backoff(attempt);
-                            continue;
-                        }
-                        throw new PendingReviewFetchException(
-                                "rate_limited", "GitHub rate limit exceeded. Try again shortly.");
-                    }
-                    if (statusCode < 200 || statusCode >= 300) {
-                        if (statusCode >= 500 && attempt < MAX_ATTEMPTS) {
-                            backoff(attempt);
-                            continue;
-                        }
-                        throw new PendingReviewFetchException(
-                                "api_failed", "GitHub API request failed.");
-                    }
-                    try {
-                        return mapper.readTree(response.body());
-                    } catch (IOException exception) {
-                        throw new PendingReviewFetchException(
-                                "api_failed", "GitHub API request failed.");
-                    }
-                } catch (IOException exception) {
-                    if (attempt == MAX_ATTEMPTS) {
-                        throw new PendingReviewFetchException(
-                                "network_error", "Unable to reach GitHub. Check your connection.");
-                    }
-                    backoff(attempt);
-                } catch (InterruptedException exception) {
-                    Thread.currentThread().interrupt();
-                    throw new PendingReviewFetchException(
-                            "network_error", "Unable to reach GitHub. Check your connection.");
-                }
+            GitHubResponse response = httpClient.get(url, token);
+            if (response.isUnauthenticated()) {
+                throw new PendingReviewFetchException(
+                        "not_authenticated",
+                        "Run 'gh auth login' in a terminal for this GitHub host.");
             }
-            throw new PendingReviewFetchException(
-                    "network_error", "Unable to reach GitHub. Check your connection.");
-        }
-
-        private void backoff(int attempt) {
+            if (response.isRateLimited()) {
+                throw new PendingReviewFetchException(
+                        "rate_limited", "GitHub rate limit exceeded. Try again shortly.");
+            }
+            if (response.isNetworkError()) {
+                throw new PendingReviewFetchException(
+                        "network_error", "Unable to reach GitHub. Check your connection.");
+            }
+            if (!response.isSuccess()) {
+                throw new PendingReviewFetchException("api_failed", "GitHub API request failed.");
+            }
             try {
-                Thread.sleep(250L * attempt);
-            } catch (InterruptedException exception) {
-                Thread.currentThread().interrupt();
+                return mapper.readTree(response.body());
+            } catch (IOException exception) {
+                throw new PendingReviewFetchException("api_failed", "GitHub API request failed.");
             }
         }
     }

@@ -1,15 +1,10 @@
 package com.jinloes.prpilot.sidecar;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
-import com.jinloes.prpilot.sidecar.pr.DraftReviewMutationService;
-import com.jinloes.prpilot.sidecar.pr.DraftReviewService;
-import com.jinloes.prpilot.sidecar.pr.PrDetailService;
-import com.jinloes.prpilot.sidecar.pr.PrDiffService;
-import com.jinloes.prpilot.sidecar.pr.PrListService;
-import com.jinloes.prpilot.sidecar.pr.PrSupplementalService;
-import com.jinloes.prpilot.sidecar.repo.RepoDetector;
-import com.jinloes.prpilot.sidecar.review.ReviewSessionService;
+import com.jinloes.prpilot.engine.GitHubEngine;
+import com.jinloes.prpilot.engine.GitHubEngineApi;
+import com.jinloes.prpilot.engine.ReviewEngineApi;
+import com.jinloes.prpilot.engine.ReviewSessionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.springframework.context.annotation.Bean;
@@ -27,48 +22,18 @@ class SidecarConfiguration {
         return new SidecarBootstrapService();
     }
 
+    /**
+     * The whole GitHub capability surface as one bean. Individual services stay internal to the
+     * engine so adding a capability means adding it to {@link GitHubEngineApi}, not threading
+     * another constructor argument through the sidecar.
+     */
     @Bean
-    RepoDetector repoDetector() {
-        return new RepoDetector();
+    GitHubEngineApi gitHubEngine() {
+        return new GitHubEngine();
     }
 
     @Bean
-    GitHubAuthService gitHubAuthService() {
-        return new GitHubAuthService();
-    }
-
-    @Bean
-    PrListService prListService() {
-        return new PrListService();
-    }
-
-    @Bean
-    PrDetailService prDetailService() {
-        return new PrDetailService();
-    }
-
-    @Bean
-    PrDiffService prDiffService() {
-        return new PrDiffService();
-    }
-
-    @Bean
-    DraftReviewService draftReviewService() {
-        return new DraftReviewService();
-    }
-
-    @Bean
-    DraftReviewMutationService draftReviewMutationService() {
-        return new DraftReviewMutationService();
-    }
-
-    @Bean
-    PrSupplementalService prSupplementalService() {
-        return new PrSupplementalService();
-    }
-
-    @Bean
-    ReviewSessionService reviewSessionService() {
+    ReviewEngineApi reviewEngine() {
         return new ReviewSessionService();
     }
 
@@ -93,29 +58,15 @@ class SidecarConfiguration {
             ObjectMapper objectMapper,
             StdioFrameCodec frameCodec,
             SidecarBootstrapService bootstrapService,
-            RepoDetector repoDetector,
-            GitHubAuthService gitHubAuthService,
-            PrListService prListService,
-            PrDetailService prDetailService,
-            PrDiffService prDiffService,
-            DraftReviewService draftReviewService,
-            DraftReviewMutationService draftReviewMutationService,
-            PrSupplementalService prSupplementalService,
-            ReviewSessionService reviewSessionService,
+            GitHubEngineApi gitHubEngine,
+            ReviewEngineApi reviewEngine,
             ExecutorService reviewExecutor) {
         return new StdioJsonRpcServer(
                 objectMapper,
                 frameCodec,
                 bootstrapService,
-                repoDetector,
-                gitHubAuthService,
-                prListService,
-                prDetailService,
-                prDiffService,
-                draftReviewService,
-                draftReviewMutationService,
-                prSupplementalService,
-                reviewSessionService,
+                gitHubEngine,
+                reviewEngine,
                 reviewExecutor);
     }
 }

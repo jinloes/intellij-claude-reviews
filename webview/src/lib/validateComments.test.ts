@@ -95,3 +95,122 @@ void test('validateComments does not match file against substring-without-bounda
   const sub = validateComments(diff, [comment('Action', 1)])
   assert.equal(sub.orphans.length, 1)
 })
+
+// Two hunks far apart in the same file: lines 10-12 and lines 200-202.
+const twoHunkDiff = [
+  'diff --git a/src/Far.ts b/src/Far.ts',
+  '--- a/src/Far.ts',
+  '+++ b/src/Far.ts',
+  '@@ -10,3 +10,3 @@',
+  ' ten',
+  '+eleven',
+  ' twelve',
+  '@@ -200,3 +200,3 @@',
+  ' two hundred',
+  '+two hundred one',
+  ' two hundred two',
+  '',
+].join('\n')
+
+void test('validateComments passes through a line that is already inside a hunk', () => {
+  const result = validateComments(twoHunkDiff, [comment('src/Far.ts', 201)])
+
+  assert.equal(result.orphans.length, 0)
+  assert.equal(result.adjusted[0].line, 201)
+  assert.equal(result.snappedCount, 0)
+})
+
+void test('validateComments snaps a near-miss line to its own hunk', () => {
+  // 14 is two lines past the first hunk's last line (12), so it snaps within that hunk.
+  const result = validateComments(twoHunkDiff, [comment('src/Far.ts', 14)])
+
+  assert.equal(result.orphans.length, 0)
+  assert.equal(result.adjusted[0].line, 12)
+  assert.equal(result.snappedCount, 1)
+})
+
+void test('validateComments orphans a line that is far from every hunk', () => {
+  const result = validateComments(twoHunkDiff, [comment('src/Far.ts', 100)])
+
+  assert.equal(result.adjusted.length, 0)
+  assert.equal(result.orphans.length, 1)
+})
+
+void test('validateComments orphans comments on a deleted file rather than mis-anchoring them', () => {
+  // A pure-deletion file has only `delete` changes, which carry no new-file line number, so it
+  // yields an empty line set and every comment on it orphans into the review body's "Comments not
+  // attached inline" section. That degradation is deliberate: anchoring these inline would need a
+  // `side: LEFT` field threaded through the bridge schema and both hosts, for a case the review
+  // prompt already forbids ("only comment on changed ('+') lines"). The comment still reaches the
+  // reviewer, just not inline.
+  const deletedFileDiff = [
+    'diff --git a/src/Gone.ts b/src/Gone.ts',
+    'deleted file mode 100644',
+    '--- a/src/Gone.ts',
+    '+++ /dev/null',
+    '@@ -1,3 +0,0 @@',
+    '-const a = 1',
+    '-const b = 2',
+    '-export { a, b }',
+    '',
+  ].join('\n')
+
+  const result = validateComments(deletedFileDiff, [comment('src/Gone.ts', 2)])
+
+  assert.equal(result.adjusted.length, 0)
+  assert.equal(result.orphans.length, 1)
+  assert.equal(result.orphans[0].file, 'src/Gone.ts')
+  assert.equal(result.snappedCount, 0)
+})
+
+void test('validateComments still anchors surviving files when the diff also deletes one', () => {
+  const mixedDiff = [
+    'diff --git a/src/Gone.ts b/src/Gone.ts',
+    'deleted file mode 100644',
+    '--- a/src/Gone.ts',
+    '+++ /dev/null',
+    '@@ -1,1 +0,0 @@',
+    '-const a = 1',
+    '',
+    'diff --git a/src/Kept.ts b/src/Kept.ts',
+    '--- a/src/Kept.ts',
+    '+++ b/src/Kept.ts',
+    '@@ -1,1 +1,1 @@',
+    '-old',
+    '+new',
+    '',
+  ].join('\n')
+
+  const result = validateComments(mixedDiff, [comment('src/Kept.ts', 1), comment('src/Gone.ts', 1)])
+
+  assert.equal(result.adjusted.length, 1)
+  assert.equal(result.adjusted[0].file, 'src/Kept.ts')
+  assert.equal(result.orphans.length, 1)
+  assert.equal(result.orphans[0].file, 'src/Gone.ts')
+})
+
+void test('validateComments does not snap across a hunk boundary', () => {
+  // Adjacent hunks separated by a two-line gap: 20-21 and 24-25. Line 22 and 23 sit in the gap
+  // and are within SNAP_RADIUS of both, so neither hunk owns them.
+  const adjacentHunkDiff = [
+    'diff --git a/src/Near.ts b/src/Near.ts',
+    '--- a/src/Near.ts',
+    '+++ b/src/Near.ts',
+    '@@ -20,2 +20,2 @@',
+    ' twenty',
+    '+twenty one',
+    '@@ -24,2 +24,2 @@',
+    ' twenty four',
+    '+twenty five',
+    '',
+  ].join('\n')
+
+  const result = validateComments(adjacentHunkDiff, [comment('src/Near.ts', 22), comment('src/Near.ts', 23)])
+
+  // A flat per-file line set would have snapped 22 → 21 and 23 → 24, silently attaching each
+  // comment to a hunk it does not belong to.
+  assert.equal(result.adjusted.length, 0)
+  assert.equal(result.orphans.length, 2)
+  assert.equal(result.snappedCount, 0)
+})
+

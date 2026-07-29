@@ -6,8 +6,8 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.Comparator;
+import java.util.List;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -79,7 +79,10 @@ class RepoGuidelinesReaderTest {
             List<String> resolved =
                     RepoGuidelinesReader.resolvePaths(
                             tempDir.toFile(),
-                            List.of(".linkedin/ai-agent/coding-pattern.md", "AGENTS.md", "MISSING.md"));
+                            List.of(
+                                    ".linkedin/ai-agent/coding-pattern.md",
+                                    "AGENTS.md",
+                                    "MISSING.md"));
             assertThat(resolved)
                     .containsExactly(".linkedin/ai-agent/coding-pattern.md", "AGENTS.md");
         }
@@ -114,8 +117,7 @@ class RepoGuidelinesReaderTest {
             write(".linkedin/ai-agent/coding-pattern.md", "pattern rules");
             String result =
                     RepoGuidelinesReader.read(
-                            tempDir.toFile(),
-                            List.of("AGENTS.md", ".linkedin/ai-agent/*.md"));
+                            tempDir.toFile(), List.of("AGENTS.md", ".linkedin/ai-agent/*.md"));
             assertThat(result)
                     .contains("## AGENTS.md\nagent rules")
                     .contains("## .linkedin/ai-agent/coding-pattern.md\npattern rules");
@@ -138,9 +140,10 @@ class RepoGuidelinesReaderTest {
         @Test
         void returnsEmptyForNullOrMissingDir() {
             assertThat(RepoGuidelinesReader.read(null, List.of("AGENTS.md"))).isEmpty();
-            assertThat(RepoGuidelinesReader.read(new File(tempDir.toFile(), "nope"), List.of("AGENTS.md")))
+            assertThat(
+                            RepoGuidelinesReader.read(
+                                    new File(tempDir.toFile(), "nope"), List.of("AGENTS.md")))
                     .isEmpty();
         }
     }
 }
-

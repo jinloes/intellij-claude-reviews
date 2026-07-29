@@ -31,31 +31,49 @@ function newLineOf(change: ChangeData): number | undefined {
   return undefined
 }
 
+/** Valid new-file lines of a single hunk, plus the span used to decide which hunk owns a line. */
+interface HunkLines {
+  lines: Set<number>
+  start: number
+  end: number
+}
+
 /**
- * Index: file path → set of new-file line numbers that are valid positions in the diff.
- * Stores both the displayed path (`file.newPath`) and the `b/`-prefixed path so the
- * suffix match in lookup works for either form Claude might emit.
+ * Index: file path → one entry per hunk. Stores the displayed path (`file.newPath`, falling back
+ * to `oldPath` for deletions) so the suffix match in lookup works for either form the model emits.
+ *
+ * Kept per-hunk rather than as one flat set per file: a flat set lets a comment snap from the end
+ * of one hunk into the start of the next, which anchors it to unrelated code.
  */
-function buildLineIndex(files: FileData[]): Map<string, Set<number>> {
-  const idx = new Map<string, Set<number>>()
+function buildLineIndex(files: FileData[]): Map<string, HunkLines[]> {
+  const idx = new Map<string, HunkLines[]>()
   for (const file of files) {
     const path = file.newPath !== '/dev/null' ? file.newPath : file.oldPath
     if (!path) continue
-    const lines = new Set<number>()
+    const hunks: HunkLines[] = []
     for (const hunk of file.hunks) {
+      const lines = new Set<number>()
       for (const change of hunk.changes) {
         const n = newLineOf(change)
         if (n !== undefined) lines.add(n)
       }
+      if (lines.size === 0) continue
+      let start = Number.MAX_SAFE_INTEGER
+      let end = -1
+      for (const n of lines) {
+        if (n < start) start = n
+        if (n > end) end = n
+      }
+      hunks.push({ lines, start, end })
     }
-    idx.set(path, lines)
+    idx.set(path, hunks)
   }
   return idx
 }
 
-function findValidLinesForFile(idx: Map<string, Set<number>>, file: string): Set<number> | null {
+function findValidLinesForFile(idx: Map<string, HunkLines[]>, file: string): HunkLines[] | null {
   if (idx.has(file)) return idx.get(file)!
-  const matches: Set<number>[] = []
+  const matches: HunkLines[][] = []
   for (const [key, val] of idx) {
     // Require a '/' boundary so e.g. "Action.java" does not match "UserAction.java".
     if (file === key || file.endsWith('/' + key) || key.endsWith('/' + file)) matches.push(val)
@@ -79,12 +97,41 @@ function nearestLine(target: number, lines: Set<number>): { line: number; distan
 }
 
 /**
+ * Resolves `target` to a real diff line within a single hunk.
+ *
+ * Returns the line unchanged when some hunk already contains it. Otherwise snaps only when
+ * exactly one hunk has a line within `SNAP_RADIUS`. Two qualifying hunks means the target sits in
+ * the gap between them and belongs to neither, so it is left unanchored rather than attached to
+ * whichever happens to be marginally nearer — a misattributed comment is worse than no comment.
+ */
+function resolveLine(
+  target: number,
+  hunks: HunkLines[],
+): { line: number; snapped: boolean } | null {
+  for (const hunk of hunks) {
+    if (hunk.lines.has(target)) return { line: target, snapped: false }
+  }
+
+  let candidate: number | null = null
+  for (const hunk of hunks) {
+    if (target < hunk.start - SNAP_RADIUS || target > hunk.end + SNAP_RADIUS) continue
+    const near = nearestLine(target, hunk.lines)
+    if (!near || near.distance > SNAP_RADIUS) continue
+    if (candidate !== null && candidate !== near.line) return null
+    candidate = near.line
+  }
+  return candidate === null ? null : { line: candidate, snapped: true }
+}
+
+/**
  * Partitions `comments` into inline-eligible (`adjusted`) and orphan (`orphans`) sets
  * based on whether each comment's (file, line) corresponds to a real position in `diff`.
  *
  * - In-hunk lines pass through unchanged.
- * - Lines within ±SNAP_RADIUS of the nearest hunk line are silently moved to that line.
+ * - Lines within ±SNAP_RADIUS of a line in exactly one hunk are silently moved to that line.
  *   Counting drift is the most common model failure mode and a small snap reliably fixes it.
+ *   Snapping is scoped to a single hunk, so a comment sitting in the gap between two hunks is
+ *   orphaned rather than pulled into whichever is nearer.
  * - Anything farther becomes an orphan — the host appends it to the body in a
  *   "Comments not attached inline" section instead of attempting an invalid inline POST.
  *
@@ -112,21 +159,21 @@ export function validateComments(diff: string, comments: LineComment[]): Validat
       adjusted.push(c)
       continue
     }
-    const lines = findValidLinesForFile(index, c.file)
-    if (!lines) {
+    const hunks = findValidLinesForFile(index, c.file)
+    if (!hunks) {
       orphans.push(c)
       continue
     }
-    if (lines.has(c.line)) {
-      adjusted.push(c)
+    const resolved = resolveLine(c.line, hunks)
+    if (!resolved) {
+      orphans.push(c)
       continue
     }
-    const near = nearestLine(c.line, lines)
-    if (near && near.distance <= SNAP_RADIUS) {
-      adjusted.push({ ...c, line: near.line })
+    if (resolved.snapped) {
+      adjusted.push({ ...c, line: resolved.line })
       snappedCount++
     } else {
-      orphans.push(c)
+      adjusted.push(c)
     }
   }
 

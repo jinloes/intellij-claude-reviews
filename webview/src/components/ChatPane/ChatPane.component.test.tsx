@@ -1,5 +1,6 @@
 import { act, render, screen, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi, type Mock } from 'vitest'
+import type { VerifyResult } from './structuredResult'
 import type { PR } from '../../bridge/types'
 import { ChatPane } from './ChatPane'
 
@@ -140,6 +141,114 @@ describe('ChatPane', () => {
     expect(await screen.findByText('Valid')).toBeVisible()
     expect(screen.getByText('Supported by the diff.')).toBeVisible()
     expect(screen.queryByText(/"verdict":"valid"/)).not.toBeInTheDocument()
+  })
+
+  function pushHostMessage(message: Record<string, unknown>) {
+    act(() => {
+      const hostWindow = window as unknown as { __handleMessage: (message: unknown) => void }
+      hostWindow.__handleMessage({ protocolVersion: 1, prKey: 'acme/widget#42', ...message })
+    })
+  }
+
+  function verifyJson(over: Record<string, unknown> = {}) {
+    return JSON.stringify({
+      verdict: 'invalid',
+      why: 'Already handled upstream.',
+      action: 'delete',
+      replacementComment: null,
+      ...over,
+    })
+  }
+
+  type ApplyVerifyMock = Mock<(result: VerifyResult, token: string) => void>
+
+  function newApplyMock(): ApplyVerifyMock {
+    return vi.fn<(result: VerifyResult, token: string) => void>()
+  }
+
+  async function renderWithPendingVerify(token: string, onApplyVerifyAction: ApplyVerifyMock) {
+    Object.assign(window, { cefQuery: vi.fn() })
+    const view = render(
+      <ChatPane
+        pr={pr}
+        pendingMessage={{ q: 'Verify this comment', ctx: '', id: 1, token }}
+        onApplyVerifyAction={onApplyVerifyAction}
+      />,
+    )
+    await screen.findByText('Verify this comment')
+    return view
+  }
+
+  it('applies a delete verdict to the comment the verification was requested for', async () => {
+    const onApplyVerifyAction = newApplyMock()
+    await renderWithPendingVerify('verify-1', onApplyVerifyAction)
+
+    pushHostMessage({ type: 'chatResponse', response: verifyJson() })
+
+    const applyButton = await screen.findByRole('button', { name: 'Delete this comment' })
+    applyButton.click()
+
+    expect(onApplyVerifyAction).toHaveBeenCalledTimes(1)
+    expect(onApplyVerifyAction.mock.calls[0][0]).toMatchObject({ action: 'delete' })
+    expect(onApplyVerifyAction.mock.calls[0][1]).toBe('verify-1')
+  })
+
+  it('offers a replace action for a revise verdict that carries replacement text', async () => {
+    const onApplyVerifyAction = newApplyMock()
+    await renderWithPendingVerify('verify-2', onApplyVerifyAction)
+
+    pushHostMessage({
+      type: 'chatResponse',
+      response: verifyJson({ action: 'revise', replacementComment: 'Narrow this to the null case.' }),
+    })
+
+    const applyButton = await screen.findByRole('button', { name: 'Replace comment text' })
+    applyButton.click()
+
+    expect(onApplyVerifyAction.mock.calls[0][0]).toMatchObject({
+      action: 'revise',
+      replacementComment: 'Narrow this to the null case.',
+    })
+  })
+
+  it('offers no action for a keep verdict, or a revise verdict with no replacement text', async () => {
+    const onApplyVerifyAction = newApplyMock()
+    const { unmount } = await renderWithPendingVerify('verify-3', onApplyVerifyAction)
+    pushHostMessage({ type: 'chatResponse', response: verifyJson({ verdict: 'valid', action: 'keep' }) })
+
+    expect(await screen.findByText(/Suggested action: Keep as-is/)).toBeVisible()
+    expect(screen.queryByRole('button', { name: /Delete this comment|Replace comment text/ })).not.toBeInTheDocument()
+    unmount()
+
+    await renderWithPendingVerify('verify-4', onApplyVerifyAction)
+    pushHostMessage({ type: 'chatResponse', response: verifyJson({ action: 'revise', replacementComment: '   ' }) })
+
+    expect(await screen.findByText(/Suggested action: Revise/)).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Replace comment text' })).not.toBeInTheDocument()
+  })
+
+  it('offers no action for a verdict that did not originate from a tracked verify request', async () => {
+    Object.assign(window, { cefQuery: vi.fn() })
+    render(<ChatPane pr={pr} onApplyVerifyAction={newApplyMock()} />)
+
+    pushHostMessage({ type: 'chatResponse', response: verifyJson() })
+
+    expect(await screen.findByText('Invalid')).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Delete this comment' })).not.toBeInTheDocument()
+  })
+
+  it('disables the apply button after it has been used so an action cannot be applied twice', async () => {
+    const onApplyVerifyAction = newApplyMock()
+    await renderWithPendingVerify('verify-5', onApplyVerifyAction)
+    pushHostMessage({ type: 'chatResponse', response: verifyJson() })
+
+    const applyButton = await screen.findByRole('button', { name: 'Delete this comment' })
+    act(() => applyButton.click())
+
+    const appliedButton = await screen.findByRole('button', { name: 'Applied' })
+    expect(appliedButton).toBeDisabled()
+    act(() => appliedButton.click())
+    expect(onApplyVerifyAction).toHaveBeenCalledTimes(1)
   })
 })
 

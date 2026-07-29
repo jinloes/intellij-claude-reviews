@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { LineComment } from '@/bridge/types'
-import { buildExampleFixPrompt, buildVerifyCommentPrompt } from './verifyPrompt'
+import { buildExampleFixPrompt, buildVerifyCommentPrompt, resolveVerifyTarget } from './verifyPrompt'
 
 const comment: LineComment = {
   file: 'src/auth.ts',
@@ -93,3 +93,40 @@ describe('buildExampleFixPrompt', () => {
     expect(prompt.context.match(/<\/draft_comment>/g)).toHaveLength(1)
   })
 })
+
+describe('resolveVerifyTarget', () => {
+  const other: LineComment = { file: 'src/other.ts', line: 9, type: 'note', body: 'unrelated' }
+
+  it('finds the target by object identity', () => {
+    expect(resolveVerifyTarget([other, comment], comment)).toBe(1)
+  })
+
+  it('finds an equal comment when the array was rebuilt', () => {
+    const rebuilt = [other, { ...comment }]
+    expect(resolveVerifyTarget(rebuilt, comment)).toBe(1)
+  })
+
+  it('returns -1 when the comment was deleted while verification was in flight', () => {
+    expect(resolveVerifyTarget([other], comment)).toBe(-1)
+  })
+
+  it('returns -1 when the body was edited, rather than applying a stale verdict', () => {
+    const edited = [{ ...comment, body: 'reworded by the reviewer' }]
+    expect(resolveVerifyTarget(edited, comment)).toBe(-1)
+  })
+
+  it('does not match a different comment that merely shares the body', () => {
+    const sameBodyElsewhere = [{ ...comment, file: 'src/elsewhere.ts' }]
+    expect(resolveVerifyTarget(sameBodyElsewhere, comment)).toBe(-1)
+  })
+
+  it('does not match the same comment text on a different line', () => {
+    const movedLine = [{ ...comment, line: comment.line + 1 }]
+    expect(resolveVerifyTarget(movedLine, comment)).toBe(-1)
+  })
+
+  it('returns -1 for an empty review', () => {
+    expect(resolveVerifyTarget([], comment)).toBe(-1)
+  })
+})
+

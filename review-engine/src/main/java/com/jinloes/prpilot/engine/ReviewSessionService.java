@@ -1,74 +1,47 @@
-package com.jinloes.prpilot.sidecar.review;
+package com.jinloes.prpilot.engine;
 
 import com.jinloes.prpilot.model.ChatMessage;
+import com.jinloes.prpilot.model.CiAnnotation;
+import com.jinloes.prpilot.model.LineComment;
 import com.jinloes.prpilot.model.PRReviewRequest;
 import com.jinloes.prpilot.model.PullRequest;
 import com.jinloes.prpilot.model.ReviewResult;
 import com.jinloes.prpilot.review.ClaudeService;
 import com.jinloes.prpilot.review.CopilotService;
+import com.jinloes.prpilot.review.ReviewOutcomeLog;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
- * Sidecar-side orchestrator that drives the shared {@code review-engine} Claude/Copilot services on
- * behalf of the VS Code extension, over JSON-RPC instead of an in-process Java call (as the
- * IntelliJ plugin uses directly).
+ * Default {@link ReviewEngineApi} implementation: dispatches to the Claude or Copilot provider
+ * service and adapts transport-neutral request records into {@link PRReviewRequest}.
+ *
+ * <p>Lives in {@code review-engine} rather than the sidecar so every client can reach it the same
+ * way — the sidecar wraps it in JSON-RPC for VS Code, while an in-process client (IntelliJ, a
+ * future CLI) can call it directly. It has no transport, Spring, or IDE dependencies.
  *
  * <p>Holds the currently-active provider instance so {@link #cancel()} can reach it; only one
- * review or chat request is ever in flight per sidecar process, matching the existing IntelliJ
- * behavior ("only one has an active process at any time").
+ * review or chat request is ever in flight per instance, matching IntelliJ's "only one active
+ * process at any time" behavior.
  */
-public class ReviewSessionService {
+public class ReviewSessionService implements ReviewEngineApi {
 
     private final AtomicReference<ClaudeService> activeClaude = new AtomicReference<>();
     private final AtomicReference<CopilotService> activeCopilot = new AtomicReference<>();
+    private final ReviewOutcomeLog outcomeLog;
 
-    public record PrParams(
-            String title,
-            String htmlUrl,
-            String owner,
-            String repo,
-            int number,
-            String body,
-            String author,
-            String createdAt,
-            boolean isDraft) {}
+    public ReviewSessionService() {
+        this(new ReviewOutcomeLog());
+    }
 
-    public record GenerateReviewParams(
-            String provider,
-            String projectDir,
-            String model,
-            String effort,
-            boolean inheritMcp,
-            String configDir,
-            boolean selfCritique,
-            PrParams pr,
-            String diff,
-            String knownPatterns,
-            String priorReview,
-            String existingReviews,
-            String repoGuidelines,
-            String focusAreas,
-            String customInstructions) {}
-
-    public record ChatMessageParam(String role, String content) {}
-
-    public record ChatParams(
-            String provider,
-            String projectDir,
-            String effort,
-            boolean inheritMcp,
-            String configDir,
-            String prContext,
-            List<ChatMessageParam> history,
-            String userMessage,
-            String rawPrompt) {}
-
-    /** Result of {@code reviews/chat}: the complete assistant response text. */
-    public record ChatResult(String content) {}
+    /** Test seam so outcome logging can be pointed at a temp file. */
+    public ReviewSessionService(ReviewOutcomeLog outcomeLog) {
+        this.outcomeLog = outcomeLog;
+    }
 
     private static PullRequest toPullRequest(PrParams p) {
         return new PullRequest(
@@ -83,21 +56,25 @@ public class ReviewSessionService {
                 p.isDraft());
     }
 
+    @Override
     public ReviewResult generate(
             GenerateReviewParams params,
             Consumer<String> onStatus,
             BiConsumer<String, String> onChunk)
             throws IOException, InterruptedException {
         PRReviewRequest request =
-                new PRReviewRequest(
-                        toPullRequest(params.pr()),
-                        params.diff(),
-                        params.knownPatterns(),
-                        params.priorReview(),
-                        params.existingReviews(),
-                        params.repoGuidelines(),
-                        params.focusAreas(),
-                        params.customInstructions());
+                PRReviewRequest.builder(toPullRequest(params.pr()), params.diff())
+                        .priorReview(params.priorReview())
+                        .existingReviews(params.existingReviews())
+                        .repoGuidelines(params.repoGuidelines())
+                        .focusAreas(params.focusAreas())
+                        .customInstructions(params.customInstructions())
+                        .ciStatus(params.ciStatus())
+                        .commits(params.commits())
+                        .linkedIssue(params.linkedIssue())
+                        .repoProfile(params.repoProfile())
+                        .ciAnnotations(toCiAnnotations(params.ciAnnotations()))
+                        .build();
         if ("copilot".equals(params.provider())) {
             CopilotService service = new CopilotService(params.projectDir());
             activeCopilot.set(service);
@@ -125,6 +102,7 @@ public class ReviewSessionService {
         }
     }
 
+    @Override
     public ChatResult chat(ChatParams params, Consumer<String> onChunk)
             throws IOException, InterruptedException {
         boolean focused = params.rawPrompt() != null;
@@ -179,11 +157,50 @@ public class ReviewSessionService {
         }
     }
 
-    /** Cancels whichever provider currently has an active request; a no-op if none is active. */
+    @Override
     public void cancel() {
         ClaudeService claude = activeClaude.get();
         if (claude != null) claude.cancelCurrentRequest();
         CopilotService copilot = activeCopilot.get();
         if (copilot != null) copilot.cancelCurrentRequest();
+    }
+
+    @Override
+    public RecordOutcomeResult recordOutcome(RecordOutcomeParams params) {
+        if (params == null) return new RecordOutcomeResult(0);
+        ReviewOutcomeLog.Metadata metadata =
+                new ReviewOutcomeLog.Metadata(
+                        ClaudeService.PROMPT_VERSION, params.provider(), params.model());
+        int recorded =
+                outcomeLog.record(
+                        toLineComments(params.generated()),
+                        toLineComments(params.submitted()),
+                        metadata);
+        return new RecordOutcomeResult(recorded);
+    }
+
+    private static List<LineComment> toLineComments(List<OutcomeCommentParam> params) {
+        if (params == null) return List.of();
+        List<LineComment> comments = new ArrayList<>(params.size());
+        for (OutcomeCommentParam param : params) {
+            if (param == null) continue;
+            LineComment comment =
+                    new LineComment(param.file(), param.line(), param.type(), param.body());
+            comment.setSeverity(param.severity());
+            comment.setConfidence(param.confidence());
+            comments.add(comment);
+        }
+        return comments;
+    }
+
+    private static List<CiAnnotation> toCiAnnotations(List<CiAnnotationParam> params) {
+        if (params == null) return List.of();
+        List<CiAnnotation> annotations = new ArrayList<>(params.size());
+        for (CiAnnotationParam param : params) {
+            if (param == null) continue;
+            annotations.add(
+                    new CiAnnotation(param.file(), param.line(), param.level(), param.message()));
+        }
+        return annotations;
     }
 }

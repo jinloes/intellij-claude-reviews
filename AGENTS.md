@@ -19,42 +19,74 @@ Update docs as part of each coding task:
 - Keep this file focused on workflow rules; keep implementation details in code.
 - Prefer updating `ARCHITECTURE.md` over adding architectural detail here.
 
-## IntelliJ <-> VS Code sync obligations
+## Host parity obligations
 
-**Feature parity is mandatory.** Every user-facing feature must work in both the IntelliJ plugin and the VS Code extension. When you add or change a feature in one host, implement the equivalent in the other host in the same change — do not ship a feature to only one host. If a true platform constraint makes parity impossible, document the gap and the reason in `ARCHITECTURE.md` "Key design decisions" and call it out explicitly in the PR description. Logic that belongs in shared code goes in `core` (plain Java 17 JVM module — no Kotlin) or `review-engine`/`github-engine` (JVM-only, used by both IntelliJ directly and the sidecar for VS Code); host wiring is mirrored between `WebviewPanel.java`/`PRToolWindowFactory.java` and `vscode-extension/src/extension.ts`.
+### The capability rule
 
-AI review/chat generation (Claude CLI, Copilot SDK), prompt building, and review-JSON parsing have
-one implementation in `review-engine`, shared by IntelliJ (in-process via `IntellijClaudeService`)
-and VS Code (over the sidecar's `reviews/generate`/`reviews/chat`/`reviews/cancel` JSON-RPC methods).
-Do not reintroduce a duplicate CLI-spawning implementation in `vscode-extension/src/claude.ts` or
-`copilot.ts` — those files should stay limited to prompt-building helpers still needed client-side
-(`buildFocusedChatPrompt`), binary-availability preflight, and Copilot model discovery (no sidecar
-RPC endpoint for that yet).
+**Engine capabilities are defined once and exposed everywhere.** The full capability surface of each
+engine is declared as an interface:
 
-When logic changes in one host, update the parallel file in the other host:
+- `github-engine`: `com.jinloes.prpilot.engine.GitHubEngineApi`
+- `review-engine`: `com.jinloes.prpilot.engine.ReviewEngineApi`
 
-GitHub authentication, HTTP, query, repository detection, diff, and review mutation behavior has
-one implementation in `github-engine`. Do not add host-local GitHub behavior or fallback transport;
-mirror only the IntelliJ direct adapter and VS Code sidecar RPC wiring when capabilities change.
+Each interface carries an `RPC_METHODS` map from Java method name to JSON-RPC wire name.
+`sidecar/StdioJsonRpcServer` must register a handler for every entry.
+
+This is **enforced by `EngineCapabilityCoverageTest`** in the sidecar module, which fails the build if
+a capability is declared without a wire name, exposed without being declared, or declared without
+being registered. Do not maintain this mapping by hand — add the method to the interface, add its
+`RPC_METHODS` entry, and register the handler; the test tells you if you missed a step.
+
+### What parity does and does not require
+
+**Required:** every capability is reachable by every host. A capability lives in `core`,
+`github-engine`, or `review-engine` — never in a host. Do not add host-local GitHub behavior,
+fallback transport, or a second CLI-spawning review implementation in
+`vscode-extension/src/claude.ts` or `copilot.ts`.
+
+**Not required:** that every host *consumes* every capability on the same day. A host may lag in
+surfacing a capability in its UI. What is never acceptable is a host working around a missing
+capability by re-implementing it locally.
+
+**But record the lag as a lag.** The coverage test proves a capability is *reachable*, not that any
+host *calls* it. Phase 1's four context capabilities sat exposed-but-uncalled in VS Code for months
+while the plan read `✅ DONE`, so every VS Code review shipped with empty CI/commits/issue/profile
+prompt sections. When you ship a capability a host does not yet consume, say so explicitly in the
+plan and the PR description — do not mark the work complete.
+
+If a genuine platform constraint makes a capability impossible in one host, document the gap and the
+reason in `ARCHITECTURE.md` "Key design decisions" and call it out in the PR description.
+
+### VS Code support floor
+
+VS Code is a first-class host, not a port. Concretely:
+
+- Every engine capability is exposed over the sidecar (test-enforced above).
+- Any user-facing feature built on engine capabilities must have a VS Code path in the same change,
+  or a documented gap. UI polish may differ; access to functionality may not.
+- The sidecar is the only VS Code transport. No direct `gh`/CLI invocation from the extension.
+
+### Remaining hand-mirrored logic
+
+These are **not** covered by the coverage test because they are genuinely duplicated implementations
+or per-host wiring. Treat this list as tech debt, not as a pattern to extend — do not add rows
+without justification.
 
 | Changed file | Must also update |
 |---|---|
-| `review-engine/ClaudeService.java` prompt constants (`REVIEW_INSTRUCTIONS`, `CHAT_PERSONA`) | `vscode-extension/src/claude.ts` same constants |
-| `review-engine/ClaudeService.java` `buildPrompt`/`buildChatPrompt`/`buildFocusedChatPrompt` | `vscode-extension/src/claude.ts` same functions |
-| `review-engine/ClaudeService.java` `reviewPR`/`chat`/stream-json parsing/max-turns resume | `sidecar/review/ReviewSessionService.java` call sites (no separate VS Code implementation — it routes through the sidecar) |
+| `review-engine/ClaudeService.java` `CHAT_PERSONA` | `vscode-extension/src/claude.ts` same constant |
+| `review-engine/ClaudeService.java` `buildFocusedChatPrompt` | `vscode-extension/src/claude.ts` same function |
 | `review-engine/GitWorktreeService.java` worktree create/remove/find-root logic | `vscode-extension/src/worktree.ts` matching functions |
 | `WebviewPanel.resolvePrClaudeService`/worktree lifecycle | `vscode-extension/src/extension.ts` `resolveWorkingDir`/`clearWorktree` |
 | `PRNotificationService` poll/source-labeling/merge logic | `vscode-extension/src/notifications.ts` + `extension.ts` `PRNotificationPoller.poll` |
 | `review-engine/BinaryLocator.java` | `vscode-extension/src/claude.ts` + `vscode-extension/src/copilot.ts` binary-probing candidates |
 | `review-engine/RepoGuidelinesReader.java` glob/scan/read logic | `vscode-extension/src/guidelines.ts` same functions (`globToRegex`, `resolvePaths`, `readRepoGuidelines`) |
-| `review-engine/CopilotService.java` SDK session setup, stream events, effort normalization | `sidecar/review/ReviewSessionService.java` call sites |
 | `review-engine/CopilotModelDiscovery.java` model probing / `PluginSettingsComponent` model combo | `vscode-extension/src/copilot.ts` `listModels`/`filterModelIds` + `extension.ts` `selectCopilotModel` command |
 | `PluginSettingsComponent` settings UI (provider-aware model selector, effort, base URL) | `vscode-extension/src/settings.ts` + `settingsView.ts` settings webview |
 | `review-engine/CopilotService.DEFAULT_REASONING_EFFORT` | `vscode-extension/src/copilot.ts` |
 | `webview/src/bridge/types.ts` message schemas | `WebviewPanel.java` and `vscode-extension/src/extension.ts` handlers |
 | `PluginSettings` adding new setting | `vscode-extension/package.json` config contribution + `vscode-extension/src/extension.ts` reader |
-| `github-engine` public capability/result changes | `IntellijGitHubService.java`, `sidecar/StdioJsonRpcServer.java`, and `vscode-extension/src/sidecar.ts` wiring |
-| `sidecar/StdioJsonRpcServer.java` `reviews/*` methods or notification shapes | `vscode-extension/src/sidecar.ts` `generateReview`/`chatReview`/`cancelReview` and notification dispatch |
+| Any new wire method or notification shape | `vscode-extension/src/sidecar.ts` client wiring (the test enforces the *server* side only) |
 
 ## Testing conventions
 

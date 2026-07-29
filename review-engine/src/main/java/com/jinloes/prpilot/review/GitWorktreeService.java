@@ -5,7 +5,9 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -16,10 +18,16 @@ import org.slf4j.LoggerFactory;
  * currently checked-out branch, improving review accuracy for type lookups and cross-file
  * references. The shared git object store means no re-clone is needed — only the working tree files
  * are written for the new worktree.
+ *
+ * <p>Worktrees are pinned to the PR's head commit rather than its branch tip, so the tree the agent
+ * reads matches the diff being reviewed even if the contributor pushes mid-review.
  */
 public class GitWorktreeService {
 
     private static final Logger log = LoggerFactory.getLogger(GitWorktreeService.class);
+
+    /** Abbreviated or full hex object name; anything else is never passed to git as a revision. */
+    private static final Pattern HEX_OBJECT_NAME = Pattern.compile("[0-9a-fA-F]{7,64}");
 
     /**
      * Walks up from {@code startDir} to find the git repository root — the closest ancestor
@@ -44,20 +52,25 @@ public class GitWorktreeService {
     }
 
     /**
-     * Creates a git worktree at {@code worktreeDir} checked out to {@code origin/<branch>}.
+     * Creates a git worktree at {@code worktreeDir} pinned to {@code headSha}, the commit the
+     * reviewed diff was rendered at.
      *
-     * <p>Runs {@code git fetch origin <branch>} first so the ref is current, then {@code git
-     * worktree add --detach <worktreeDir> origin/<branch>}.
+     * <p>Runs {@code git fetch origin <branch>} first so the commit is available, then {@code git
+     * worktree add --detach <worktreeDir> <headSha>}, falling back to {@code origin/<branch>} when
+     * the SHA is unusable (see {@link #pinnedCommitish}).
      *
      * @param repoDir git repository root (must contain {@code .git})
      * @param branch branch name on the origin remote (without the {@code origin/} prefix)
+     * @param headSha PR head commit the diff was rendered at; blank falls back to the branch tip
      * @param worktreeDir destination path for the worktree; must not exist
      * @throws IOException if a git command fails or times out
      */
-    public void createWorktree(File repoDir, String branch, File worktreeDir) throws IOException {
+    public void createWorktree(File repoDir, String branch, String headSha, File worktreeDir)
+            throws IOException {
         log.info("Fetching branch {} from origin in {}", branch, repoDir);
         runGit(repoDir, 60, "fetch", "origin", branch);
-        log.info("Creating worktree at {} for origin/{}", worktreeDir, branch);
+        String commitish = pinnedCommitish(repoDir, headSha, "origin/" + branch);
+        log.info("Creating worktree at {} for {}", worktreeDir, commitish);
         runGit(
                 repoDir,
                 30,
@@ -65,27 +78,32 @@ public class GitWorktreeService {
                 "add",
                 "--detach",
                 worktreeDir.getAbsolutePath(),
-                "origin/" + branch);
+                commitish);
     }
 
     /**
      * Creates a git worktree at {@code worktreeDir} by fetching a branch from a fork's remote URL.
      * Use this for fork PRs where the branch is not available on {@code origin}.
      *
-     * <p>Runs {@code git fetch <forkCloneUrl> <branch>} then {@code git worktree add --detach
-     * <worktreeDir> FETCH_HEAD}.
+     * <p>Runs {@code git fetch <forkCloneUrl> <branch>} then pins to {@code headSha}, falling back
+     * to {@code FETCH_HEAD}. Forks need the same pinning as origin branches: {@code FETCH_HEAD} is
+     * the fork branch's tip at fetch time, which is exactly the moving target being avoided.
      *
      * @param repoDir git repository root
      * @param forkCloneUrl HTTPS or SSH clone URL of the fork
      * @param branch branch name on the fork
+     * @param headSha PR head commit the diff was rendered at; blank falls back to {@code
+     *     FETCH_HEAD}
      * @param worktreeDir destination path for the worktree; must not exist
      * @throws IOException if a git command fails or times out
      */
     public void createWorktreeFromFork(
-            File repoDir, String forkCloneUrl, String branch, File worktreeDir) throws IOException {
+            File repoDir, String forkCloneUrl, String branch, String headSha, File worktreeDir)
+            throws IOException {
         log.info("Fetching branch {} from fork {} in {}", branch, forkCloneUrl, repoDir);
         runGit(repoDir, 120, "fetch", forkCloneUrl, branch);
-        log.info("Creating worktree at {} from FETCH_HEAD", worktreeDir);
+        String commitish = pinnedCommitish(repoDir, headSha, "FETCH_HEAD");
+        log.info("Creating worktree at {} from {}", worktreeDir, commitish);
         runGit(
                 repoDir,
                 30,
@@ -93,7 +111,44 @@ public class GitWorktreeService {
                 "add",
                 "--detach",
                 worktreeDir.getAbsolutePath(),
-                "FETCH_HEAD");
+                commitish);
+    }
+
+    /**
+     * Returns {@code headSha} when the fetch made that exact commit available locally, otherwise
+     * {@code branchTipRef}.
+     *
+     * <p>The reviewed diff was rendered at {@code headSha}, but a branch tip is a *moving* target:
+     * a push between rendering the diff and building the worktree would otherwise leave the agent
+     * grepping code that is not under review. Normally the tip is a descendant of the reviewed
+     * commit, so the fetch brings the commit along and pinning succeeds.
+     *
+     * <p>Falls back rather than failing. A force-push can orphan the reviewed commit, and a
+     * slightly-stale worktree is still far better than the alternative — callers treat worktree
+     * creation failure as "use the user's own checkout", which is a much worse tree to read.
+     */
+    String pinnedCommitish(File repoDir, String headSha, String branchTipRef) {
+        if (StringUtils.isBlank(headSha)) return branchTipRef;
+        if (!HEX_OBJECT_NAME.matcher(headSha).matches()) {
+            // headSha comes from the GitHub API response; never hand git an argument that could
+            // be read as an option or a different revision.
+            log.warn("Ignoring malformed head SHA '{}'; using {}", headSha, branchTipRef);
+            return branchTipRef;
+        }
+        if (commitExists(repoDir, headSha)) return headSha;
+        log.warn(
+                "Head commit {} unavailable after fetch (force-push?); using {} instead",
+                headSha,
+                branchTipRef);
+        return branchTipRef;
+    }
+
+    private boolean commitExists(File repoDir, String sha) {
+        try {
+            return execGit(repoDir, 15, "cat-file", "-e", sha + "^{commit}").exitCode() == 0;
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     /**
@@ -113,6 +168,27 @@ public class GitWorktreeService {
     }
 
     void runGit(File dir, long timeoutSeconds, String... args) throws IOException {
+        GitResult result = execGit(dir, timeoutSeconds, args);
+        if (result.exitCode() != 0) {
+            String trimmed = result.output().trim();
+            throw new IOException(
+                    "git "
+                            + args[0]
+                            + " failed (exit "
+                            + result.exitCode()
+                            + "): "
+                            + trimmed.substring(0, Math.min(300, trimmed.length())));
+        }
+    }
+
+    /** Exit code and combined output of a git invocation. */
+    private record GitResult(int exitCode, String output) {}
+
+    /**
+     * Runs git and returns its exit code instead of throwing, so callers can probe for a condition
+     * (such as whether a commit exists) without treating a non-zero exit as an error.
+     */
+    private GitResult execGit(File dir, long timeoutSeconds, String... args) throws IOException {
         List<String> cmd = new ArrayList<>();
         cmd.add("git");
         cmd.addAll(List.of(args));
@@ -134,16 +210,6 @@ public class GitWorktreeService {
             process.destroyForcibly();
             throw new IOException("git " + args[0] + " timed out after " + timeoutSeconds + "s");
         }
-        int exitCode = process.exitValue();
-        if (exitCode != 0) {
-            String trimmed = output.trim();
-            throw new IOException(
-                    "git "
-                            + args[0]
-                            + " failed (exit "
-                            + exitCode
-                            + "): "
-                            + trimmed.substring(0, Math.min(300, trimmed.length())));
-        }
+        return new GitResult(process.exitValue(), output);
     }
 }

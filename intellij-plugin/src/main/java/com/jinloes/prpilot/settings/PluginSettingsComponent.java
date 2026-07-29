@@ -302,11 +302,13 @@ public class PluginSettingsComponent {
     public JPanel getPanel() {
         if (rootPanel == null) {
             // Hard-cap the form width so input fields don't stretch across a wide Settings dialog.
-            // BoxLayout is the one standard layout that honors maximumSize, so it clamps the form to
+            // BoxLayout is the one standard layout that honors maximumSize, so it clamps the form
+            // to
             // MAX_FORM_WIDTH even when its preferred width is larger; the trailing glue eats the
             // remaining horizontal space. Height is left unbounded so toggling advanced options can
             // still grow the panel.
-            mainPanel.setMaximumSize(new java.awt.Dimension(JBUI.scale(MAX_FORM_WIDTH), Integer.MAX_VALUE));
+            mainPanel.setMaximumSize(
+                    new java.awt.Dimension(JBUI.scale(MAX_FORM_WIDTH), Integer.MAX_VALUE));
             mainPanel.setAlignmentY(Component.TOP_ALIGNMENT);
             rootPanel = new JPanel();
             rootPanel.setLayout(new BoxLayout(rootPanel, BoxLayout.X_AXIS));
@@ -466,7 +468,8 @@ public class PluginSettingsComponent {
     private static void boundComboWidth(JComboBox<?> combo) {
         combo.setAlignmentX(Component.LEFT_ALIGNMENT);
         combo.setMaximumSize(
-                new java.awt.Dimension(JBUI.scale(MODEL_COMBO_WIDTH), combo.getPreferredSize().height));
+                new java.awt.Dimension(
+                        JBUI.scale(MODEL_COMBO_WIDTH), combo.getPreferredSize().height));
     }
 
     private static JBLabel hintLabel(String html) {
@@ -482,7 +485,11 @@ public class PluginSettingsComponent {
         }
         JBLabel label =
                 new JBLabel(
-                        "<html><div style='width:" + JBUI.scale(480) + "px'>" + inner + "</div></html>");
+                        "<html><div style='width:"
+                                + JBUI.scale(480)
+                                + "px'>"
+                                + inner
+                                + "</div></html>");
         label.setBorder(JBUI.Borders.emptyTop(2));
         return label;
     }

@@ -21,6 +21,7 @@ import com.intellij.ui.jcef.JBCefJSQuery;
 import com.intellij.util.Alarm;
 import com.intellij.util.ui.UIUtil;
 import com.jinloes.prpilot.model.ChatMessage;
+import com.jinloes.prpilot.model.CiAnnotation;
 import com.jinloes.prpilot.model.LineComment;
 import com.jinloes.prpilot.model.PRReviewRequest;
 import com.jinloes.prpilot.model.PullRequest;
@@ -30,6 +31,7 @@ import com.jinloes.prpilot.review.ClaudeService;
 import com.jinloes.prpilot.review.CopilotService;
 import com.jinloes.prpilot.review.GitWorktreeService;
 import com.jinloes.prpilot.review.RepoGuidelinesReader;
+import com.jinloes.prpilot.review.ReviewOutcomeLog;
 import com.jinloes.prpilot.services.IntellijClaudeService;
 import com.jinloes.prpilot.services.IntellijGitHubService;
 import com.jinloes.prpilot.services.PendingReviewIndex;
@@ -190,6 +192,15 @@ public class WebviewPanel implements Disposable {
     private volatile List<PullRequest> cachedPRs = List.of();
     private volatile PullRequest activePR = null;
     private volatile ReviewResult lastResult = null;
+
+    /**
+     * The review exactly as the model produced it, kept alongside {@link #lastResult} because
+     * {@code handleSaveDraft} overwrites that with the reviewer's edits. Outcome logging needs both
+     * sides of the diff, and this is the only place the unedited version survives.
+     */
+    private volatile ReviewResult generatedResult = null;
+
+    private final ReviewOutcomeLog outcomeLog = new ReviewOutcomeLog();
     private volatile String pendingReviewId = null;
     private volatile String pendingReviewKey = null;
     private volatile long selectionRevision = 0;
@@ -898,6 +909,36 @@ public class WebviewPanel implements Disposable {
                                 }
                             }
 
+                            // Prompt context. Each of these is additive: a failure degrades the
+                            // prompt by one section and must never fail the review, so unlike the
+                            // diff none of them abort the flow.
+                            String ciStatus = "";
+                            List<CiAnnotation> ciAnnotations = List.of();
+                            try {
+                                String headSha = ghSvc.getPRHeadSha(owner, repo, number);
+                                if (StringUtils.isNotBlank(headSha)) {
+                                    IntellijGitHubService.CheckContext checks =
+                                            ghSvc.getCheckContext(owner, repo, headSha);
+                                    ciStatus = checks.summary();
+                                    ciAnnotations = checks.annotations();
+                                }
+                            } catch (Exception e) {
+                                log.warn("getCheckContext failed: {}", e.getMessage());
+                            }
+                            String commits = "";
+                            try {
+                                commits = ghSvc.getCommitsSummary(owner, repo, number);
+                            } catch (Exception e) {
+                                log.warn("getCommitsSummary failed: {}", e.getMessage());
+                            }
+                            String linkedIssue = "";
+                            try {
+                                linkedIssue =
+                                        ghSvc.getLinkedIssueSummary(owner, repo, finalPr.getBody());
+                            } catch (Exception e) {
+                                log.warn("getLinkedIssueSummary failed: {}", e.getMessage());
+                            }
+
                             IntellijClaudeService reviewService = claudeService;
                             try {
                                 reviewService = resolvePrClaudeService(finalPr, true);
@@ -947,16 +988,28 @@ public class WebviewPanel implements Disposable {
                                             ? overrideCustomInstructions
                                             : PluginSettings.getInstance()
                                                     .getReviewCustomInstructions();
+                            final String finalCiStatus = ciStatus;
+                            final List<CiAnnotation> finalCiAnnotations = ciAnnotations;
+                            final String finalCommits = commits;
+                            final String finalLinkedIssue = linkedIssue;
+                            final String finalRepoProfile =
+                                    guidelinesDir == null
+                                            ? ""
+                                            : ghSvc.getRepoProfileSummary(
+                                                    guidelinesDir.getAbsolutePath());
                             finalReviewService.reviewPR(
-                                    new PRReviewRequest(
-                                            finalPr,
-                                            finalDiff,
-                                            "",
-                                            finalPriorReview,
-                                            finalExisting,
-                                            finalGuidelines,
-                                            finalFocusAreas,
-                                            finalCustomInstructions),
+                                    PRReviewRequest.builder(finalPr, finalDiff)
+                                            .priorReview(finalPriorReview)
+                                            .existingReviews(finalExisting)
+                                            .repoGuidelines(finalGuidelines)
+                                            .focusAreas(finalFocusAreas)
+                                            .customInstructions(finalCustomInstructions)
+                                            .ciStatus(finalCiStatus)
+                                            .commits(finalCommits)
+                                            .linkedIssue(finalLinkedIssue)
+                                            .repoProfile(finalRepoProfile)
+                                            .ciAnnotations(finalCiAnnotations)
+                                            .build(),
                                     statusMsg ->
                                             publishIfCurrent(
                                                     finalPr,
@@ -987,6 +1040,7 @@ public class WebviewPanel implements Disposable {
                                             return;
                                         }
                                         lastResult = result;
+                                        generatedResult = result;
                                         pendingReviewId = null;
                                         pushMessage(
                                                 new ReviewResultMsg(
@@ -1124,15 +1178,49 @@ public class WebviewPanel implements Disposable {
         }
 
         pendingIndex.remove(owner, repo, number);
+        recordReviewOutcome(generatedResult, lastResult);
         if (StringUtils.equals(pendingReviewId, reviewId)
                 && StringUtils.equals(pendingReviewKey, key)) {
             lastResult = null;
+            generatedResult = null;
             pendingReviewId = null;
             pendingReviewKey = null;
         }
 
         pushMessage(new SimpleMsg("reviewSubmitted", key));
         pushMessage(new PrDraftStatusMsg("prDraftStatusUpdated", number, owner, repo, false));
+    }
+
+    /**
+     * Logs what the reviewer did with each generated comment. Runs off the EDT and swallows
+     * everything: the review has already been submitted, so instrumentation must not report an
+     * error or block the UI. A no-op when the generated review is unavailable (a draft loaded from
+     * GitHub in a later session was never generated locally, so there is nothing to compare).
+     */
+    private void recordReviewOutcome(ReviewResult generated, ReviewResult submitted) {
+        if (generated == null) return;
+        String provider =
+                PluginSettings.getInstance()
+                        .getReviewProvider()
+                        .name()
+                        .toLowerCase(java.util.Locale.ROOT);
+        String model = PluginSettings.getInstance().getActiveReviewModel();
+        List<LineComment> generatedComments = generated.getLineComments();
+        List<LineComment> submittedComments =
+                submitted == null ? List.of() : submitted.getLineComments();
+        getApplication()
+                .executeOnPooledThread(
+                        () -> {
+                            try {
+                                outcomeLog.record(
+                                        generatedComments,
+                                        submittedComments,
+                                        new ReviewOutcomeLog.Metadata(
+                                                ClaudeService.PROMPT_VERSION, provider, model));
+                            } catch (Exception e) {
+                                log.warn("Review outcome logging failed: {}", e.getMessage());
+                            }
+                        });
     }
 
     // --- deleteDraft ---
@@ -1311,8 +1399,8 @@ public class WebviewPanel implements Disposable {
     }
 
     /**
-     * Reads repo review-guidance docs from {@code dir} (the PR-branch worktree or project base
-     * dir) using the user-configured guidance globs, so the model can weight findings against the
+     * Reads repo review-guidance docs from {@code dir} (the PR-branch worktree or project base dir)
+     * using the user-configured guidance globs, so the model can weight findings against the
      * project's own review conventions. Returns an empty string when none are found. Delegates to
      * the shared {@link RepoGuidelinesReader} (mirrored in VS Code's {@code guidelines.ts}).
      */
@@ -1398,9 +1486,9 @@ public class WebviewPanel implements Disposable {
                     new java.io.File(System.getProperty("java.io.tmpdir"), "pr-pilot-wt-" + unique);
             if (headInfo.isFork()) {
                 worktreeService.createWorktreeFromFork(
-                        detectedRoot, headInfo.forkCloneUrl(), headInfo.ref(), wt);
+                        detectedRoot, headInfo.forkCloneUrl(), headInfo.ref(), headInfo.sha(), wt);
             } else {
-                worktreeService.createWorktree(detectedRoot, headInfo.ref(), wt);
+                worktreeService.createWorktree(detectedRoot, headInfo.ref(), headInfo.sha(), wt);
             }
 
             // Phase 3: write results under lock; double-check the PR hasn't changed.

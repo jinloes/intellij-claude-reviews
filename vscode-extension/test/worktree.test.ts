@@ -8,6 +8,7 @@ import * as path from 'path';
 import {
     findGitRoot,
     createWorktree,
+    pinnedCommitish,
     removeWorktree,
     runGit,
     worktreePath,
@@ -19,6 +20,11 @@ function mkTmp(prefix: string): string {
 
 function rm(dir: string): void {
     fs.rmSync(dir, { recursive: true, force: true });
+}
+
+/** Returns the resolved HEAD commit of a repository or worktree. */
+function headSha(dir: string): string {
+    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
 }
 
 /**
@@ -86,7 +92,7 @@ test('createWorktree creates a worktree on an existing branch', async () => {
     const wt = path.join(os.tmpdir(), `gw-wt-${Date.now()}`);
     try {
         initRepo(repo);
-        await createWorktree(repo, 'main', wt);
+        await createWorktree(repo, 'main', '', wt);
         assert.equal(fs.existsSync(wt), true);
         assert.equal(fs.existsSync(path.join(wt, 'hello.txt')), true);
     } finally {
@@ -101,11 +107,93 @@ test('createWorktree throws for a non-existent branch', async () => {
     try {
         initRepo(repo);
         await assert.rejects(
-            () => createWorktree(repo, 'does-not-exist', wt),
+            () => createWorktree(repo, 'does-not-exist', '', wt),
             /git fetch/,
         );
     } finally {
         rm(wt);
+        rm(repo);
+    }
+});
+
+// The point of pinning: the reviewed commit is checked out even after the branch moves on, so the
+// agent greps the code the diff was rendered from.
+test('createWorktree checks out the reviewed commit even after the branch tip moves', async () => {
+    const repo = mkTmp('gw-repo-pin-');
+    const wt = path.join(os.tmpdir(), `gw-wt-pin-${Date.now()}`);
+    try {
+        initRepo(repo);
+        const reviewed = headSha(repo);
+        fs.writeFileSync(path.join(repo, 'pushed-later.txt'), 'later');
+        execFileSync('git', ['add', '.'], { cwd: repo, stdio: 'pipe' });
+        execFileSync('git', ['commit', '-m', 'pushed after review started'], { cwd: repo, stdio: 'pipe' });
+
+        await createWorktree(repo, 'main', reviewed, wt);
+
+        assert.equal(fs.existsSync(path.join(wt, 'hello.txt')), true);
+        assert.equal(fs.existsSync(path.join(wt, 'pushed-later.txt')), false);
+        assert.equal(headSha(wt), reviewed);
+    } finally {
+        rm(wt);
+        rm(repo);
+    }
+});
+
+test('createWorktree falls back to the branch tip when the reviewed commit is unavailable', async () => {
+    const repo = mkTmp('gw-repo-orphan-');
+    const wt = path.join(os.tmpdir(), `gw-wt-orphan-${Date.now()}`);
+    try {
+        initRepo(repo);
+        execFileSync('git', ['commit', '--allow-empty', '-m', 'tip'], { cwd: repo, stdio: 'pipe' });
+        const tip = headSha(repo);
+
+        await createWorktree(repo, 'main', 'a'.repeat(40), wt);
+
+        assert.equal(headSha(wt), tip);
+    } finally {
+        rm(wt);
+        rm(repo);
+    }
+});
+
+// ── pinnedCommitish ───────────────────────────────────────────────────────────
+
+test('pinnedCommitish returns the sha when the commit is present, including abbreviated', async () => {
+    const repo = mkTmp('gw-pin-present-');
+    try {
+        initRepo(repo);
+        const sha = headSha(repo);
+        assert.equal(await pinnedCommitish(repo, sha, 'origin/main'), sha);
+        assert.equal(await pinnedCommitish(repo, sha.slice(0, 8), 'origin/main'), sha.slice(0, 8));
+    } finally {
+        rm(repo);
+    }
+});
+
+test('pinnedCommitish falls back when the sha is blank or unknown locally', async () => {
+    const repo = mkTmp('gw-pin-blank-');
+    try {
+        initRepo(repo);
+        assert.equal(await pinnedCommitish(repo, '', 'origin/main'), 'origin/main');
+        assert.equal(await pinnedCommitish(repo, '   ', 'FETCH_HEAD'), 'FETCH_HEAD');
+        assert.equal(await pinnedCommitish(repo, 'a'.repeat(40), 'origin/main'), 'origin/main');
+    } finally {
+        rm(repo);
+    }
+});
+
+// headSha arrives from the GitHub API, so a value git could read as an option or a different
+// revision must never reach the command line.
+test('pinnedCommitish refuses revisions that are not hex object names', async () => {
+    const repo = mkTmp('gw-pin-evil-');
+    try {
+        initRepo(repo);
+        // A real ref that resolves, but is not an object name — must still be rejected.
+        assert.equal(await pinnedCommitish(repo, 'main', 'origin/main'), 'origin/main');
+        assert.equal(await pinnedCommitish(repo, 'HEAD', 'origin/main'), 'origin/main');
+        assert.equal(await pinnedCommitish(repo, '--upload-pack=touch /tmp/x', 'origin/main'), 'origin/main');
+        assert.equal(await pinnedCommitish(repo, 'abc', 'origin/main'), 'origin/main');
+    } finally {
         rm(repo);
     }
 });
@@ -115,7 +203,7 @@ test('removeWorktree removes a worktree that was created', async () => {
     const wt = path.join(os.tmpdir(), `gw-wt-rm-${Date.now()}`);
     try {
         initRepo(repo);
-        await createWorktree(repo, 'main', wt);
+        await createWorktree(repo, 'main', '', wt);
         assert.equal(fs.existsSync(wt), true);
         await removeWorktree(repo, wt);
         assert.equal(fs.existsSync(wt), false);

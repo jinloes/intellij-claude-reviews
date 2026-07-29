@@ -4,23 +4,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
-import com.jinloes.prpilot.sidecar.pr.DraftReviewMutationService;
-import com.jinloes.prpilot.sidecar.pr.DraftReviewService;
-import com.jinloes.prpilot.sidecar.pr.PrDetailService;
-import com.jinloes.prpilot.sidecar.pr.PrDiffService;
-import com.jinloes.prpilot.sidecar.pr.PrListService;
-import com.jinloes.prpilot.sidecar.pr.PrSupplementalService;
-import com.jinloes.prpilot.sidecar.repo.RepoDetector;
-import com.jinloes.prpilot.sidecar.review.ReviewSessionService;
+import com.jinloes.prpilot.engine.GitHubEngine;
+import com.jinloes.prpilot.engine.ReviewSessionService;
+import com.jinloes.prpilot.review.ReviewOutcomeLog;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -37,14 +34,7 @@ class StdioJsonRpcServerTest {
                         objectMapper,
                         frameCodec,
                         new SidecarBootstrapService(),
-                        new RepoDetector(),
-                        new GitHubAuthService(),
-                        new PrListService(),
-                        new PrDetailService(),
-                        new PrDiffService(),
-                        new DraftReviewService(),
-                        new DraftReviewMutationService(),
-                        new PrSupplementalService(),
+                        new GitHubEngine(),
                         new ReviewSessionService(),
                         reviewExecutor);
     }
@@ -430,7 +420,7 @@ class StdioJsonRpcServerTest {
                                 + "\"provider\":\"claude\",\"model\":\"\",\"effort\":\"\",\"inheritMcp\":false,"
                                 + "\"pr\":{\"title\":\"T\",\"htmlUrl\":\"\",\"owner\":\"o\",\"repo\":\"r\","
                                 + "\"number\":1,\"body\":\"\",\"author\":\"a\",\"createdAt\":\"2024-01-01\","
-                                + "\"isDraft\":false},\"diff\":\"\",\"knownPatterns\":\"\"}}")
+                                + "\"isDraft\":false},\"diff\":\"\",\"ciStatus\":\"\"}}")
                         .getBytes(StandardCharsets.UTF_8));
     }
 
@@ -439,15 +429,90 @@ class StdioJsonRpcServerTest {
                 objectMapper,
                 frameCodec,
                 new SidecarBootstrapService(),
-                new RepoDetector(),
-                new GitHubAuthService(),
-                new PrListService(),
-                new PrDetailService(),
-                new PrDiffService(),
-                new DraftReviewService(),
-                new DraftReviewMutationService(),
-                new PrSupplementalService(),
+                new GitHubEngine(),
                 new ReviewSessionService(),
                 reviewExecutor);
+    }
+
+    @Nested
+    class RecordOutcome {
+
+        private Path logFile;
+        private StdioJsonRpcServer outcomeServer;
+
+        @BeforeEach
+        void setUp(@TempDir Path tmpDir) {
+            logFile = tmpDir.resolve("review-outcomes.jsonl");
+            outcomeServer =
+                    new StdioJsonRpcServer(
+                            objectMapper,
+                            frameCodec,
+                            new SidecarBootstrapService(),
+                            new GitHubEngine(),
+                            new ReviewSessionService(new ReviewOutcomeLog(logFile)),
+                            reviewExecutor);
+        }
+
+        private JsonNode call(String params) {
+            return outcomeServer.handle(
+                    ("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"reviews/recordOutcome\","
+                                    + "\"params\":"
+                                    + params
+                                    + "}")
+                            .getBytes(StandardCharsets.UTF_8));
+        }
+
+        @Test
+        void classifiesTheSuppliedCommentsAndWritesThemToTheLog() throws IOException {
+            JsonNode response =
+                    call(
+                            "{\"provider\":\"claude\",\"model\":\"sonnet\","
+                                    + "\"generated\":[{\"file\":\"A.java\",\"line\":1,\"body\":\"kept\"},"
+                                    + "{\"file\":\"A.java\",\"line\":2,\"body\":\"gone\"}],"
+                                    + "\"submitted\":[{\"file\":\"A.java\",\"line\":1,\"body\":\"kept\"}]}");
+
+            assertThat(response.path("result").path("recorded").asInt()).isEqualTo(2);
+            assertThat(Files.readAllLines(logFile, StandardCharsets.UTF_8)).hasSize(2);
+        }
+
+        /** An all-deleted review is meaningful, so an absent array is empty rather than invalid. */
+        @Test
+        void treatsAnAbsentCommentArrayAsEmpty() {
+            JsonNode response =
+                    call(
+                            "{\"provider\":\"claude\",\"model\":\"m\","
+                                    + "\"generated\":[{\"file\":\"A.java\",\"line\":1,\"body\":\"x\"}]}");
+
+            assertThat(response.path("result").path("recorded").asInt()).isEqualTo(1);
+        }
+
+        @Test
+        void rejectsUnknownFieldsAndMalformedComments() {
+            assertThat(
+                            call("{\"provider\":\"c\",\"model\":\"m\",\"unexpected\":1}")
+                                    .path("error")
+                                    .path("code")
+                                    .asInt())
+                    .isEqualTo(-32602);
+            assertThat(
+                            call("{\"provider\":\"c\",\"model\":\"m\",\"generated\":"
+                                            + "[{\"file\":\"A.java\",\"line\":\"NaN\",\"body\":\"x\"}]}")
+                                    .path("error")
+                                    .path("code")
+                                    .asInt())
+                    .isEqualTo(-32602);
+            assertThat(
+                            call("{\"provider\":\"c\",\"model\":\"m\",\"generated\":\"not-an-array\"}")
+                                    .path("error")
+                                    .path("code")
+                                    .asInt())
+                    .isEqualTo(-32602);
+        }
+
+        @Test
+        void rejectsNonTextualProviderOrModel() {
+            assertThat(call("{\"provider\":5,\"model\":\"m\"}").path("error").path("code").asInt())
+                    .isEqualTo(-32602);
+        }
     }
 }

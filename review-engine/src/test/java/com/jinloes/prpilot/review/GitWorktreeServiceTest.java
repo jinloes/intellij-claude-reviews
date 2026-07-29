@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.List;
 import org.apache.commons.io.FileUtils;
@@ -27,6 +28,21 @@ class GitWorktreeServiceTest {
         if (exit != 0) {
             throw new IllegalStateException("git " + args[0] + " failed in " + dir);
         }
+    }
+
+    /** Returns the resolved HEAD commit of a repository or worktree. */
+    private static String headSha(File dir) throws IOException, InterruptedException {
+        Process process =
+                new ProcessBuilder("git", "rev-parse", "HEAD")
+                        .directory(dir)
+                        .redirectErrorStream(true)
+                        .start();
+        String output =
+                new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+        if (process.waitFor() != 0) {
+            throw new IllegalStateException("git rev-parse failed in " + dir + ": " + output);
+        }
+        return output;
     }
 
     /** Initializes a minimal git repository with one commit on `main`. */
@@ -105,16 +121,125 @@ class GitWorktreeServiceTest {
 
         @Test
         void createsAWorktreeOnAnExistingBranch() throws IOException {
-            service.createWorktree(repoDir, "main", worktreeDir);
+            service.createWorktree(repoDir, "main", "", worktreeDir);
             assertThat(worktreeDir).exists();
             assertThat(new File(worktreeDir, "hello.txt")).exists();
         }
 
         @Test
         void throwsIOExceptionForANonExistentBranch() {
-            assertThatThrownBy(() -> service.createWorktree(repoDir, "does-not-exist", worktreeDir))
+            assertThatThrownBy(
+                            () ->
+                                    service.createWorktree(
+                                            repoDir, "does-not-exist", "", worktreeDir))
                     .isInstanceOf(IOException.class)
                     .hasMessageContaining("git fetch");
+        }
+
+        /**
+         * The point of pinning: the reviewed commit is checked out even after the branch moves on,
+         * so the agent greps the code the diff was rendered from.
+         */
+        @Test
+        void checksOutTheReviewedCommitEvenAfterTheBranchTipMoves() throws Exception {
+            String reviewed = headSha(repoDir);
+            Files.writeString(new File(repoDir, "pushed-later.txt").toPath(), "later");
+            git(repoDir, "add", ".");
+            git(repoDir, "commit", "-m", "pushed after review started");
+
+            service.createWorktree(repoDir, "main", reviewed, worktreeDir);
+
+            assertThat(new File(worktreeDir, "hello.txt")).exists();
+            assertThat(new File(worktreeDir, "pushed-later.txt")).doesNotExist();
+            assertThat(headSha(worktreeDir)).isEqualTo(reviewed);
+        }
+
+        @Test
+        void fallsBackToTheBranchTipWhenTheReviewedCommitIsNotAvailable() throws Exception {
+            git(repoDir, "commit", "--allow-empty", "-m", "tip");
+            String tip = headSha(repoDir);
+
+            service.createWorktree(
+                    repoDir, "main", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", worktreeDir);
+
+            assertThat(headSha(worktreeDir)).isEqualTo(tip);
+        }
+
+        @Test
+        void fallsBackToTheBranchTipWhenNoShaIsSupplied() throws Exception {
+            git(repoDir, "commit", "--allow-empty", "-m", "tip");
+            String tip = headSha(repoDir);
+
+            service.createWorktree(repoDir, "main", "  ", worktreeDir);
+
+            assertThat(headSha(worktreeDir)).isEqualTo(tip);
+        }
+    }
+
+    @Nested
+    class PinnedCommitish {
+
+        private File repoDir;
+
+        @BeforeEach
+        void setUp() throws Exception {
+            repoDir = Files.createTempDirectory("gw-pin").toFile();
+            initBareRepo(repoDir);
+        }
+
+        @AfterEach
+        void tearDown() throws IOException {
+            FileUtils.deleteDirectory(repoDir);
+        }
+
+        @Test
+        void returnsTheShaWhenTheCommitIsPresent() throws Exception {
+            String sha = headSha(repoDir);
+            assertThat(service.pinnedCommitish(repoDir, sha, "origin/main")).isEqualTo(sha);
+        }
+
+        @Test
+        void acceptsAnAbbreviatedSha() throws Exception {
+            String abbreviated = headSha(repoDir).substring(0, 8);
+            assertThat(service.pinnedCommitish(repoDir, abbreviated, "origin/main"))
+                    .isEqualTo(abbreviated);
+        }
+
+        @Test
+        void fallsBackWhenTheShaIsBlank() {
+            assertThat(service.pinnedCommitish(repoDir, "", "origin/main"))
+                    .isEqualTo("origin/main");
+            assertThat(service.pinnedCommitish(repoDir, null, "FETCH_HEAD"))
+                    .isEqualTo("FETCH_HEAD");
+        }
+
+        @Test
+        void fallsBackWhenTheCommitIsUnknownLocally() {
+            assertThat(
+                            service.pinnedCommitish(
+                                    repoDir,
+                                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                    "origin/main"))
+                    .isEqualTo("origin/main");
+        }
+
+        /**
+         * headSha arrives from the GitHub API, so a value that git could read as an option or a
+         * different revision must never reach the command line.
+         */
+        @Test
+        void refusesRevisionsThatAreNotHexObjectNames() throws Exception {
+            // A real ref that resolves, but is not an object name — must still be rejected.
+            assertThat(service.pinnedCommitish(repoDir, "main", "origin/main"))
+                    .isEqualTo("origin/main");
+            assertThat(
+                            service.pinnedCommitish(
+                                    repoDir, "--upload-pack=touch /tmp/x", "origin/main"))
+                    .isEqualTo("origin/main");
+            assertThat(service.pinnedCommitish(repoDir, "HEAD", "origin/main"))
+                    .isEqualTo("origin/main");
+            assertThat(service.pinnedCommitish(repoDir, "abc", "origin/main"))
+                    .isEqualTo("origin/main");
         }
     }
 
@@ -140,7 +265,7 @@ class GitWorktreeServiceTest {
 
         @Test
         void removesAWorktreeThatWasCreated() throws IOException {
-            service.createWorktree(repoDir, "main", worktreeDir);
+            service.createWorktree(repoDir, "main", "", worktreeDir);
             assertThat(worktreeDir).exists();
             service.removeWorktree(repoDir, worktreeDir);
             assertThat(worktreeDir).doesNotExist();

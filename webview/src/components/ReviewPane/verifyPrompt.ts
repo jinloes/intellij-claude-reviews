@@ -146,3 +146,25 @@ export function buildExampleFixPrompt(comment: LineComment, diff: string): Examp
   }
 }
 
+/**
+ * Locates the comment a verification was requested for, so its verdict can be applied to that
+ * comment and no other.
+ *
+ * Verification is asynchronous and the reviewer keeps editing while it runs, so the target may
+ * have moved, been rewritten, or been deleted by the time a verdict arrives. Resolution is by
+ * object identity first, then by (file, line, body) for the case where the array was rebuilt but
+ * the comment is unchanged. Returns -1 when the comment is gone or its body was edited — the
+ * caller must then do nothing, because applying a stale verdict to a different comment is far
+ * worse than dropping it.
+ */
+export function resolveVerifyTarget(comments: readonly LineComment[], target: LineComment): number {
+  const byIdentity = comments.indexOf(target)
+  if (byIdentity >= 0) return byIdentity
+  return comments.findIndex(
+    (candidate) =>
+      candidate.file === target.file
+      && candidate.line === target.line
+      && candidate.body === target.body,
+  )
+}
+

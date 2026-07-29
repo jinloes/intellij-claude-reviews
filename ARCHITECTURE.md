@@ -31,6 +31,9 @@ core/                                  – Plain Java 17 JVM module (no longer K
       ReviewProvider.java              – enum (CLAUDE | COPILOT); fromId(id) factory
 
 review-engine/                         – Plain Java 17 library owning Claude/Copilot CLI invocation, prompt building, and review-JSON parsing; depends on :core for models only
+  src/main/java/com/jinloes/prpilot/engine/
+    ReviewEngineApi.java              – The complete AI review capability surface, request records, + RPC_METHODS wire-name map (parity boundary)
+    ReviewSessionService.java         – Default implementation; dispatches to ClaudeService/CopilotService and tracks the one active provider for cancel()
   src/main/java/com/jinloes/prpilot/review/
     ClaudeService.java                – Shells out to `claude --print`; synchronous/blocking API; owns REVIEW_INSTRUCTIONS/CHAT_PERSONA prompt constants
     CopilotService.java               – Uses the official Copilot Java SDK to drive local `copilot`; mirrors ClaudeService API
@@ -63,6 +66,9 @@ intellij-plugin/                       – IntelliJ plugin host; depends on :cor
       WebviewDtos.java               – package-private DTO records serialized to webview bridge
 
 github-engine/                          – Plain Java 17 library containing host-neutral GitHub, PR, repository, and review behavior; no Spring or IDE APIs
+  src/main/java/com/jinloes/prpilot/engine/
+    GitHubEngineApi.java                 – The complete GitHub capability surface + RPC_METHODS wire-name map (parity boundary)
+    GitHubEngine.java                    – Default composition-root implementation delegating to the services below
   src/main/java/com/jinloes/prpilot/sidecar/
     pr/
       PrSearchQueryService.java          – Pure normalized GitHub PR-search query construction
@@ -112,13 +118,12 @@ sidecar/                                – Java 17, non-web Spring Boot/stdio J
     StdioFrameCodec.java                – Bounded Content-Length UTF-8 framing for JSON-RPC over stdio
     StdioJsonRpcServer.java             – JSON-RPC parameter validation, dispatch, structured protocol errors, and async review/chat request handling plus notification push
     SidecarBootstrapService.java        – Sidecar initialization capability response
-    review/
-      ReviewSessionService.java         – Orchestrates review-engine's ClaudeService/CopilotService on behalf of the JSON-RPC `reviews/*` methods
   src/main/resources/
     logback-spring.xml                  – Sends all sidecar logs to stderr; stdout is protocol-only
   src/test/java/com/jinloes/prpilot/sidecar/
     StdioFrameCodecTest.java
     StdioJsonRpcServerTest.java
+    EngineCapabilityCoverageTest.java   – Fails the build if the sidecar does not expose every declared engine capability
 
 webview/                               – Vite + React + TypeScript webview
   a11y/
@@ -202,6 +207,15 @@ The "Verify" and "Suggest fix" per-comment actions (`buildVerifyCommentPrompt`/`
 
 `sidecar` is a Java 17 Spring Boot application configured with `WebApplicationType.NONE`; it is not an HTTP server. Its protocol uses bounded `Content-Length`-framed UTF-8 JSON-RPC over standard input/output. Standard output must contain protocol frames only—diagnostics belong on standard error. GitHub, PR, repository, and review behavior belongs in `github-engine`/`review-engine`; Spring remains only the sidecar composition and lifecycle layer.
 
+### Engine capability boundary (test-enforced host parity)
+Each engine declares its complete capability surface as one interface — `GitHubEngineApi` in `github-engine`, `ReviewEngineApi` in `review-engine`, both in package `com.jinloes.prpilot.engine`. Each carries an `RPC_METHODS` map from Java method name to JSON-RPC wire name, and `StdioJsonRpcServer` registers a handler per entry (via a `Map<String, MethodHandler>` registry rather than a `switch`, so the registered set is introspectable).
+
+`EngineCapabilityCoverageTest` in the sidecar fails the build when a capability is declared without a wire name, exposed without being declared, or declared without a registered handler. This replaces the hand-maintained IntelliJ↔VS Code mapping table that previously lived in `AGENTS.md`, which could silently go stale. The rule it encodes: **hosts may lag in consuming a capability, but no host may re-implement one** — a capability the sidecar does not expose leaves a host no option but to fork the logic, which is the drift the boundary prevents.
+
+`ReviewSessionService` lives in `review-engine`, not the sidecar, precisely so it is reachable in-process (IntelliJ, a future CLI) as well as over RPC. It has no transport, Spring, or IDE dependencies. `GitHubEngine` is a pure delegation composition root over the individual services, so behavior — and the existing per-service tests — stay where they were.
+
+Note that this boundary covers the *server* side only. The VS Code client wiring in `sidecar.ts` and the genuinely duplicated TypeScript logic (worktrees, guidelines, binary probing, notification polling, prompt constants) remain hand-mirrored; see `AGENTS.md` "Remaining hand-mirrored logic".
+
 ### Sidecar streaming: async requests plus server-push notifications
 The base JSON-RPC loop in `StdioJsonRpcServer.run()` is still one blocking read → dispatch → optional single write per iteration, but `reviews/generate` and `reviews/chat` are the two methods that deviate: `generateReview`/`chatReview` submit the actual review-engine call to a dedicated `reviewExecutor` (a single-thread pool) and return `null` immediately, so the read loop stays free to accept a `reviews/cancel` request (or any other RPC) while a review is in flight. The eventual result is written asynchronously from the background thread once the provider CLI completes. Progress is reported via `reviews/status`/`reviews/chunk`/`reviews/chatChunk` — JSON-RPC notifications (no `id` field) carrying a `requestId` field that correlates them back to the originating request, sent from the background thread under the same `writeLock` used by the main loop so frames never interleave. `ReviewSessionService` tracks at most one active `ClaudeService`/`CopilotService` per sidecar process (mirroring IntelliJ's "only one has an active process at any time"), so `reviews/cancel` is synchronous and side-effect-free even with no active request.
 
@@ -246,12 +260,57 @@ Both the IntelliJ plugin and the sidecar use the official Java Copilot SDK (`com
 
 
 ### Provider capability isolation
-Claude review/chat processes disable tools, use `permission-mode=dontAsk`, pass a strict empty MCP configuration, and read user settings only. The review prompt therefore embeds the bounded GitHub diff instead of asking the CLI to fetch repository data. Temporary stream output is owner-only and deleted in `finally`; raw model output is not retained in logs.
+Claude review/chat processes are granted a **read-only tool allowlist** (`--tools "Read Grep Glob"`, pinned by `ClaudeService.SAFE_CLI_ARGS`), use `permission-mode=dontAsk`, pass a strict empty MCP configuration, and read user settings only. Mutating, shell, and network tools are withheld, so the process can read the PR-branch worktree but cannot act on it. The review prompt still embeds the bounded GitHub diff rather than asking the CLI to fetch it, and instructs the model to use the read tools only to confirm or attribute a finding.
+
+The two providers have genuinely different capability surfaces, which is easy to miss:
+
+| | Claude | Copilot |
+|---|---|---|
+| Tool gating | Hard allowlist of three read tools | No allowlist |
+| Approval | N/A — anything off-list is unavailable | Permission callback approves any tool the CLI classifies as `kind == "read"` |
+
+Copilot's surface is therefore whatever the CLI labels read-only, not a fixed set. Temporary stream output is owner-only and deleted in `finally`; raw model output is not retained in logs.
 
 Copilot review/chat sessions reject all SDK permission requests by default. On-disk config discovery (`setEnableConfigDiscovery`) is **never** enabled — unconditionally `false`, not derived from any setting — because the session working directory is the untrusted PR-branch worktree, and discovery would scan it for a repo-local `.mcp.json`. A malicious PR could ship an `.mcp.json` whose server `command` is an arbitrary process, which the SDK could launch at discovery time before any tool-call permission gate runs. `copilotInheritMcp` is an explicit capability elevation, but it never touches the worktree: when enabled, `CopilotMcpConfig.loadTrustedServers` reads MCP server definitions only from the user's own trusted config (`<configDir>/mcp-config.json`, default `~/.copilot`) and injects them via `SessionConfig.setMcpServers`. The permission handler still approves only `read` (always) and `mcp` (when elevated) and keeps rejecting shell/write/url. The optional `copilotConfigDir` setting maps to `configDir`/`setConfigDirectory` and also scopes which trusted config file is read. Never enable config discovery against the worktree and never replace the explicit permission handler with blanket approval.
 
 ### Reasoning effort normalization
 Persisted values are `none|low|medium|high|xhigh|max`; SDK accepts `low|medium|high|xhigh`. Normalize before session creation: `none -> low`, `max -> xhigh`, blank/unknown -> `medium`.
+
+### Comment anchoring snaps within a hunk, never across one
+`validateComments` (`webview/src/lib/validateComments.ts`) indexes valid new-file lines **per hunk**, not as one flat set per file. A comment whose line is already in some hunk passes through. Otherwise it snaps only when exactly one hunk has a line within `SNAP_RADIUS` (3); if two hunks qualify, the target sits in the gap between them and belongs to neither, so it is orphaned instead of attached to whichever is marginally nearer. A flat per-file set silently allowed a comment to snap from the end of one hunk into the start of the next — the exact misattribution the prompt's "a misattributed comment is worse than no comment" rule exists to prevent. Orphans are appended to the review body rather than posted inline.
+
+### Three comment keys exist on purpose
+They look like drift and are not; unifying them is a regression.
+
+| Key | Where | Shape | Why |
+|---|---|---|---|
+| Chunk merge | `ReviewPane.mergeChunkResults` | `file\|line\|type\|body` | Dedupes model **findings** across batches; `type` is part of a finding's identity |
+| Orphan match | `DraftReviewCodec.orphanKey` | `file\|line\|type\|body` | Identity check between two lists holding the same objects |
+| POST dedupe | `DraftReviewCodec` `dedupeKey` | `normalizedFile\0line\0body` | Collapses comments that would post **identically**. The GitHub payload is only `path`/`line`/`side`/`body`, so including `type` would post two byte-identical comments; the path is normalized because `b/Foo.java` and `Foo.java` target the same place |
+
+### Missing rationale drops a comment, never fabricates one
+`applyReviewQualityRepairs`' `dropMissingRationale` removes comments whose evidence the model declined to state. An earlier `addMissingRationale` filled the gap with `Evidence needs verification in <file>:<line>.`, which cleared the trust warning and raised the reported quality score while adding no evidence — strictly worse than leaving the comment flagged.
+
+### Verify verdicts apply to the comment that was verified, not the latest one
+"Verify" builds a prompt for one comment and dispatches it through the chat pane. Because a reviewer can verify several comments before acting on any verdict, `ReviewPane` tags each request with an opaque token bound to that comment; `ChatPane` copies the token onto the reply it produces and hands it back with the parsed `VerifyResult`. Applying resolves the target via `resolveVerifyTarget` — object identity first, then `(file, line, body)` — and **no-ops when the comment was since deleted or its body edited**, because applying a stale verdict to a different comment is worse than dropping it. Only `delete`, and `revise` with non-blank replacement text, render an Apply button; `keep` changes nothing, so offering one would be misleading.
+
+### Comments on deleted files orphan by design
+A pure-deletion file has only `delete` changes, which carry no new-file line number, so it yields an empty line set and every comment on it becomes an orphan — rendered in the review body's "Comments not attached inline" section rather than posted inline. Anchoring these inline would require a `side: LEFT` field threaded through `bridge/types.ts` and both hosts' handlers, and the review prompt already instructs the model to comment only on changed (`+`) lines, so such a comment is a prompt violation to begin with. The comment still reaches the reviewer; only its placement degrades. Pinned by `validateComments.test.ts`.
+
+### CI annotations are selected by whether they exist, not by whether the check failed
+`CheckRunService` probes a check's annotations when it failed **or** when its `output.annotations_count` is non-zero. Static-analysis checks (Qodana, CodeQL, ktlint) are routinely configured as advisory and conclude `success` or `neutral` while still reporting file-anchored findings — the most review-comment-shaped evidence CI produces. Keying on the conclusion alone silently discarded them exactly when the build was green. `annotations_count` arrives in the check-runs list response that has already been fetched, so testing it costs no extra request. The condition is a union rather than a replacement so a provider that omits the field retains the failing-check behavior. Failing checks are still requested first, so advisory lint notes cannot crowd a broken build out of the bounded annotation budget.
+
+### CI-duplicate suppression is conservative by design
+`CiFindingSuppressor` drops a generated comment only when a CI annotation matches **both** its location (±2 lines — CI often anchors at a declaration while the comment lands on the statement below) **and** ≥60% of the annotation's distinctive words. The two error directions are not symmetric: a surviving duplicate costs one line of reading, while a wrongly-suppressed finding is *invisible* — the reviewer has no way to know it existed. An annotation with no distinctive words after short-token filtering (e.g. "Process completed with exit code 1") suppresses nothing, because it would otherwise match every comment on its line. This runs at both providers' `reviewPR` seams so Claude and Copilot behave identically, and it is the deterministic counterpart to the Phase 2 critique directive, which only *asks* the model to drop such findings.
+
+### Review submission uses a synchronous webview lock
+`ReviewPane` guards `handleSubmit` with `submitInFlightRef`, not only React's asynchronous `submitting` state. A second click can otherwise enter the save-then-submit path before React rerenders the first click's disabled button, producing a second GitHub draft and therefore a second approval. The lock spans both the initial `saveDraft` and the later `draftSaved` → `submitReview` handoff. It is released only on a submit/save error, watchdog recovery, PR change, or `reviewSubmitted`; do not replace it with a visual `disabled` check alone. The IntelliJ `draftMutationLock` and VS Code `enqueueMutation` serialize host calls, but cannot deduplicate two separately-created draft review IDs.
+
+### The review worktree is pinned to the PR head commit, not the branch tip
+`GitWorktreeService` resolves the worktree to the PR's `head.sha` (`git worktree add --detach <dir> <sha>`) rather than `origin/<branch>` or `FETCH_HEAD`. A branch tip is a moving target: if the contributor pushes between the diff being rendered and the worktree being built, the agent would Grep code that is not under review — which matters because the prompt's `Blast radius:` directive instructs it to search that tree and treat the result as evidence. Forks get the same treatment; `FETCH_HEAD` is just the fork branch's tip and drifts identically. Pinning **falls back** to the branch tip when the SHA is blank or the commit is absent after fetch (a force-push can orphan it), because callers degrade worktree failure to "use the user's own checkout" — a much worse tree than a slightly stale one. `head.sha` arrives from the GitHub API, so it is validated as a hex object name before reaching a git command line; a value like `HEAD`, `main`, or `--upload-pack=…` is refused and falls back rather than being passed as a revision.
+
+### The review worktree is not indexed by the IDE
+Reviews run against a detached git worktree at `$TMPDIR/pr-pilot-wt-<unique>` (`WebviewPanel.java`), deliberately isolated from the user's checkout. That path is **not a content root of the open IntelliJ project**, so it is in no module and no index. Any future IDE-native code intelligence must therefore query the **open project's** warm index (for "who calls this symbol?") rather than the worktree — PSI over an unindexed path yields a parse tree without resolution, which is no better than a textual search for far more complexity. The prompt's `Blast radius:` directive covers the same need portably, by having the model Grep the worktree it can already read.
 
 ### Review JSON parsing is self-healing, not all-or-nothing
 `ClaudeService.parseReview` (in `review-engine`, shared by both the Claude CLI and Copilot SDK paths on both hosts — IntelliJ calls it in-process, VS Code via the sidecar's `reviews/generate`) tolerates and repairs common model schema deviations instead of rejecting the entire review, which previously surfaced as "The model returned an invalid review format" for otherwise-good output. Unknown top-level/comment fields are ignored; an over-long `summary` is truncated to 800 chars; a comment `body` with embedded newlines is collapsed to one line and truncated to 300 chars; a low-confidence `"issue"` is downgraded to `"suggestion"` rather than failing the review; the final `verdict` is derived from (and corrected to match) the surviving comments rather than trusting the model's stated verdict. Only individually-malformed line comments (missing/blank required field, invalid enum value) are dropped — one bad comment no longer discards the other 19. A hard parse failure remains only for genuinely non-JSON output or a missing `summary`/non-object root, since there is nothing to salvage in that case.
@@ -278,7 +337,7 @@ When wrapping untrusted payloads in XML-like tags, escape matching closing tags 
 Review prompts permit only evidence supplied in the prompt and require a fixed JSON contract. Both provider parsers reject unknown fields, incomplete line comments, invalid enums, oversized values, low-confidence issues, and verdict/comment mismatches before review data reaches the UI. Verify-comment and example-fix prompts use tagged reference data and strict JSON response shapes for the same reason.
 
 ### Diff acquisition model
-Hosts fetch and bound the GitHub diff before provider execution and embed it in `<pr_diff>`. Review providers run without repository tools by default, so they cannot fetch additional context during review. The separate full validation diff is retained host-side/webview-side for comment anchoring and is not sent to the provider. In VS Code, that validation diff is capped at 1 MB to match the webview bridge validator; a larger payload is rejected before the review pane receives `draftLoaded` or `reviewResult`. It is fetched only after the draft-status response so a slow large-diff download cannot leave the review pane stuck in draft loading.
+Hosts fetch and bound the GitHub diff before provider execution and embed it in `<pr_diff>`. Review providers run with read-only tools scoped to the PR-branch worktree, so they *can* open files there to confirm a finding or resolve a symbol the diff omits — but they cannot reach the network or any path outside it, so the embedded diff remains the primary evidence. The separate full validation diff is retained host-side/webview-side for comment anchoring and is not sent to the provider. In VS Code, that validation diff is capped at 1 MB to match the webview bridge validator; a larger payload is rejected before the review pane receives `draftLoaded` or `reviewResult`. It is fetched only after the draft-status response so a slow large-diff download cannot leave the review pane stuck in draft loading.
 
 ### Worktree-based PR context
 When the PR's repo matches the open project/workspace and a git root is found, both hosts create a temporary git worktree checked out to the PR branch and reuse it for both review and chat. This gives the model accurate local file context (correct branch state) for type lookups and cross-file references across the full PR session. Cleanup runs when the active PR changes or the view is disposed. Falls back silently to the open project/workspace dir if worktree creation fails or the PR is from an unrelated repo. Fork PRs use `git fetch <clone_url> <branch>` + `FETCH_HEAD`.
@@ -377,6 +436,10 @@ The `.vscode/launch.json` config `Run PR Pilot Extension Against Target Repo` pr
 - `copilotConfigDir` (default `""`) — optional override of the Copilot config directory used to read trusted MCP servers; empty uses the CLI default (`~/.copilot`). Copilot-only.
 - `reviewFocusAreas` (default `""`) — default reviewer focus areas; a non-empty per-review override takes precedence.
 - `reviewCustomInstructions` (default `""`) — default extra review instructions; a non-empty per-review override takes precedence.
+- `reviewSelfCritique` (default `true`) — runs a second validation pass (`ClaudeService.buildCritiquePrompt`) that re-checks every finding against the diff and the same context sections the first pass saw, dropping misattributed, unsupported, and CI-duplicated comments. On by default because a misattributed comment costs the reviewer more than the extra pass does; disabling it roughly halves review latency. Shared by both providers.
+- `reviewGuidanceGlobs` (default `[]`) — literal relative paths or globs read from the review working directory and folded into `<repo_guidelines>`. Empty uses `RepoGuidelinesReader`'s defaults (`AGENTS.md`, `CONTRIBUTING.md`, `.github/CONTRIBUTING.md`, `docs/CONTRIBUTING.md`, `.github/pull_request_template.md`).
+
+The VS Code equivalents live in `vscode-extension/package.json` under `contributes.configuration`. Each is declared twice — once as the contribution default, once as the fallback in `extension.ts`'s reader — and VS Code only honors the former, so a mismatch is silent. `vscode-extension/test/settingDefaults.test.ts` asserts the two agree for every boolean setting.
 
 No API keys or tokens are written to disk.
 
@@ -388,3 +451,10 @@ IntelliJ-only (`intellij-plugin`'s `PendingReviewIndex`/`SeenPRSet`); VS Code pe
 |------|---------|
 | `~/.pr-pilot/pending-prs.json` | Index of PRs with saved drafts (owner, repo, number, title, savedAt, headSha) |
 | `~/.pr-pilot/seen-prs.json` | Set of `owner/repo#number` strings already notified about |
+| `~/.pr-pilot/review-outcomes.jsonl` | Append-only outcome log: one JSON object per generated/submitted comment (`ReviewOutcomeLog`, engine-owned), written by both hosts on submit |
+
+### Outcome logging is stateless because IntelliJ does not use `ReviewSessionService`
+`reviews/recordOutcome` takes **both** the generated and the submitted comment sets from its caller rather than the engine remembering the generated review between calls. The obvious design — snapshot it in `ReviewSessionService.generate` — silently fails on IntelliJ, which calls `ClaudeService`/`CopilotService` in-process through `IntellijClaudeService` and never touches `ReviewSessionService` at all (that type is sidecar-only). Each host therefore retains the half it was previously discarding: IntelliJ keeps `generatedResult` because `handleSaveDraft` overwrites `lastResult` with the edits, and VS Code keeps `editedReviewResult` because it only ever sees the edits in the `saveDraft` message. Classification, fingerprinting, and `promptVersion` stay engine-owned, so the hosts hold UI state and implement no logic. `promptVersion` is stamped engine-side and is deliberately not a parameter — a host cannot know which prompt the engine build ships. A draft **loaded from GitHub** is never logged: it was not generated in this session, so diffing against it would record every comment as `kept`.
+
+### The outcome log stores hashes, never comment text or file paths
+`ReviewOutcomeLog` writes only `(recordedAt, promptVersion, provider, model, commentFingerprint, outcome, type, severity, confidence)`. The fingerprint is a SHA-256 prefix over `file + line + whitespace-normalized body`, which is enough to correlate the same finding across prompt versions — the log's entire purpose — without persisting review prose or repository structure to disk. It is the only append-mode file under `~/.pr-pilot`: the whole-file JSON stores use tmp+`ATOMIC_MOVE`, but rewriting a growing log on every submit does not scale, so this one uses `O_APPEND` with a `MAX_LOG_BYTES` cap because nothing prunes it. Every failure is logged and swallowed — instrumentation must never break a review submission.

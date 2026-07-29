@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.jinloes.prpilot.sidecar.github.GitHubApiBase;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
 import java.io.IOException;
 import java.net.URI;
@@ -311,9 +312,9 @@ public final class DraftReviewMutationService {
     }
 
     private Session openSession(String baseUrl) {
-        BaseUrls urls = BaseUrls.from(baseUrl);
+        GitHubApiBase urls = GitHubApiBase.parse(baseUrl);
         if (urls == null) return null;
-        GitHubAuthService.TokenResolution token = tokenResolver.resolve(urls.hostname());
+        GitHubAuthService.TokenResolution token = tokenResolver.resolve(urls.hostnameArgument());
         if (token.status() == GitHubAuthService.TokenStatus.NOT_INSTALLED) {
             return Session.failed(
                     DraftReviewMutationResult.failure(
@@ -335,31 +336,6 @@ public final class DraftReviewMutationService {
 
         static Session failed(DraftReviewMutationResult failure) {
             return new Session(null, null, failure);
-        }
-    }
-
-    private record BaseUrls(String apiBaseUrl, String hostname) {
-        static BaseUrls from(String value) {
-            try {
-                URI uri =
-                        URI.create(
-                                value == null || value.isBlank()
-                                        ? "https://github.com"
-                                        : value.trim());
-                if (!"https".equalsIgnoreCase(uri.getScheme())
-                        || uri.getHost() == null
-                        || uri.getUserInfo() != null
-                        || uri.getPort() != -1
-                        || (!uri.getPath().isEmpty() && !"/".equals(uri.getPath()))
-                        || uri.getQuery() != null
-                        || uri.getFragment() != null) return null;
-                String origin = "https://" + uri.getHost().toLowerCase();
-                return "https://github.com".equals(origin)
-                        ? new BaseUrls("https://api.github.com", null)
-                        : new BaseUrls(origin + "/api/v3", uri.getHost());
-            } catch (IllegalArgumentException exception) {
-                return null;
-            }
         }
     }
 
@@ -424,7 +400,14 @@ public final class DraftReviewMutationService {
         }
     }
 
-    /** Real GitHub REST client backed by {@link HttpClient}. Never logs or returns the token. */
+    /**
+     * Real GitHub REST client backed by {@link HttpClient}. Never logs or returns the token.
+     *
+     * <p>Deliberately does <em>not</em> use the shared {@code GitHubHttpClient}: that client's
+     * retry policy is only safe for idempotent reads. These verbs create and submit reviews, so
+     * merging them would risk a retried POST duplicating a submitted review. Keep write transport
+     * separate until mutation retries are made idempotent (e.g. via a request key).
+     */
     private static final class HttpGitHubRestClient implements GitHubRestClient {
         private final HttpClient httpClient =
                 HttpClient.newBuilder().connectTimeout(TIMEOUT).build();
