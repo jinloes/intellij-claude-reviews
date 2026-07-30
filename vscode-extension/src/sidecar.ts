@@ -8,9 +8,27 @@ const REQUEST_TIMEOUT_MS = 60_000;
 // (ClaudeService allows up to 30 minutes for review generation, resumed sessions up to 10
 // minutes); a much longer timeout than the default RPC timeout is required here.
 const REVIEW_REQUEST_TIMEOUT_MS = 35 * 60 * 1000;
+/**
+ * Worktree creation runs `git fetch` then `git worktree add`, which the engine bounds at 120s + 30s
+ * on the fork path — already past the default 60s RPC timeout. A timeout here is not a local
+ * failure either: this client treats one as fatal, killing the sidecar and failing every later
+ * request. Since the caller already degrades a failed worktree to the user's own checkout, a
+ * generous bound that lets a slow fetch finish is strictly better than one that ends the session.
+ */
+const WORKTREE_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const HEADER_TERMINATOR = '\r\n\r\n';
 const SIDECAR_PROTOCOL_VERSION = 1;
-const REQUIRED_CAPABILITIES = [
+/**
+ * Every capability the sidecar advertises, all of which this client calls. Kept exhaustive on
+ * purpose: each of these has a `SidecarClient` method, so a sidecar missing one produces a broken
+ * feature, and for the four context reads (`checkStatus`, `prCommits`, `linkedIssues`,
+ * `repoProfile`) it produces a *silently* broken one — those calls swallow failure by design, so an
+ * unsupported sidecar would degrade every review to empty prompt sections with nothing surfaced to
+ * the user. Failing the handshake instead turns that into an actionable message.
+ *
+ * `test/wireCatalog.test.ts` pins this list against the sidecar's declared capability groups.
+ */
+export const REQUIRED_CAPABILITIES = [
     'githubAuth',
     'prDetail',
     'prDiff',
@@ -21,6 +39,12 @@ const REQUIRED_CAPABILITIES = [
     'prSearch',
     'starredRepos',
     'existingReviews',
+    'checkStatus',
+    'prCommits',
+    'linkedIssues',
+    'repoProfile',
+    'repoGuidelines',
+    'worktrees',
     'reviewGeneration',
 ] as const;
 
@@ -136,6 +160,19 @@ export interface SidecarCheckAnnotation {
 export interface SidecarCheckStatus {
     summary: string;
     annotations: SidecarCheckAnnotation[];
+}
+
+/**
+ * Outcome of a worktree creation request.
+ *
+ * `skipped` means there was nothing to check out (no branch); `failed` means git could not produce
+ * one. Both are normal domain results rather than errors — the caller falls back to the open
+ * workspace folder in either case.
+ */
+export interface SidecarWorktreeResult {
+    status: 'created' | 'skipped' | 'failed';
+    worktreeDir: string;
+    message: string;
 }
 
 export interface SidecarPrDiffResult {
@@ -1096,12 +1133,102 @@ export class SidecarClient {
         return this.contextSummary('repo/getProfile', { projectDir });
     }
 
+    /**
+     * Reads the repository's review-guidance docs (AGENTS.md, CONTRIBUTING.md, configured globs).
+     *
+     * Resolution lives in the engine rather than here: glob translation, the bounded directory
+     * walk, ordering, and the size cap all change what reaches the prompt, and the previous
+     * hand-mirrored TypeScript copy had already drifted from the JVM one. Passing an empty `globs`
+     * selects the engine's default file list, so this client carries no copy of it.
+     *
+     * Best-effort like the context reads above — guidance is additive, so a failure degrades the
+     * prompt rather than failing the review.
+     */
+    async readRepoGuidelines(projectDir: string, globs: string[]): Promise<string> {
+        try {
+            const value = await this.request('reviews/readGuidelines', { projectDir, globs }) as
+                { guidelines?: unknown };
+            return typeof value?.guidelines === 'string' ? value.guidelines : '';
+        } catch {
+            return '';
+        }
+    }
+
     private async contextSummary(method: string, params: Record<string, unknown>): Promise<string> {
         try {
             const value = await this.request(method, params) as { summary?: unknown };
             return typeof value?.summary === 'string' ? value.summary : '';
         } catch {
             return '';
+        }
+    }
+
+    /*
+     * Worktree lifecycle. The engine owns the whole policy — destination naming, the fork-versus-
+     * origin fetch decision, and the head-SHA pinning that keeps the agent reading the code the
+     * diff was rendered from. This host keeps only the caching: which directory belongs to the
+     * active PR, and when to tear it down. The previous hand-mirrored TypeScript implementation is
+     * retired (AGENTS.md guardrail #5).
+     */
+
+    /**
+     * Returns the git repository root containing `startDir`, or `''` when it is not in one.
+     *
+     * A blank result is a normal answer, not an error: the only caller uses it to choose between a
+     * PR worktree and the user's plain checkout.
+     */
+    async findGitRoot(startDir: string): Promise<string> {
+        try {
+            const value = await this.request('reviews/findGitRoot', { startDir }) as { gitRoot?: unknown };
+            return typeof value?.gitRoot === 'string' ? value.gitRoot : '';
+        } catch {
+            return '';
+        }
+    }
+
+    /**
+     * Creates a detached worktree pinned to the PR's head commit.
+     *
+     * Failure is reported as a `failed` status rather than thrown, matching the engine: callers
+     * fall back to the open workspace folder, so a missing worktree degrades review accuracy
+     * instead of failing the review. Pass a blank `forkCloneUrl` to fetch from `origin`.
+     */
+    async createWorktree(
+        gitRoot: string,
+        prNumber: number,
+        branch: string,
+        headSha: string,
+        forkCloneUrl: string,
+    ): Promise<SidecarWorktreeResult> {
+        try {
+            await this.initialize();
+            const value = await this.requestRaw(
+                'reviews/createWorktree',
+                { gitRoot, prNumber, branch, headSha, forkCloneUrl },
+                { timeoutMs: WORKTREE_REQUEST_TIMEOUT_MS },
+            ) as { status?: unknown; worktreeDir?: unknown; message?: unknown };
+            const status = value?.status === 'created' || value?.status === 'skipped' ? value.status : 'failed';
+            const worktreeDir = typeof value?.worktreeDir === 'string' ? value.worktreeDir : '';
+            return {
+                // A 'created' status with no directory is a contract violation, not a usable
+                // worktree; treat it as failure so the caller falls back rather than passing '' as
+                // a working directory.
+                status: status === 'created' && !worktreeDir ? 'failed' : status,
+                worktreeDir,
+                message: typeof value?.message === 'string' ? value.message : '',
+            };
+        } catch (err) {
+            return { status: 'failed', worktreeDir: '', message: err instanceof Error ? err.message : String(err) };
+        }
+    }
+
+    /** Removes a worktree created by {@link createWorktree}. Cleanup failure is logged, never thrown. */
+    async removeWorktree(gitRoot: string, worktreeDir: string): Promise<void> {
+        try {
+            await this.request('reviews/removeWorktree', { gitRoot, worktreeDir });
+        } catch (err) {
+            console.warn(`[pr-pilot] Failed to remove worktree at ${worktreeDir}:`,
+                err instanceof Error ? err.message : String(err));
         }
     }
 

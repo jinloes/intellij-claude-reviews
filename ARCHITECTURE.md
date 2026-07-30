@@ -39,6 +39,7 @@ review-engine/                         – Plain Java 17 library owning Claude/C
     CopilotService.java               – Uses the official Copilot Java SDK to drive local `copilot`; mirrors ClaudeService API
     CopilotModelDiscovery.java        – Runs `copilot help config` once per session and caches model list
     GitWorktreeService.java           – Creates/removes temporary git worktrees for PR branch reviews
+    RepoGuidelinesReader.java         – Resolves/reads repo guidance docs (globs, bounded walk, size cap) behind the reviews/readGuidelines capability; sole owner of the default file list
     BinaryLocator.java                – Shared CLI binary-path probing helper for ClaudeService/CopilotService
     stream/                           – Jackson DTOs for Claude's stream-json event protocol
   src/test/java/com/jinloes/prpilot/review/ – JUnit 5 + AssertJ tests mirroring the module's Java classes
@@ -117,13 +118,13 @@ sidecar/                                – Java 17, non-web Spring Boot/stdio J
     SidecarConfiguration.java           – Explicit Spring bean composition root
     StdioFrameCodec.java                – Bounded Content-Length UTF-8 framing for JSON-RPC over stdio
     StdioJsonRpcServer.java             – JSON-RPC parameter validation, dispatch, structured protocol errors, and async review/chat request handling plus notification push
-    SidecarBootstrapService.java        – Sidecar initialization capability response
+    SidecarBootstrapService.java        – Sidecar initialization response; CAPABILITY_METHODS groups every wire method under the logical capability the handshake advertises
   src/main/resources/
     logback-spring.xml                  – Sends all sidecar logs to stderr; stdout is protocol-only
   src/test/java/com/jinloes/prpilot/sidecar/
     StdioFrameCodecTest.java
     StdioJsonRpcServerTest.java
-    EngineCapabilityCoverageTest.java   – Fails the build if the sidecar does not expose every declared engine capability
+    EngineCapabilityCoverageTest.java   – Fails the build if the sidecar does not expose and advertise every declared engine capability
 
 webview/                               – Vite + React + TypeScript webview
   a11y/
@@ -158,7 +159,6 @@ vscode-extension/                      – VS Code extension host
     models.ts                          – Host-neutral PR/review view models; contains no GitHub transport
     claude.ts                          – Prompt-building helpers (buildPrompt/buildChatPrompt/buildFocusedChatPrompt) and `claude` binary preflight; review/chat generation itself routes through sidecar.ts
     copilot.ts                         – Copilot model discovery (`listModels`, still spawns the SDK locally — no sidecar RPC endpoint yet) and `copilot` binary preflight; review/chat generation itself routes through sidecar.ts
-    worktree.ts                        – Creates/removes temporary git worktrees for PR branch reviews (mirrors GitWorktreeService.kt)
     settings.ts                        – Settings webview controller (panel lifecycle + config read/write); mirrors PluginSettingsConfigurable
     settingsView.ts                    – Pure settings-webview view logic (HTML, model-merge, escaping); no vscode import, unit-tested
     hostTheme.ts                       – Pure light/dark/high-contrast theme classification
@@ -176,6 +176,7 @@ vscode-extension/                      – VS Code extension host
     claude.test.ts
     copilot.test.ts
     sidecar.test.ts
+    wireCatalog.test.ts                – Fails the build if sidecar.ts stops consuming a declared engine capability
     userFacingError.test.ts
 ```
 
@@ -210,11 +211,13 @@ The "Verify" and "Suggest fix" per-comment actions (`buildVerifyCommentPrompt`/`
 ### Engine capability boundary (test-enforced host parity)
 Each engine declares its complete capability surface as one interface — `GitHubEngineApi` in `github-engine`, `ReviewEngineApi` in `review-engine`, both in package `com.jinloes.prpilot.engine`. Each carries an `RPC_METHODS` map from Java method name to JSON-RPC wire name, and `StdioJsonRpcServer` registers a handler per entry (via a `Map<String, MethodHandler>` registry rather than a `switch`, so the registered set is introspectable).
 
-`EngineCapabilityCoverageTest` in the sidecar fails the build when a capability is declared without a wire name, exposed without being declared, or declared without a registered handler. This replaces the hand-maintained IntelliJ↔VS Code mapping table that previously lived in `AGENTS.md`, which could silently go stale. The rule it encodes: **hosts may lag in consuming a capability, but no host may re-implement one** — a capability the sidecar does not expose leaves a host no option but to fork the logic, which is the drift the boundary prevents.
+`EngineCapabilityCoverageTest` in the sidecar fails the build when a capability is declared without a wire name, exposed without being declared, declared without a registered handler, or registered without being advertised in the `initialize` handshake. This replaces the hand-maintained IntelliJ↔VS Code mapping table that previously lived in `AGENTS.md`, which could silently go stale. The rule it encodes: **hosts may lag in consuming a capability, but no host may re-implement one** — a capability the sidecar does not expose leaves a host no option but to fork the logic, which is the drift the boundary prevents.
+
+`SidecarBootstrapService.CAPABILITY_METHODS` groups every wire method under the logical capability name the `initialize` handshake advertises, and the advertised map is *derived* from it rather than written out a second time. The handshake stays keyed by logical names (not raw wire names) because that is the existing client contract and because some capabilities are only meaningful as a set — `draftReviewMutations` covers save/submit/delete, and a client that started against a partially implemented mutation surface would fail mid-review rather than at startup. Grouping is mandatory: an ungrouped wire method fails the build, which is what stops a capability from being reachable over RPC yet invisible to every client.
 
 `ReviewSessionService` lives in `review-engine`, not the sidecar, precisely so it is reachable in-process (IntelliJ, a future CLI) as well as over RPC. It has no transport, Spring, or IDE dependencies. `GitHubEngine` is a pure delegation composition root over the individual services, so behavior — and the existing per-service tests — stay where they were.
 
-Note that this boundary covers the *server* side only. The VS Code client wiring in `sidecar.ts` and the genuinely duplicated TypeScript logic (worktrees, guidelines, binary probing, notification polling, prompt constants) remain hand-mirrored; see `AGENTS.md` "Remaining hand-mirrored logic".
+The client side is enforced separately by `vscode-extension/test/wireCatalog.test.ts`, which parses the engine interfaces as the source of truth and fails when `sidecar.ts` has no client method for a declared wire name, calls a wire method no engine declares, or lets `REQUIRED_CAPABILITIES` drift from `CAPABILITY_METHODS`. This exists because the Java-side test proves only that a capability is *reachable*: Phase 1's four context capabilities were exposed, coverage-tested, and never called by VS Code for months, so every VS Code review silently shipped with empty `<ci_status>`, `<commits>`, `<linked_issue>`, and `<repo_profile>` sections. What remains genuinely hand-mirrored is the notification shapes (which no interface declares) and the duplicated TypeScript logic (worktrees, binary probing, notification polling, prompt constants); see `AGENTS.md` "Remaining hand-mirrored logic". Guidance-doc reading used to be on that list and was retired by moving it behind the `reviews/readGuidelines` capability — the two copies had already diverged on the truncation marker, which is the concrete argument for preferring deletion over dual maintenance.
 
 ### Sidecar streaming: async requests plus server-push notifications
 The base JSON-RPC loop in `StdioJsonRpcServer.run()` is still one blocking read → dispatch → optional single write per iteration, but `reviews/generate` and `reviews/chat` are the two methods that deviate: `generateReview`/`chatReview` submit the actual review-engine call to a dedicated `reviewExecutor` (a single-thread pool) and return `null` immediately, so the read loop stays free to accept a `reviews/cancel` request (or any other RPC) while a review is in flight. The eventual result is written asynchronously from the background thread once the provider CLI completes. Progress is reported via `reviews/status`/`reviews/chunk`/`reviews/chatChunk` — JSON-RPC notifications (no `id` field) carrying a `requestId` field that correlates them back to the originating request, sent from the background thread under the same `writeLock` used by the main loop so frames never interleave. `ReviewSessionService` tracks at most one active `ClaudeService`/`CopilotService` per sidecar process (mirroring IntelliJ's "only one has an active process at any time"), so `reviews/cancel` is synchronous and side-effect-free even with no active request.
@@ -238,7 +241,7 @@ The sidecar's `prs/saveDraftReview`, `prs/submitReview`, and `prs/deleteDraftRev
 `PrSupplementalService` supplies the remaining token-safe read paths needed to remove host-local GitHub HTTP: bounded arbitrary PR searches (`prs/search`, query at most 8 KiB and limit at most 100), up to 200 starred repositories (`repos/listStarred`), and formatted submitted-review context (`prs/getExistingReviews`). Individual inline-comment lookup failures do not discard otherwise usable submitted-review context.
 
 ### GitHub engine host wiring
-GitHub behavior has one implementation in `github-engine`. IntelliJ calls its services directly in-process through `IntellijGitHubService`; the VS Code extension calls the same services through the sidecar's bounded Content-Length-framed JSON-RPC protocol. Hosts never receive, cache, or pass GitHub tokens. Authentication, retries, URL/API normalization, PR queries, repository detection, diffs, review context, and draft mutations belong only in `github-engine`.
+GitHub behavior has one implementation in `github-engine`. IntelliJ consumes it in-process through `IntellijGitHubService`, which holds a single `GitHubEngineApi` and adds only host adaptation — reading the configured base URL, mapping engine records onto the shared models, and converting non-`ok` statuses to `IOException`. It previously instantiated eleven engine services itself and repeated `GitHubEngine`'s delegation, which meant a capability added to the interface was invisible to IntelliJ. The VS Code extension calls the same services through the sidecar's bounded Content-Length-framed JSON-RPC protocol. Hosts never receive, cache, or pass GitHub tokens. Authentication, retries, URL/API normalization, PR queries, repository detection, diffs, review context, and draft mutations belong only in `github-engine`.
 
 For VS Code, `extension.ts` owns one process-wide `SidecarClient` created and initialized in `activate()` and disposed during extension teardown. Initialization verifies protocol version 1 and every required GitHub capability before requests proceed. The sidecar is mandatory for GitHub operations: missing Java 17+, a missing/corrupt jar, process failure, timeout, incompatible capabilities, or malformed protocol output is surfaced as a setup/runtime error and must never activate a TypeScript GitHub fallback. RPC requests have a 60-second bound for GitHub network operations. A user-facing **Retry** action restarts the stopped sidecar, clears only transport state, and re-runs initialization/capability validation; it never falls back to host-local GitHub behavior. `none` remains a valid `prs/getDraftReview` domain result; other token-free domain statuses flow into the existing setup/error UI.
 
@@ -343,7 +346,9 @@ Hosts fetch and bound the GitHub diff before provider execution and embed it in 
 When the PR's repo matches the open project/workspace and a git root is found, both hosts create a temporary git worktree checked out to the PR branch and reuse it for both review and chat. This gives the model accurate local file context (correct branch state) for type lookups and cross-file references across the full PR session. Cleanup runs when the active PR changes or the view is disposed. Falls back silently to the open project/workspace dir if worktree creation fails or the PR is from an unrelated repo. Fork PRs use `git fetch <clone_url> <branch>` + `FETCH_HEAD`.
 
 - **IntelliJ**: `WebviewPanel.resolvePrClaudeService` builds a per-PR `IntellijClaudeService` pointed at the worktree, using `review-engine`'s `GitWorktreeService`.
-- **VS Code**: `extension.ts` `resolveWorkingDir`/`clearWorktree` resolve the per-view worktree dir using `worktree.ts` and pass it as `projectDir` to the sidecar's `reviews/generate`/`reviews/chat`, which in turn hands it to `review-engine`'s `ClaudeService`/`CopilotService` as the process working directory. Chat reuses an existing worktree and never requests GitHub credentials directly.
+- **VS Code**: `extension.ts` `resolveWorkingDir`/`clearWorktree` own only the *lifecycle* — which directory belongs to the active PR, and when to tear it down. The git work goes through the sidecar's `worktrees` capability (`reviews/findGitRoot`, `reviews/createWorktree`, `reviews/removeWorktree`), so destination naming, the fork-versus-origin fetch decision, and head-SHA pinning have exactly one implementation. The resolved dir is passed as `projectDir` to `reviews/generate`/`reviews/chat`, which hands it to `review-engine`'s `ClaudeService`/`CopilotService` as the process working directory. Chat reuses an existing worktree and never requests GitHub credentials directly.
+
+`reviews/createWorktree` reports `skipped` (no branch to check out) and `failed` (git could not produce one) as ordinary results rather than RPC errors, because every caller degrades to the user's own checkout — a worktree is an optimization, not a precondition. `reviews/findGitRoot` likewise answers `""` for a path that is not in a repository. Both keep the failure path free of exception handling that would otherwise be easy to get wrong in a way that fails the whole review.
 
 ### Cross-host parity
 When host-specific logic changes in IntelliJ or VS Code, update the paired implementation in the other host. The mapping table and enforcement workflow live in `AGENTS.md`.
@@ -437,7 +442,7 @@ The `.vscode/launch.json` config `Run PR Pilot Extension Against Target Repo` pr
 - `reviewFocusAreas` (default `""`) — default reviewer focus areas; a non-empty per-review override takes precedence.
 - `reviewCustomInstructions` (default `""`) — default extra review instructions; a non-empty per-review override takes precedence.
 - `reviewSelfCritique` (default `true`) — runs a second validation pass (`ClaudeService.buildCritiquePrompt`) that re-checks every finding against the diff and the same context sections the first pass saw, dropping misattributed, unsupported, and CI-duplicated comments. On by default because a misattributed comment costs the reviewer more than the extra pass does; disabling it roughly halves review latency. Shared by both providers.
-- `reviewGuidanceGlobs` (default `[]`) — literal relative paths or globs read from the review working directory and folded into `<repo_guidelines>`. Empty uses `RepoGuidelinesReader`'s defaults (`AGENTS.md`, `CONTRIBUTING.md`, `.github/CONTRIBUTING.md`, `docs/CONTRIBUTING.md`, `.github/pull_request_template.md`).
+- `reviewGuidanceGlobs` (default `[]`) — literal relative paths or globs read from the review working directory and folded into `<repo_guidelines>`. Resolution runs engine-side behind the `reviews/readGuidelines` capability, so an empty list means "use `RepoGuidelinesReader`'s defaults" (`AGENTS.md`, `CONTRIBUTING.md`, `.github/CONTRIBUTING.md`, `docs/CONTRIBUTING.md`, `.github/pull_request_template.md`) and no host carries its own copy of that list.
 
 The VS Code equivalents live in `vscode-extension/package.json` under `contributes.configuration`. Each is declared twice — once as the contribution default, once as the fallback in `extension.ts`'s reader — and VS Code only honors the former, so a mismatch is silent. `vscode-extension/test/settingDefaults.test.ts` asserts the two agree for every boolean setting.
 

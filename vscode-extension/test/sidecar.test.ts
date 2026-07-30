@@ -21,6 +21,7 @@ import {
   parsePrListResult,
   parsePrSearchResult,
   parseStarredReposResult,
+  REQUIRED_CAPABILITIES,
   resolveSidecarJarPath,
   type SidecarSpawn,
 } from '../src/sidecar';
@@ -34,19 +35,10 @@ const initializeResult = {
   serviceName: 'pr-pilot-sidecar',
   serviceVersion: '0.1.0',
   protocolVersion: 1,
-  capabilities: {
-    githubAuth: true,
-    prDetail: true,
-    prDiff: true,
-    prList: true,
-    repoDetect: true,
-    draftReview: true,
-    draftReviewMutations: true,
-    prSearch: true,
-    starredRepos: true,
-    existingReviews: true,
-    reviewGeneration: true,
-  },
+  // Derived rather than listed so adding a capability cannot silently leave this fixture behind.
+  // When it was a hand-written list, it fell four capabilities short of what the client requires
+  // and every test below transparently exercised a *failed* handshake instead of a healthy one.
+  capabilities: Object.fromEntries(REQUIRED_CAPABILITIES.map((name) => [name, true])) as Record<string, boolean>,
 };
 
 const NO_RESPONSE = Symbol('NO_RESPONSE');
@@ -556,3 +548,108 @@ test('context reads tolerate a malformed payload without throwing', async () => 
   client.dispose();
 });
 
+// ── Repo guidance + worktree lifecycle (engine-owned, retired from TypeScript) ─
+//
+// These replace the deleted guidelines.ts/worktree.ts implementations. The logic itself is now
+// tested in review-engine; what remains testable here is the part this host still owns: sending the
+// right wire method and degrading correctly, since every one of these calls has a fallback that
+// must never surface as a thrown error on the review path.
+
+test('readRepoGuidelines returns the engine-rendered guidance text', async () => {
+  const harness = createSidecarHarness((method) => method === 'initialize'
+    ? initializeResult
+    : { guidelines: '## AGENTS.md\nPrefer Apache Commons helpers.' });
+  const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar);
+
+  const guidelines = await client.readRepoGuidelines('/repo', ['docs/*.md']);
+
+  assert.equal(guidelines, '## AGENTS.md\nPrefer Apache Commons helpers.');
+  assert.ok(harness.methods.includes('reviews/readGuidelines'));
+  client.dispose();
+});
+
+test('findGitRoot returns the resolved repository root', async () => {
+  const harness = createSidecarHarness((method) => method === 'initialize'
+    ? initializeResult
+    : { gitRoot: '/home/octo/widgets' });
+  const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar);
+
+  assert.equal(await client.findGitRoot('/home/octo/widgets/src'), '/home/octo/widgets');
+  assert.ok(harness.methods.includes('reviews/findGitRoot'));
+  client.dispose();
+});
+
+test('createWorktree passes the fork clone URL through and returns the created directory', async () => {
+  const seen: Array<Record<string, unknown>> = [];
+  const harness = createSidecarHarness((method, params) => {
+    if (method === 'initialize') return initializeResult;
+    seen.push(params as Record<string, unknown>);
+    return { status: 'created', worktreeDir: '/tmp/pr-pilot-wt-7-abc', message: '' };
+  });
+  const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar);
+
+  const result = await client.createWorktree('/repo', 7, 'feature', 'a1b2c3d', 'https://github.com/fork/widgets.git');
+
+  assert.deepEqual(result, { status: 'created', worktreeDir: '/tmp/pr-pilot-wt-7-abc', message: '' });
+  assert.deepEqual(seen[0], {
+    gitRoot: '/repo',
+    prNumber: 7,
+    branch: 'feature',
+    headSha: 'a1b2c3d',
+    forkCloneUrl: 'https://github.com/fork/widgets.git',
+  });
+  client.dispose();
+});
+
+test('createWorktree surfaces skipped and failed statuses as domain results, not throws', async () => {
+  for (const engineResult of [
+    { status: 'skipped', worktreeDir: '', message: 'No branch to check out.' },
+    { status: 'failed', worktreeDir: '', message: "couldn't find remote ref" },
+  ]) {
+    const harness = createSidecarHarness((method) => method === 'initialize' ? initializeResult : engineResult);
+    const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar);
+    assert.deepEqual(await client.createWorktree('/repo', 7, 'feature', '', ''), engineResult);
+    client.dispose();
+  }
+});
+
+test('createWorktree treats an unusable success as failure so the caller falls back', async () => {
+  // A 'created' status with no directory, or a status this client does not recognise, must not be
+  // handed back as a working directory — resolveWorkingDir would pass '' to the provider CLI as its
+  // cwd. Falling back to the open workspace folder is the safe degradation.
+  for (const engineResult of [
+    { status: 'created', worktreeDir: '', message: '' },
+    { status: 'something-new', worktreeDir: '/tmp/pr-pilot-wt-7-abc', message: '' },
+  ]) {
+    const harness = createSidecarHarness((method) => method === 'initialize' ? initializeResult : engineResult);
+    const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar);
+    assert.equal((await client.createWorktree('/repo', 7, 'feature', '', '')).status, 'failed');
+    client.dispose();
+  }
+});
+
+test('worktree lifecycle degrades instead of rejecting when the sidecar is unavailable', async () => {
+  // A worktree is an optimization, not a precondition: the caller falls back to the user's own
+  // checkout. A rejection here would fail the whole review instead.
+  const harness = createSidecarHarness(() => initializeResult);
+  const client = new SidecarClient(path.join(tempRoot, 'missing.jar'), 'java', harness.spawnSidecar);
+
+  assert.equal(await client.findGitRoot('/repo'), '');
+  assert.equal((await client.createWorktree('/repo', 7, 'feature', '', '')).status, 'failed');
+  await client.removeWorktree('/repo', '/tmp/pr-pilot-wt-7-abc');
+  assert.equal(await client.readRepoGuidelines('/repo', []), '');
+  assert.equal(harness.commands.length, 0);
+  client.dispose();
+});
+
+test('worktree and guidance reads tolerate a malformed payload without throwing', async () => {
+  const harness = createSidecarHarness((method) => method === 'initialize' ? initializeResult : { nope: true });
+  const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar);
+
+  assert.equal(await client.findGitRoot('/repo'), '');
+  assert.equal(await client.readRepoGuidelines('/repo', []), '');
+  assert.deepEqual(await client.createWorktree('/repo', 7, 'feature', '', ''), {
+    status: 'failed', worktreeDir: '', message: '',
+  });
+  client.dispose();
+});

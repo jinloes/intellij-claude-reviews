@@ -2,7 +2,11 @@
 
 Working plan for improving AI review quality and resolving the IDE-plugin strategy question.
 
-Status: **Phases A, 1, and 2 complete. Next: Phase 3 (textual code intelligence).**
+Status: **Phases A, 0, 1, 2, and 4 complete; Phase 3 partial (3a, 3d done).** Next: 3c, but it is
+**gated on outcome-log data** — see §6. That gate is still closed, and the instrument behind it was
+found recording fabricated rows on IntelliJ and repaired (see Phase 0), so the usable baseline
+starts from that fix. While it accumulates, the ungated work is the Phase A follow-ups (three done,
+one partially).
 
 > **Transient artifact.** Kept in-repo only until the plan is executed, then deleted. Deliberately
 > *not* added to `ARCHITECTURE.md`'s project layout.
@@ -399,14 +403,53 @@ The modularity insurance policy. Everything after this is cheaper and VS Code st
 sidecar `bootJar` + `smoke-sidecar.mjs` confirm the new Spring bean graph boots and answers
 `initialize`; `tsc --noEmit` clean. No wire names changed, so the protocol is backward compatible.
 
-#### Phase A follow-ups (small, deferred deliberately)
+#### Phase A follow-ups
 
-| Item | Why deferred |
+| Item | Status |
 |---|---|
-| `SidecarBootstrapService.initialize()` capability map is still hand-maintained and can drift from the registry | Derive it from `RPC_METHODS`; changes a client-visible payload, wants its own change |
-| `IntellijGitHubService` re-declares the GitHub surface instead of consuming `GitHubEngineApi` | Mechanical. **Now unblocked** — `intellij-plugin` compiles again after the platform-plugin bump |
-| Client-side `sidecar.ts` consumption is unenforced — the test covers the server only | Needs a TS-side generated/checked catalog |
-| Duplicated TypeScript (worktree, guidelines, binary probing, notifications, prompt constants) | Removed incrementally as capabilities move behind RPC |
+| `SidecarBootstrapService.initialize()` capability map is still hand-maintained and can drift from the registry | ✅ **DONE.** Derived from a new `CAPABILITY_METHODS` grouping instead of fifteen free-floating literals, and `EngineCapabilityCoverageTest` gained four tests covering the map it previously ignored entirely. The payload is unchanged, so no client migration was needed — the earlier "changes a client-visible payload" concern was avoidable by keeping the handshake keyed by logical capability names and deriving only the values |
+| Client-side `sidecar.ts` consumption is unenforced — the test covers the server only | ✅ **DONE.** `vscode-extension/test/wireCatalog.test.ts` parses `RPC_METHODS` from both engine interfaces as the source of truth and fails when `sidecar.ts` has no client method for a wire name, calls one no engine declares, or lets `REQUIRED_CAPABILITIES` drift from `CAPABILITY_METHODS`. Mutation-verified in both directions |
+| `IntellijGitHubService` re-declares the GitHub surface instead of consuming `GitHubEngineApi` | ✅ **DONE.** Replaced eleven directly-instantiated services with one `GitHubEngineApi`. It now consumes **16/16** capabilities (`checkAuth` was the missing one; `PluginSettingsComponent` used `GitHubAuthService` directly and now goes through the engine, taking the origin as a parameter since the settings dialog checks an unsaved value). Zero direct engine-service instantiation remains anywhere in `intellij-plugin`. Tests went from 1 (a static mapper) to 11, now covering delegation, base-URL threading, `IOException` surfacing, and the deliberate context-read degradation; 3 mutations verified |
+| Duplicated TypeScript (worktree, guidelines, binary probing, notifications, prompt constants) | ◐ **Partially done.** `guidelines.ts` (156 lines) and `worktree.ts` (170 lines) deleted with their tests, replaced by the `reviews/readGuidelines` capability and the three-method `worktrees` capability. **Remaining: binary probing, notifications, prompt constants** |
+
+**A second live defect, found by doing the work.** `RepoGuidelinesReader.java` and `guidelines.ts`
+had **already diverged**: the JVM truncation marker is `...(truncated)`, the TypeScript one
+`…(truncated)` (U+2026). Cosmetic in isolation, but it is direct evidence that hand-mirrored
+prompt-affecting logic does drift, and it drifted in the file that decides *what guidance reaches
+the model*. Retiring the copy also deleted the duplicated `DEFAULT_GUIDANCE_GLOBS` list: an empty
+glob list now means "engine defaults", so the default file list has exactly one owner.
+
+**A third, in the worktree pair.** `GitWorktreeService.newWorktreePath` and `worktree.ts`'s
+`worktreePath` had drifted to different temp-directory name formats — the JVM one carries a
+timestamp plus a 63-bit random suffix, the TypeScript one `Date.now()` plus six base-36 characters.
+That is not cosmetic: the name is what the cleanup path matches on via the `pr-pilot-wt-` prefix,
+and the two formats have different collision behavior for rapid consecutive calls on the same PR.
+Retiring the copy gives the naming, the fork-versus-origin fetch decision, and 3d's head-SHA
+pinning exactly one implementation.
+
+The worktree capability is deliberately **three narrow methods** (`findGitRoot`, `createWorktree`,
+`removeWorktree`) rather than one "give me a working directory" call. The host still decides *when*
+a worktree is warranted — same repo as the open workspace, not already cached for this PR — and
+that decision needs host state the engine does not have. Moving it would have meant teaching the
+engine about view lifecycles to save three RPC round trips.
+
+Both `createWorktree` and `findGitRoot` return failure as a **domain result**, never an exception:
+every caller degrades to the user's own checkout, so a thrown error would have to be caught at each
+call site and converted back into exactly this shape. The VS Code client additionally coerces a
+`created` status carrying a blank directory to `failed`, since passing `''` to the provider CLI as
+its working directory is worse than falling back.
+
+**A live defect found and fixed while doing this.** `REQUIRED_CAPABILITIES` in `sidecar.ts` listed
+**11** of the sidecar's **15** advertised capabilities. The four missing were exactly Phase 1's
+context capabilities — `checkStatus`, `prCommits`, `linkedIssues`, `repoProfile` — which VS Code
+began calling only after the late Phase 1 wiring. A sidecar lacking them therefore **passed the
+handshake** and failed at request time, and because all four are deliberately best-effort, that
+failure degraded silently to four empty prompt sections with nothing surfaced to the user: the same
+invisible-failure shape as the original months-long gap, in the code meant to prevent it.
+
+The `sidecar.test.ts` fixture had the same 11-entry list hardcoded, which is why nothing caught it —
+every test in that file was transparently exercising a *failed* handshake. Both lists are now
+derived rather than written out, and the drift is test-enforced.
 
 #### ✅ Pre-existing environment blockers — RESOLVED
 
@@ -504,6 +547,45 @@ Explicitly deferred until a question needs them: GitHub comment-resolution read-
 per-repo dashboards.
 
 Risk acknowledged: metrics work that nobody acts on is waste. Kept minimal for that reason.
+
+#### ⚠️ The instrument was recording fabricated data on the primary host — now fixed
+
+Found while checking whether 3c's gate had opened. The log held **one record** after a month, which
+prompted a check of whether logging worked at all. It did — but `WebviewPanel` had a state-lifetime
+bug that made its records untrustworthy.
+
+`handleSelectPR` clears `lastResult` but **not** `generatedResult`. That asymmetry is reachable and
+silent:
+
+| Step | `generatedResult` | `lastResult` |
+|---|---|---|
+| Generate on PR A | A's comments | A's comments |
+| Switch to PR B | **A's comments** (not cleared) | `null` |
+| B's draft loads from GitHub | **A's comments** | B's draft |
+| Submit B | → logged as the "before" side | → logged as the "after" side |
+
+Every one of A's comments is then recorded `deleted` and every one of B's `added`. The reviewer did
+neither. `handleDeleteDraft` had the same asymmetry.
+
+This matters more than an ordinary bug because **nothing downstream can distinguish a fabricated row
+from a real one**, and the whole point of this log is to adjudicate changes nobody can judge by
+intuition. It is also the third instance of this plan's recurring failure shape — silent degradation
+in a path with no user-visible symptom — and this time it was in the measuring instrument itself.
+
+Fixed by pairing the retained review with the PR it came from (`generatedResultKey`) and gating the
+write on a match, rather than by clearing on switch: clearing would also discard the legitimate
+generate → switch away → switch back → submit case, and data scarcity is already the problem.
+Extracted as `WebviewPanel.shouldRecordOutcome` so the decision is testable; 5 tests, mutation-
+verified (removing the key comparison fails 3).
+
+**A known lossy path remains, deliberately unfixed.** VS Code clears *both* halves on PR switch
+(`extension.ts` `handleSelectPR`), so the same switch-away-and-return sequence records nothing
+there. That is safe — it under-records rather than fabricating — so it is a data-volume issue, not a
+correctness one, and it is the minority host. Worth revisiting if VS Code volume ever matters to the
+baseline. Noted rather than fixed to keep the correctness fix isolated.
+
+**The gate is still closed**, and now for an additionally good reason: records written before this
+fix cannot be trusted, so the baseline effectively starts now.
 
 ### Phase 1 — Context service `[M]` · ✅ DONE (VS Code consumption landed later — see below)
 
@@ -819,7 +901,9 @@ the user's own checkout, which is a worse tree than a stale one. `head.sha` come
 API, so it is validated as a hex object name first — `HEAD`, `main`, and `--upload-pack=…` are
 refused rather than handed to git as a revision. `PRHeadInfo` gained `sha`; mirrored into
 `vscode-extension/src/worktree.ts` per the `AGENTS.md` parity table. 8 new Java tests, 5 new VS Code
-tests, both covering the tip-moved case that fails without the fix.
+tests, both covering the tip-moved case that fails without the fix. *(That mirror has since been
+retired — the whole worktree path now runs through the `worktrees` capability, so the pinning has
+one implementation. See the Phase A follow-ups.)*
 
 **3b — Pre-computed ripgrep sketch (only if still needed).** Host-side ripgrep over the worktree →
 `<code_intelligence>`. **Demoted below 3c**: it largely pre-computes what 3a already lets the agent
@@ -965,21 +1049,29 @@ Phase 3  Code intelligence    ─┬───► 3a agent grep directive  ✅ DO
                                └───► 3b ripgrep precompute    demoted; smallest marginal value
 Phase 4  CI suppression       ─────► ✅ DONE; deterministic dedupe + evidence-based calibration.
                                      Escalate/triage deferred — prompt changes, need Phase 0 data
-Phase 0  Outcome logging      ─────► ✅ DONE; both hosts log on submit — but has no data yet
+Phase 0  Outcome logging      ─────► ✅ DONE; both hosts log on submit. IntelliJ was recording
+                                     fabricated rows on a cross-PR submit — fixed; baseline
+                                     restarts from that fix
 Phase 5  Agentic loop         ─────► needs 1 + 3
 Phase 6  CLI + Action clients ─────► ⏸ SPECULATIVE — usage is IntelliJ-primary (§8.1)
 Phase 7  Feedback → patterns  ─────► needs 0; no longer gated on 6
 ```
 
-**Now: Phase 4's remainder — not 3c.** Phase 0 shipped, but it has **zero data**. 3c's entire
-justification is *the delta over 3a's textual Grep*, and that delta is unmeasurable until a baseline
-of outcomes exists on the current prompt. Building the `[M]` change immediately after building the
-instrument that was supposed to justify it would waste the instrument.
+**Now: still not 3c — the gate has not opened, and the instrument needed repair first.**
+`~/.pr-pilot/review-outcomes.jsonl` holds **one record**. Checking why surfaced a state-lifetime bug
+in `WebviewPanel` that recorded *fabricated* outcomes whenever a reviewer generated on one PR and
+submitted another (see Phase 0). That is now fixed, but it means the trustworthy baseline starts
+from the fix, not from Phase 0's original ship date. Building the `[M]` 3c change now would still
+waste the instrument Phase 0 exists to be.
 
-Phase 4's remainder is the better use of that waiting period: `[S]`, depends only on Phase 1 (done),
-and it improves reviews *now* rather than measuring them. Dedupe against CI annotations is also
-exempt from A/B gating under this phase's own rule — suppressing a finding CI already reports is
-obviously good a priori, in the same class as adding CI status at all.
+The ungated work in the meantime is the **Phase A follow-ups**, which depend on no data at all.
+Three are now done (derived capability map; TS-side wire-catalog enforcement; `IntellijGitHubService`
+consuming `GitHubEngineApi`) and the fourth is in progress (duplicated TypeScript: `guidelines.ts`
+and `worktree.ts` retired behind new capabilities; binary probing, notifications, and prompt
+constants remain). Each has paid for itself by exposing a live defect — a `REQUIRED_CAPABILITIES`
+gap that reproduced Phase 1's silent-degradation failure, a truncation-marker divergence between the
+two guidance readers, and two different worktree temp-directory name formats in a path whose cleanup
+matches on that name.
 
 **Then 3c**, decided with evidence rather than intuition. It comes before 3b because usage is
 IntelliJ-primary and PSI resolves symbols where Grep only matches names. Note 3c does **not** read

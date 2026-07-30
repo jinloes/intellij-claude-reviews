@@ -3,7 +3,6 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as claude from './claude';
 import * as copilot from './copilot';
-import * as worktree from './worktree';
 import * as settings from './settings';
 import * as workspace from './workspace';
 import { hasStaleCommits } from './draftState';
@@ -15,7 +14,6 @@ import { resolveWebviewDistPath } from './webviewAssets';
 import { buildErrorHtml, buildLauncherHtml, buildMainWebviewHtml } from './webviewHtml';
 import { classifyHostTheme, type HostTheme } from './hostTheme';
 import { SidecarClient, resolveSidecarJarPath, type OutcomeComment } from './sidecar';
-import { readRepoGuidelines, DEFAULT_GUIDANCE_GLOBS } from './guidelines';
 import type { LineComment, PR, PRSearchScope, ReviewResult } from './models';
 
 // Process-wide, lazily-started Java engine host. GitHub operations are never performed in the
@@ -506,18 +504,21 @@ function clearWorktree(state: ViewState): void {
     state.gitRoot = null;
     state.worktreeKey = null;
     if (wt && root) {
-        void worktree.removeWorktree(root, wt).catch(() => undefined);
+        void sidecarClient.removeWorktree(root, wt);
     }
 }
 
 /**
- * Resolves the working directory for a review/chat against `pr`. Creates a detached git worktree
- * pinned to the PR's head commit so the CLI reads exactly the code under review — not the branch
- * tip, which can move mid-review — then caches it for reuse. Falls back to the open workspace
- * folder when a worktree can't be created (no git root, different repo, fork fetch fails, etc.).
+ * Resolves the working directory for a review/chat against `pr`. Asks the engine for a detached git
+ * worktree pinned to the PR's head commit so the CLI reads exactly the code under review — not the
+ * branch tip, which can move mid-review — then caches it for reuse. Falls back to the open
+ * workspace folder when a worktree can't be created (no git root, different repo, fork fetch fails,
+ * etc.).
  *
- * Mirrors WebviewPanel.resolvePrClaudeService. Only builds a worktree when the open workspace is
- * the same repo as the PR — the worktree shares that repo's local object store.
+ * The git work lives in `review-engine`'s `GitWorktreeService` behind the `worktrees` capability,
+ * so this host holds only the cache and the fallback decision. Mirrors
+ * WebviewPanel.resolvePrClaudeService. Only builds a worktree when the open workspace is the same
+ * repo as the PR — the worktree shares that repo's local object store.
  */
 async function resolveWorkingDir(
     state: ViewState,
@@ -530,7 +531,7 @@ async function resolveWorkingDir(
     if (state.worktreeDir && state.worktreeKey === key) return state.worktreeDir;
     if (!fallback) return fallback;
 
-    const gitRoot = worktree.findGitRoot(fallback);
+    const gitRoot = await sidecarClient.findGitRoot(fallback);
     const currentRepo = await sidecarClient.detectRepo(fallback);
     const sameRepo = currentRepo !== null
         && currentRepo.toLowerCase() === `${pr.owner}/${pr.repo}`.toLowerCase();
@@ -547,23 +548,31 @@ async function resolveWorkingDir(
         if (!head?.ref.trim()) return fallback;
         const isFork = !!head.repoFullName && head.repoFullName !== detailResult.detail.baseRepoFullName;
 
-        const wt = worktree.worktreePath(pr.number);
-        if (isFork) {
-            await worktree.createWorktreeFromFork(gitRoot, head.cloneUrl ?? '', head.ref, head.sha ?? '', wt);
-        } else {
-            await worktree.createWorktree(gitRoot, head.ref, head.sha ?? '', wt);
+        const created = await sidecarClient.createWorktree(
+            gitRoot,
+            pr.number,
+            head.ref,
+            head.sha ?? '',
+            isFork ? head.cloneUrl ?? '' : '',
+        );
+        if (created.status !== 'created') {
+            if (created.status === 'failed') {
+                console.warn(`[pr-pilot] Worktree creation for PR #${pr.number} failed; using workspace dir:`,
+                    created.message);
+            }
+            return fallback;
         }
 
         // The PR may have changed while we awaited git; discard the worktree if so.
         if (!isSameActivePR(state, pr)) {
-            void worktree.removeWorktree(gitRoot, wt).catch(() => undefined);
+            void sidecarClient.removeWorktree(gitRoot, created.worktreeDir);
             return fallback;
         }
 
-        state.worktreeDir = wt;
+        state.worktreeDir = created.worktreeDir;
         state.gitRoot = gitRoot;
         state.worktreeKey = key;
-        return wt;
+        return created.worktreeDir;
     } catch (err) {
         console.warn(`[pr-pilot] Worktree creation for PR #${pr.number} failed; using workspace dir:`,
             err instanceof Error ? err.message : String(err));
@@ -619,13 +628,15 @@ function reviewCustomInstructions(): string {
     return config().get<string>('reviewCustomInstructions', '').trim();
 }
 
-/** User-configured guidance globs, falling back to the defaults when unset/empty. */
+/**
+ * User-configured guidance globs. Returns an empty list when unset, which the engine reads as
+ * "use the default file list" — the defaults deliberately live only in `RepoGuidelinesReader`.
+ */
 function reviewGuidanceGlobs(): string[] {
     const globs = config().get<string[]>('reviewGuidanceGlobs', []);
-    const cleaned = Array.isArray(globs)
+    return Array.isArray(globs)
         ? globs.map((g) => String(g).trim()).filter((g) => g.length > 0)
         : [];
-    return cleaned.length > 0 ? cleaned : DEFAULT_GUIDANCE_GLOBS;
 }
 
 /**
@@ -928,7 +939,7 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
                 diff,
                 priorReview: formatPriorReview(state.activeReviewResult),
                 existingReviews,
-                repoGuidelines: readRepoGuidelines(reviewDir, reviewGuidanceGlobs()),
+                repoGuidelines: await sidecarClient.readRepoGuidelines(reviewDir, reviewGuidanceGlobs()),
                 focusAreas,
                 customInstructions,
                 ciStatus: checkStatus.summary,

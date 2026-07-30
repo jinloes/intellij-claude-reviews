@@ -30,12 +30,20 @@ engine is declared as an interface:
 - `review-engine`: `com.jinloes.prpilot.engine.ReviewEngineApi`
 
 Each interface carries an `RPC_METHODS` map from Java method name to JSON-RPC wire name.
-`sidecar/StdioJsonRpcServer` must register a handler for every entry.
+`sidecar/StdioJsonRpcServer` must register a handler for every entry, and
+`SidecarBootstrapService.CAPABILITY_METHODS` must group every wire name under a logical capability
+(that grouping is what the `initialize` handshake advertises).
 
 This is **enforced by `EngineCapabilityCoverageTest`** in the sidecar module, which fails the build if
-a capability is declared without a wire name, exposed without being declared, or declared without
-being registered. Do not maintain this mapping by hand — add the method to the interface, add its
-`RPC_METHODS` entry, and register the handler; the test tells you if you missed a step.
+a capability is declared without a wire name, exposed without being declared, declared without being
+registered, or registered without being advertised. Do not maintain any of these mappings by hand —
+add the method to the interface, add its `RPC_METHODS` entry, register the handler, and group it in
+`CAPABILITY_METHODS`; the tests tell you if you missed a step.
+
+**The client side is enforced too**, by `vscode-extension/test/wireCatalog.test.ts`, which reads the
+engine interfaces as the source of truth and fails if `sidecar.ts` has no client method for a wire
+name (or calls one no engine declares), and if `REQUIRED_CAPABILITIES` drifts from
+`CAPABILITY_METHODS`. So a new capability is not "done" until VS Code can reach it.
 
 ### What parity does and does not require
 
@@ -48,11 +56,13 @@ fallback transport, or a second CLI-spawning review implementation in
 surfacing a capability in its UI. What is never acceptable is a host working around a missing
 capability by re-implementing it locally.
 
-**But record the lag as a lag.** The coverage test proves a capability is *reachable*, not that any
-host *calls* it. Phase 1's four context capabilities sat exposed-but-uncalled in VS Code for months
-while the plan read `✅ DONE`, so every VS Code review shipped with empty CI/commits/issue/profile
-prompt sections. When you ship a capability a host does not yet consume, say so explicitly in the
-plan and the PR description — do not mark the work complete.
+**But record the lag as a lag.** The tests prove a capability is *reachable* and that a client method
+*exists* — not that any UI actually surfaces it. Phase 1's four context capabilities sat
+exposed-but-uncalled in VS Code for months while the plan read `✅ DONE`, so every VS Code review
+shipped with empty CI/commits/issue/profile prompt sections. `wireCatalog.test.ts` now catches that
+exact shape, but a client method wired to no UI would still slip through. When you ship a capability
+a host does not yet consume, say so explicitly in the plan and the PR description — do not mark the
+work complete.
 
 If a genuine platform constraint makes a capability impossible in one host, document the gap and the
 reason in `ARCHITECTURE.md` "Key design decisions" and call it out in the PR description.
@@ -76,17 +86,26 @@ without justification.
 |---|---|
 | `review-engine/ClaudeService.java` `CHAT_PERSONA` | `vscode-extension/src/claude.ts` same constant |
 | `review-engine/ClaudeService.java` `buildFocusedChatPrompt` | `vscode-extension/src/claude.ts` same function |
-| `review-engine/GitWorktreeService.java` worktree create/remove/find-root logic | `vscode-extension/src/worktree.ts` matching functions |
-| `WebviewPanel.resolvePrClaudeService`/worktree lifecycle | `vscode-extension/src/extension.ts` `resolveWorkingDir`/`clearWorktree` |
+| `WebviewPanel.resolvePrClaudeService`/worktree lifecycle | `vscode-extension/src/extension.ts` `resolveWorkingDir`/`clearWorktree` — the *lifecycle* only (which dir belongs to the active PR, when to tear it down); the git work is no longer mirrored |
 | `PRNotificationService` poll/source-labeling/merge logic | `vscode-extension/src/notifications.ts` + `extension.ts` `PRNotificationPoller.poll` |
 | `review-engine/BinaryLocator.java` | `vscode-extension/src/claude.ts` + `vscode-extension/src/copilot.ts` binary-probing candidates |
-| `review-engine/RepoGuidelinesReader.java` glob/scan/read logic | `vscode-extension/src/guidelines.ts` same functions (`globToRegex`, `resolvePaths`, `readRepoGuidelines`) |
 | `review-engine/CopilotModelDiscovery.java` model probing / `PluginSettingsComponent` model combo | `vscode-extension/src/copilot.ts` `listModels`/`filterModelIds` + `extension.ts` `selectCopilotModel` command |
 | `PluginSettingsComponent` settings UI (provider-aware model selector, effort, base URL) | `vscode-extension/src/settings.ts` + `settingsView.ts` settings webview |
 | `review-engine/CopilotService.DEFAULT_REASONING_EFFORT` | `vscode-extension/src/copilot.ts` |
 | `webview/src/bridge/types.ts` message schemas | `WebviewPanel.java` and `vscode-extension/src/extension.ts` handlers |
 | `PluginSettings` adding new setting | `vscode-extension/package.json` config contribution + `vscode-extension/src/extension.ts` reader |
-| Any new wire method or notification shape | `vscode-extension/src/sidecar.ts` client wiring (the test enforces the *server* side only) |
+| Any new **notification** shape (`reviews/status`, `reviews/chunk`, `reviews/chatChunk`) | `vscode-extension/src/sidecar.ts` dispatch — notifications are not in `RPC_METHODS`, so nothing enforces them |
+
+New **request** wire methods are no longer on this list: `wireCatalog.test.ts` fails the build when
+`sidecar.ts` lacks a client method for one. Notifications remain hand-mirrored because they are not
+declared on either engine interface, so there is no source of truth to check them against.
+
+**Retiring a row is the preferred fix** (guardrail #5), and the mechanism is: expose the logic as an
+engine capability, call it from `sidecar.ts`, delete the TypeScript. `RepoGuidelinesReader` was
+retired this way after its two copies were found to have already diverged (the JVM truncation marker
+was `...`, the TypeScript one `…`). `GitWorktreeService` followed, behind the `worktrees` capability
+— its two copies had drifted to different temp-directory name formats, which matters because the
+cleanup path matches on the `pr-pilot-wt-` prefix. Prefer that over updating both copies.
 
 ## Testing conventions
 

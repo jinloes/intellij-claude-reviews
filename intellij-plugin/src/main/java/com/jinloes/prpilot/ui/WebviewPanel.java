@@ -200,6 +200,20 @@ public class WebviewPanel implements Disposable {
      */
     private volatile ReviewResult generatedResult = null;
 
+    /**
+     * The PR {@link #generatedResult} was produced for. Required because {@code generatedResult}
+     * deliberately outlives a PR switch — {@code handleSelectPR} clears {@link #lastResult} but not
+     * this pair, so returning to a PR can still log its outcomes.
+     *
+     * <p>Without the key that survival silently fabricates data: generate on PR A, switch to PR B,
+     * load B's draft from GitHub (which sets {@code lastResult}), submit B, and the log records
+     * every one of A's comments as {@code deleted} and every one of B's as {@code added}. None of
+     * those records describe anything a reviewer did. Wrong records are worse than missing ones
+     * here, because this log exists to adjudicate prompt changes and nothing downstream can tell a
+     * fabricated row from a real one.
+     */
+    private volatile String generatedResultKey = null;
+
     private final ReviewOutcomeLog outcomeLog = new ReviewOutcomeLog();
     private volatile String pendingReviewId = null;
     private volatile String pendingReviewKey = null;
@@ -1041,6 +1055,7 @@ public class WebviewPanel implements Disposable {
                                         }
                                         lastResult = result;
                                         generatedResult = result;
+                                        generatedResultKey = key;
                                         pendingReviewId = null;
                                         pushMessage(
                                                 new ReviewResultMsg(
@@ -1178,17 +1193,39 @@ public class WebviewPanel implements Disposable {
         }
 
         pendingIndex.remove(owner, repo, number);
-        recordReviewOutcome(generatedResult, lastResult);
+        if (shouldRecordOutcome(generatedResult, generatedResultKey, key)) {
+            recordReviewOutcome(generatedResult, lastResult);
+        }
         if (StringUtils.equals(pendingReviewId, reviewId)
                 && StringUtils.equals(pendingReviewKey, key)) {
             lastResult = null;
             generatedResult = null;
+            generatedResultKey = null;
             pendingReviewId = null;
             pendingReviewKey = null;
         }
 
         pushMessage(new SimpleMsg("reviewSubmitted", key));
         pushMessage(new PrDraftStatusMsg("prDraftStatusUpdated", number, owner, repo, false));
+    }
+
+    /**
+     * Whether a submitted review has a truthful "before" side to log against.
+     *
+     * <p>Requires the retained generated review to belong to the PR being submitted. {@code
+     * generatedResult} deliberately survives a PR switch so returning to a PR can still log its
+     * outcomes, which means the key is the only thing preventing one PR's generated comments from
+     * being diffed against another's submission — a mismatch would record every comment on both
+     * sides as {@code deleted}/{@code added} despite the reviewer having done neither.
+     *
+     * <p>A blank submit key can never authorize logging, so a null/null pair does not slip through
+     * {@code StringUtils.equals}.
+     */
+    static boolean shouldRecordOutcome(
+            ReviewResult generated, String generatedKey, String submitKey) {
+        return generated != null
+                && StringUtils.isNotBlank(submitKey)
+                && StringUtils.equals(generatedKey, submitKey);
     }
 
     /**
@@ -1254,6 +1291,10 @@ public class WebviewPanel implements Disposable {
         if (StringUtils.equals(pendingReviewId, reviewId)
                 && StringUtils.equals(pendingReviewKey, key)) {
             lastResult = null;
+            // Discarded along with lastResult: the reviewer threw this review away, so there is no
+            // submission for it to be the "before" side of.
+            generatedResult = null;
+            generatedResultKey = null;
             pendingReviewId = null;
             pendingReviewKey = null;
         }

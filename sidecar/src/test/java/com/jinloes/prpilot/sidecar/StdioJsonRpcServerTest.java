@@ -515,4 +515,70 @@ class StdioJsonRpcServerTest {
                     .isEqualTo(-32602);
         }
     }
+
+    @Nested
+    class ReadGuidelines {
+
+        private JsonNode call(String params) {
+            return server.handle(
+                    ("{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"reviews/readGuidelines\","
+                                    + "\"params\":"
+                                    + params
+                                    + "}")
+                            .getBytes(StandardCharsets.UTF_8));
+        }
+
+        @Test
+        void readsGuidanceFromTheRequestedDirectory(@TempDir Path tmpDir) throws IOException {
+            Files.writeString(tmpDir.resolve("AGENTS.md"), "Prefer small PRs.");
+
+            JsonNode response =
+                    call("{\"projectDir\":\"" + tmpDir.toString().replace("\\", "\\\\") + "\"}");
+
+            assertThat(response.path("result").path("guidelines").asText())
+                    .contains("## AGENTS.md")
+                    .contains("Prefer small PRs.");
+        }
+
+        /** Omitting globs must select the engine defaults, not match nothing. */
+        @Test
+        void treatsAnOmittedGlobArrayAsTheEngineDefaults(@TempDir Path tmpDir) throws IOException {
+            Files.writeString(tmpDir.resolve("CONTRIBUTING.md"), "Sign your commits.");
+
+            JsonNode response =
+                    call("{\"projectDir\":\"" + tmpDir.toString().replace("\\", "\\\\") + "\"}");
+
+            assertThat(response.path("result").path("guidelines").asText())
+                    .contains("Sign your commits.");
+        }
+
+        @Test
+        void rejectsAMissingOrNonTextualProjectDir() {
+            assertThat(call("{}").path("error").path("code").asInt()).isEqualTo(-32602);
+            assertThat(call("{\"projectDir\":5}").path("error").path("code").asInt())
+                    .isEqualTo(-32602);
+        }
+
+        @Test
+        void rejectsUnknownFieldsAndMalformedGlobs() {
+            assertThat(
+                            call("{\"projectDir\":\"/tmp\",\"unexpected\":1}")
+                                    .path("error")
+                                    .path("code")
+                                    .asInt())
+                    .isEqualTo(-32602);
+            assertThat(
+                            call("{\"projectDir\":\"/tmp\",\"globs\":\"not-an-array\"}")
+                                    .path("error")
+                                    .path("code")
+                                    .asInt())
+                    .isEqualTo(-32602);
+            assertThat(
+                            call("{\"projectDir\":\"/tmp\",\"globs\":[5]}")
+                                    .path("error")
+                                    .path("code")
+                                    .asInt())
+                    .isEqualTo(-32602);
+        }
+    }
 }

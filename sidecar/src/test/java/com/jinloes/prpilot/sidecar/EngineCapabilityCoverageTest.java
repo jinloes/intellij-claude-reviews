@@ -10,6 +10,8 @@ import com.jinloes.prpilot.engine.ReviewSessionService;
 import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -128,6 +130,67 @@ class EngineCapabilityCoverageTest {
             assertThat(server.registeredMethodNames())
                     .as("undeclared wire methods must be added to an engine API or removed")
                     .isSubsetOf(allowed);
+        }
+    }
+
+    /**
+     * The {@code initialize} handshake advertises a capability map that clients gate startup on. It
+     * used to be fifteen hand-written literals related to nothing, so it could drift from the
+     * engines silently — a capability could be reachable over RPC but unadvertised, or advertised
+     * but absent. These tests close that gap by pinning the derivation.
+     */
+    @Nested
+    class BootstrapCapabilityMap {
+
+        /** Every wire method named by some capability group. */
+        private Set<String> coveredWireNames() {
+            return SidecarBootstrapService.CAPABILITY_METHODS.values().stream()
+                    .flatMap(Set::stream)
+                    .collect(Collectors.toSet());
+        }
+
+        @Test
+        void everyDeclaredWireMethodBelongsToACapability() {
+            assertThat(coveredWireNames())
+                    .as(
+                            "a capability reachable over RPC but not advertised by initialize is"
+                                    + " invisible to clients — add the new wire method to a group"
+                                    + " in SidecarBootstrapService.CAPABILITY_METHODS")
+                    .containsAll(declaredWireNames());
+        }
+
+        @Test
+        void noCapabilityNamesAnUndeclaredWireMethod() {
+            assertThat(coveredWireNames())
+                    .as(
+                            "a capability advertising a wire method no engine declares promises"
+                                    + " clients something the sidecar cannot answer")
+                    .isSubsetOf(declaredWireNames());
+        }
+
+        /**
+         * The grouping is only meaningful if each method has one owner; two capabilities covering
+         * the same method would make "is this advertised?" ambiguous.
+         */
+        @Test
+        void eachWireMethodBelongsToExactlyOneCapability() {
+            List<String> allNames =
+                    SidecarBootstrapService.CAPABILITY_METHODS.values().stream()
+                            .flatMap(Set::stream)
+                            .toList();
+
+            assertThat(allNames).doesNotHaveDuplicates();
+        }
+
+        @Test
+        void advertisedCapabilitiesAreExactlyTheDeclaredGroups() {
+            Map<String, Boolean> advertised =
+                    new SidecarBootstrapService().initialize().capabilities();
+
+            assertThat(advertised.keySet())
+                    .containsExactlyInAnyOrderElementsOf(
+                            SidecarBootstrapService.CAPABILITY_METHODS.keySet());
+            assertThat(advertised.values()).allMatch(Boolean::booleanValue);
         }
     }
 }

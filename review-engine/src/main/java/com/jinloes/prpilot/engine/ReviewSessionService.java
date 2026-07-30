@@ -8,13 +8,17 @@ import com.jinloes.prpilot.model.PullRequest;
 import com.jinloes.prpilot.model.ReviewResult;
 import com.jinloes.prpilot.review.ClaudeService;
 import com.jinloes.prpilot.review.CopilotService;
+import com.jinloes.prpilot.review.GitWorktreeService;
+import com.jinloes.prpilot.review.RepoGuidelinesReader;
 import com.jinloes.prpilot.review.ReviewOutcomeLog;
+import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import org.apache.commons.lang3.StringUtils;
 
 /**
  * Default {@link ReviewEngineApi} implementation: dispatches to the Claude or Copilot provider
@@ -33,6 +37,7 @@ public class ReviewSessionService implements ReviewEngineApi {
     private final AtomicReference<ClaudeService> activeClaude = new AtomicReference<>();
     private final AtomicReference<CopilotService> activeCopilot = new AtomicReference<>();
     private final ReviewOutcomeLog outcomeLog;
+    private final GitWorktreeService worktreeService = new GitWorktreeService();
 
     public ReviewSessionService() {
         this(new ReviewOutcomeLog());
@@ -202,5 +207,69 @@ public class ReviewSessionService implements ReviewEngineApi {
                     new CiAnnotation(param.file(), param.line(), param.level(), param.message()));
         }
         return annotations;
+    }
+
+    @Override
+    public GuidelinesResult readGuidelines(ReadGuidelinesParams params) {
+        if (params == null || StringUtils.isBlank(params.projectDir())) {
+            return new GuidelinesResult("");
+        }
+        // A null/empty glob list means "engine defaults"; RepoGuidelinesReader.read already applies
+        // that fallback, so no host needs its own copy of the default file list.
+        return new GuidelinesResult(
+                RepoGuidelinesReader.read(new File(params.projectDir()), params.globs()));
+    }
+
+    @Override
+    public GitRootResult findGitRoot(String startDir) {
+        if (StringUtils.isBlank(startDir)) return new GitRootResult("");
+        try {
+            File root = worktreeService.findGitRoot(new File(startDir));
+            return new GitRootResult(root == null ? "" : root.getAbsolutePath());
+        } catch (RuntimeException e) {
+            // An uncanonicalizable path is "not a repository" from the caller's perspective; the
+            // only consumer decides between worktree and plain checkout, and neither wants a throw.
+            return new GitRootResult("");
+        }
+    }
+
+    @Override
+    public WorktreeResult createWorktree(CreateWorktreeParams params) {
+        if (params == null
+                || StringUtils.isBlank(params.gitRoot())
+                || StringUtils.isBlank(params.branch())) {
+            return new WorktreeResult("skipped", "", "No branch to check out.");
+        }
+        File repoDir = new File(params.gitRoot());
+        File worktreeDir = worktreeService.newWorktreePath(params.prNumber());
+        try {
+            if (StringUtils.isNotBlank(params.forkCloneUrl())) {
+                worktreeService.createWorktreeFromFork(
+                        repoDir,
+                        params.forkCloneUrl(),
+                        params.branch(),
+                        params.headSha(),
+                        worktreeDir);
+            } else {
+                worktreeService.createWorktree(
+                        repoDir, params.branch(), params.headSha(), worktreeDir);
+            }
+            return new WorktreeResult("created", worktreeDir.getAbsolutePath(), "");
+        } catch (IOException e) {
+            // Domain result, not an exception: callers fall back to the user's own checkout, so a
+            // failed worktree degrades review accuracy rather than failing the review.
+            return new WorktreeResult("failed", "", String.valueOf(e.getMessage()));
+        }
+    }
+
+    @Override
+    public WorktreeRemovalResult removeWorktree(RemoveWorktreeParams params) {
+        if (params == null
+                || StringUtils.isBlank(params.gitRoot())
+                || StringUtils.isBlank(params.worktreeDir())) {
+            return new WorktreeRemovalResult(false);
+        }
+        worktreeService.removeWorktree(new File(params.gitRoot()), new File(params.worktreeDir()));
+        return new WorktreeRemovalResult(true);
     }
 }

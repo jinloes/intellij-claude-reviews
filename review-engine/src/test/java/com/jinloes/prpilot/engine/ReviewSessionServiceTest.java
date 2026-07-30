@@ -93,4 +93,95 @@ class ReviewSessionServiceTest {
                     .contains("\"outcome\":\"deleted\"");
         }
     }
+
+    @Nested
+    class ReadGuidelines {
+
+        private Path repoDir;
+        private final ReviewSessionService service = new ReviewSessionService();
+
+        @BeforeEach
+        void setUp() throws IOException {
+            repoDir = Files.createTempDirectory("session-guidelines");
+        }
+
+        @AfterEach
+        void tearDown() {
+            FileUtils.deleteQuietly(repoDir.toFile());
+        }
+
+        private void write(String relative, String content) throws IOException {
+            Path file = repoDir.resolve(relative);
+            Files.createDirectories(file.getParent());
+            Files.writeString(file, content);
+        }
+
+        @Test
+        void readsTheDefaultFilesWhenNoGlobsAreSupplied() throws IOException {
+            write("AGENTS.md", "Always add tests.");
+
+            String guidelines =
+                    service.readGuidelines(
+                                    new ReviewEngineApi.ReadGuidelinesParams(
+                                            repoDir.toString(), List.of()))
+                            .guidelines();
+
+            // An empty glob list must mean "engine defaults", not "match nothing" — that fallback
+            // is what lets a host avoid carrying its own copy of the default file list.
+            assertThat(guidelines).contains("## AGENTS.md").contains("Always add tests.");
+        }
+
+        @Test
+        void treatsNullGlobsTheSameAsAnEmptyList() throws IOException {
+            write("CONTRIBUTING.md", "Squash your commits.");
+
+            String guidelines =
+                    service.readGuidelines(
+                                    new ReviewEngineApi.ReadGuidelinesParams(
+                                            repoDir.toString(), null))
+                            .guidelines();
+
+            assertThat(guidelines).contains("Squash your commits.");
+        }
+
+        @Test
+        void honoursExplicitGlobsInsteadOfTheDefaults() throws IOException {
+            write("AGENTS.md", "default file");
+            write("docs/style.md", "custom file");
+
+            String guidelines =
+                    service.readGuidelines(
+                                    new ReviewEngineApi.ReadGuidelinesParams(
+                                            repoDir.toString(), List.of("**/style.md")))
+                            .guidelines();
+
+            assertThat(guidelines).contains("custom file").doesNotContain("default file");
+        }
+
+        @Test
+        void returnsEmptyForABlankOrMissingDirectoryRatherThanThrowing() {
+            assertThat(service.readGuidelines(null).guidelines()).isEmpty();
+            assertThat(
+                            service.readGuidelines(
+                                            new ReviewEngineApi.ReadGuidelinesParams("", List.of()))
+                                    .guidelines())
+                    .isEmpty();
+            assertThat(
+                            service.readGuidelines(
+                                            new ReviewEngineApi.ReadGuidelinesParams(
+                                                    repoDir.resolve("nope").toString(), List.of()))
+                                    .guidelines())
+                    .isEmpty();
+        }
+
+        @Test
+        void returnsEmptyWhenNothingMatches() {
+            assertThat(
+                            service.readGuidelines(
+                                            new ReviewEngineApi.ReadGuidelinesParams(
+                                                    repoDir.toString(), List.of()))
+                                    .guidelines())
+                    .isEmpty();
+        }
+    }
 }

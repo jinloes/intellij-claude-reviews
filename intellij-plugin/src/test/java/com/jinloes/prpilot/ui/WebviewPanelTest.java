@@ -4,8 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jinloes.prpilot.model.PullRequest;
+import com.jinloes.prpilot.model.ReviewResult;
 import java.awt.BorderLayout;
 import java.awt.Rectangle;
+import java.util.List;
 import javax.swing.JPanel;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -323,6 +325,57 @@ class WebviewPanelTest {
             assertThat(json.has("result")).isFalse();
             assertThat(json.has("diff")).isFalse();
             assertThat(json.has("validationDiff")).isFalse();
+        }
+    }
+
+    @Nested
+    class ShouldRecordOutcome {
+
+        private static final ReviewResult GENERATED =
+                new ReviewResult("summary", "COMMENT", List.of());
+
+        @Test
+        void recordsWhenTheGeneratedReviewBelongsToTheSubmittedPr() {
+            assertThat(
+                            WebviewPanel.shouldRecordOutcome(
+                                    GENERATED, "acme/platform#42", "acme/platform#42"))
+                    .isTrue();
+        }
+
+        // The regression this guard exists for: generate on PR A, switch to PR B, load B's draft
+        // from GitHub, submit B. Without the key the log records all of A's comments as "deleted"
+        // and all of B's as "added" — rows describing something no reviewer did, in the log that
+        // decides whether prompt changes helped.
+        @Test
+        void refusesWhenTheGeneratedReviewBelongsToADifferentPr() {
+            assertThat(
+                            WebviewPanel.shouldRecordOutcome(
+                                    GENERATED, "acme/platform#42", "acme/platform#43"))
+                    .isFalse();
+        }
+
+        @Test
+        void refusesWhenNoReviewWasGeneratedThisSession() {
+            assertThat(WebviewPanel.shouldRecordOutcome(null, null, "acme/platform#42")).isFalse();
+            assertThat(
+                            WebviewPanel.shouldRecordOutcome(
+                                    null, "acme/platform#42", "acme/platform#42"))
+                    .isFalse();
+        }
+
+        @Test
+        void refusesWhenTheGeneratedKeyIsAbsentEvenIfTheSubmitKeyIsNot() {
+            assertThat(WebviewPanel.shouldRecordOutcome(GENERATED, null, "acme/platform#42"))
+                    .isFalse();
+        }
+
+        // A null/null pair is equal under StringUtils.equals, so the blank check is what stops an
+        // uninitialized panel from authorizing a log write.
+        @Test
+        void refusesWhenTheSubmitKeyIsBlank() {
+            assertThat(WebviewPanel.shouldRecordOutcome(GENERATED, null, null)).isFalse();
+            assertThat(WebviewPanel.shouldRecordOutcome(GENERATED, "", "")).isFalse();
+            assertThat(WebviewPanel.shouldRecordOutcome(GENERATED, "  ", "  ")).isFalse();
         }
     }
 

@@ -27,7 +27,11 @@ public interface ReviewEngineApi {
                     Map.entry("generate", "reviews/generate"),
                     Map.entry("chat", "reviews/chat"),
                     Map.entry("cancel", "reviews/cancel"),
-                    Map.entry("recordOutcome", "reviews/recordOutcome"));
+                    Map.entry("recordOutcome", "reviews/recordOutcome"),
+                    Map.entry("readGuidelines", "reviews/readGuidelines"),
+                    Map.entry("findGitRoot", "reviews/findGitRoot"),
+                    Map.entry("createWorktree", "reviews/createWorktree"),
+                    Map.entry("removeWorktree", "reviews/removeWorktree"));
 
     /** Pull-request identity and metadata needed to build a review prompt. */
     record PrParams(
@@ -127,6 +131,49 @@ public interface ReviewEngineApi {
     record RecordOutcomeResult(int recorded) {}
 
     /**
+     * Request for {@link #readGuidelines}.
+     *
+     * <p>An empty or null {@code globs} means "use the engine's defaults" rather than "match
+     * nothing", so a host never has to carry its own copy of the default file list.
+     */
+    record ReadGuidelinesParams(String projectDir, List<String> globs) {}
+
+    /** Result of {@link #readGuidelines}: the concatenated, size-capped guidance text. */
+    record GuidelinesResult(String guidelines) {}
+
+    /**
+     * Result of {@link #findGitRoot}: the repository root, or blank when {@code startDir} is not in
+     * one.
+     */
+    record GitRootResult(String gitRoot) {}
+
+    /**
+     * Request for {@link #createWorktree}.
+     *
+     * <p>A non-blank {@code forkCloneUrl} selects the fork fetch path; otherwise the branch is
+     * fetched from {@code origin}. The destination path is chosen by the engine, so no host picks
+     * its own temp-directory naming.
+     */
+    record CreateWorktreeParams(
+            String gitRoot, int prNumber, String branch, String headSha, String forkCloneUrl) {}
+
+    /**
+     * Result of {@link #createWorktree}.
+     *
+     * <p>{@code status} is {@code created}, {@code skipped} (nothing to check out — a blank
+     * branch), or {@code failed}. Failure is a normal domain result rather than an exception
+     * because every caller degrades to the user's own checkout; a worktree is an optimization, not
+     * a precondition.
+     */
+    record WorktreeResult(String status, String worktreeDir, String message) {}
+
+    /** Request for {@link #removeWorktree}. */
+    record RemoveWorktreeParams(String gitRoot, String worktreeDir) {}
+
+    /** Result of {@link #removeWorktree}. Cleanup failure is reported, never thrown. */
+    record WorktreeRemovalResult(boolean removed) {}
+
+    /**
      * Generates a review. Blocks until the provider CLI completes; callers own threading.
      *
      * @param onStatus receives human-readable progress labels
@@ -151,4 +198,35 @@ public interface ReviewEngineApi {
      * throws, and a failure to write must not affect the submission that triggered it.
      */
     RecordOutcomeResult recordOutcome(RecordOutcomeParams params);
+
+    /**
+     * Reads a checkout's review-guidance docs (AGENTS.md, CONTRIBUTING.md, configured globs) as the
+     * pre-rendered text that feeds {@link GenerateReviewParams#repoGuidelines()}.
+     *
+     * <p>Exposed as a capability rather than left to each host because the resolution rules — glob
+     * translation, the bounded directory walk, ordering, and the size cap — are prompt-affecting
+     * logic. Two hand-mirrored copies had already diverged on the truncation marker.
+     */
+    GuidelinesResult readGuidelines(ReadGuidelinesParams params);
+
+    /**
+     * Walks up from {@code startDir} to the closest ancestor containing a {@code .git} entry.
+     *
+     * <p>Exposed so no host reimplements the walk. The two hand-mirrored copies had already
+     * diverged on what happens when the path cannot be canonicalized.
+     */
+    GitRootResult findGitRoot(String startDir);
+
+    /**
+     * Creates a detached worktree pinned to the PR's head commit, so the agent reads exactly the
+     * code the diff was rendered from rather than a branch tip that can move mid-review.
+     *
+     * <p>Owns the whole policy — destination naming, the fork-versus-origin fetch decision, and the
+     * pin-with-fallback in {@code GitWorktreeService.pinnedCommitish}. Hosts keep only the
+     * lifecycle: caching the returned directory and removing it when the active PR changes.
+     */
+    WorktreeResult createWorktree(CreateWorktreeParams params);
+
+    /** Removes a worktree created by {@link #createWorktree}. Never throws. */
+    WorktreeRemovalResult removeWorktree(RemoveWorktreeParams params);
 }

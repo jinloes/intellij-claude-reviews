@@ -9,9 +9,9 @@ import com.intellij.util.ui.FormBuilder;
 import com.intellij.util.ui.JBUI;
 import com.jinloes.prpilot.model.ReviewProvider;
 import com.jinloes.prpilot.review.CopilotModelDiscovery;
+import com.jinloes.prpilot.services.IntellijGitHubService;
 import com.jinloes.prpilot.services.PRNotificationService;
 import com.jinloes.prpilot.sidecar.github.CheckAuthResult;
-import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
 import java.awt.Component;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -94,8 +94,6 @@ public class PluginSettingsComponent {
     private final JSpinner pollIntervalSpinner = new JSpinner(new SpinnerNumberModel(5, 1, 60, 1));
     private final JLabel pollStatusLabel = new JBLabel(" ");
     private JPanel notifSubPanel;
-
-    private final GitHubAuthService authService = new GitHubAuthService();
 
     public PluginSettingsComponent() {
         checkButton.addActionListener(e -> checkStatus());
@@ -564,7 +562,8 @@ public class PluginSettingsComponent {
         ApplicationManager.getApplication()
                 .executeOnPooledThread(
                         () -> {
-                            CheckAuthResult result = authService.check(baseUrl);
+                            CheckAuthResult result =
+                                    IntellijGitHubService.getInstance().checkAuth(baseUrl);
                             if ("authenticated".equals(result.status())
                                     && result.username() != null) {
                                 String username = result.username();

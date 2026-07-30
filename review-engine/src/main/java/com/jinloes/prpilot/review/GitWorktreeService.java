@@ -4,6 +4,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import org.apache.commons.io.IOUtils;
@@ -149,6 +150,24 @@ public class GitWorktreeService {
         } catch (IOException e) {
             return false;
         }
+    }
+
+    /**
+     * Returns a unique temp path for a PR's worktree. The directory must not exist when the
+     * worktree is created, so the name carries both a timestamp and randomness — rapid consecutive
+     * calls for the same PR would otherwise collide within a millisecond.
+     *
+     * <p>Lives here rather than in each host because the two hosts had drifted to different name
+     * formats, and the cleanup path matches on the {@code pr-pilot-wt-} prefix.
+     */
+    public File newWorktreePath(int prNumber) {
+        String unique =
+                prNumber
+                        + "-"
+                        + System.currentTimeMillis()
+                        + "-"
+                        + Long.toHexString(ThreadLocalRandom.current().nextLong() & Long.MAX_VALUE);
+        return new File(System.getProperty("java.io.tmpdir"), "pr-pilot-wt-" + unique);
     }
 
     /**
