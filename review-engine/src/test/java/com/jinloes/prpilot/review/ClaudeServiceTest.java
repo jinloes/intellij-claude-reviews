@@ -3,6 +3,8 @@ package com.jinloes.prpilot.review;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.jinloes.prpilot.model.ChatMessage;
 import com.jinloes.prpilot.model.LineComment;
 import com.jinloes.prpilot.model.PRReviewRequest;
@@ -20,6 +22,8 @@ import org.junit.jupiter.api.Test;
 
 /** Java port of the former core/jvmTest Kotest suite for ClaudeService; behavior unchanged. */
 class ClaudeServiceTest {
+
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private static PullRequest fakePr() {
         return new PullRequest(
@@ -58,6 +62,60 @@ class ClaudeServiceTest {
             }
             return new ProcessBuilder("sh", "-c", "cat > /dev/null; exit " + step.exitCode())
                     .start();
+        }
+    }
+
+    private static final class TimeoutClaudeService extends ClaudeService {
+        private Process spawnedProcess;
+
+        @Override
+        Process buildProcess(File stdoutFile, int maxTurns, String... extraArgs)
+                throws IOException {
+            return startHangingProcess();
+        }
+
+        @Override
+        Process buildProcess(String... extraArgs) throws IOException {
+            return startHangingProcess();
+        }
+
+        @Override
+        long reviewTimeoutMillis() {
+            return 25;
+        }
+
+        @Override
+        long chatTimeoutMillis() {
+            return 25;
+        }
+
+        private Process startHangingProcess() throws IOException {
+            spawnedProcess = new ProcessBuilder("sh", "-c", "sleep 30").start();
+            return spawnedProcess;
+        }
+    }
+
+    @Nested
+    class ProcessTimeouts {
+
+        @Test
+        void reviewTimeoutTerminatesTheProcessBeforeAwaitingIo() {
+            TimeoutClaudeService service = new TimeoutClaudeService();
+
+            assertThatThrownBy(() -> service.reviewPR(fakeRequest(), "", false, status -> {}, null))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Review timed out");
+            assertThat(service.spawnedProcess.isAlive()).isFalse();
+        }
+
+        @Test
+        void chatTimeoutTerminatesAProcessThatKeepsStdoutOpen() {
+            TimeoutClaudeService service = new TimeoutClaudeService();
+
+            assertThatThrownBy(() -> service.chatWithPrompt("question", chunk -> {}))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("Chat timed out");
+            assertThat(service.spawnedProcess.isAlive()).isFalse();
         }
     }
 
@@ -187,6 +245,29 @@ class ClaudeServiceTest {
             ReviewResult result = ClaudeService.parseReview(json);
             assertThat(result.getLineComments()).hasSize(1);
             assertThat(result.getLineComments().get(0).getBody()).isEqualTo("line one line two");
+        }
+
+        @Test
+        void longLineCommentBodyPreservedInsteadOfCutOff() throws Exception {
+            String body = "a".repeat(300) + " Complete finding with the required remediation.";
+            ObjectNode review =
+                    JSON.createObjectNode().put("summary", "s").put("verdict", "COMMENT");
+            review.putArray("lineComments")
+                    .addObject()
+                    .put("file", "a")
+                    .put("line", 1)
+                    .put("type", "note")
+                    .put("severity", "minor")
+                    .put("category", "tests")
+                    .put("confidence", "medium")
+                    .put("body", body);
+
+            ReviewResult result = ClaudeService.parseReview(JSON.writeValueAsString(review));
+
+            assertThat(result.getLineComments())
+                    .singleElement()
+                    .extracting(LineComment::getBody)
+                    .isEqualTo(body);
         }
     }
 

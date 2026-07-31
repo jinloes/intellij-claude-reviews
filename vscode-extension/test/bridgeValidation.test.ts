@@ -60,7 +60,7 @@ test('rejects unversioned messages', () => {
 });
 
 test('validates nested review fields', () => {
-  const base = { ...version, type: 'saveDraft', number: 42, owner: 'acme', repo: 'platform' };
+  const base = { ...version, type: 'saveDraft', number: 42, owner: 'acme', repo: 'platform', saveId: 1 };
   assert.equal(isValidBridgeRequest({
     ...base,
     result: {
@@ -68,11 +68,23 @@ test('validates nested review fields', () => {
       verdict: 'COMMENT',
       lineComments: [{ file: 'src/a.ts', line: 1, type: 'note', body: 'Body', confidence: 'high' }],
     },
+    generatedResult: { summary: 'Generated', verdict: 'COMMENT', lineComments: [] },
   }), true);
   assert.equal(isValidBridgeRequest({
     ...base,
     result: { summary: 'Summary', verdict: 'INVALID', lineComments: [] },
   }), false);
+  assert.equal(isValidBridgeRequest({
+    ...base,
+    generatedResult: { summary: 'Generated', verdict: 'INVALID', lineComments: [] },
+  }), false);
+});
+
+test('rejects draft saves without a positive correlation ID', () => {
+  const base = { ...version, type: 'saveDraft', number: 42, owner: 'acme', repo: 'platform' };
+  assert.equal(isValidBridgeRequest(base), false);
+  assert.equal(isValidBridgeRequest({ ...base, saveId: 0 }), false);
+  assert.equal(isValidBridgeRequest({ ...base, saveId: 1 }), true);
 });
 
 test('validates refresh compatibility booleans', () => {
@@ -94,7 +106,7 @@ test('rejects oversized identities and payloads', () => {
 });
 
 test('rejects invalid rich comment metadata', () => {
-  const base = { ...version, type: 'saveDraft', number: 42, owner: 'acme', repo: 'platform' };
+  const base = { ...version, type: 'saveDraft', number: 42, owner: 'acme', repo: 'platform', saveId: 1 };
   assert.equal(isValidBridgeRequest({
     ...base,
     result: {

@@ -116,6 +116,21 @@ test('buildSettingsHtml renders the Copilot MCP inheritance controls', () => {
     assert.match(html, /save\('copilotConfigDir'/);
 });
 
+test('buildSettingsHtml renders reusable review-guidance profile controls', () => {
+    const html = buildSettingsHtml('csp', 'n');
+    assert.match(html, /id="guidanceProfile"/);
+    assert.match(html, /id="addGuidanceProfile"/);
+    assert.match(html, /id="renameGuidanceProfile"/);
+    assert.match(html, /id="deleteGuidanceProfile"/);
+    assert.match(html, /id="guidanceGlobs"/);
+    assert.match(html, /id="reviewSelfCritique"/);
+    assert.match(html, /type: 'updateReviewGuidanceState'/);
+    assert.match(html, /profiles: guidanceProfiles/);
+    assert.match(html, /activeProfileId: activeGuidanceProfileId/);
+    assert.match(html, /msg\.requestId !== latestSaveRequestId/);
+    assert.doesNotMatch(html, /save\('activeReviewGuidanceProfileId'/);
+});
+
 test('buildSettingsHtml lists the Claude model presets and effort levels', () => {
     const html = buildSettingsHtml('csp', 'n');
     assert.match(html, /claude-sonnet-4-6/);

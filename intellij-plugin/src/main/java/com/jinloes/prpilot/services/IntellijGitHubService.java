@@ -188,16 +188,16 @@ public final class IntellijGitHubService {
     }
 
     public boolean isPRMerged(String owner, String repo, int number) throws IOException {
-        return detail(owner, repo, number).merged();
+        return getPRDetail(owner, repo, number).merged();
     }
 
     public String getPRHeadSha(String owner, String repo, int number) throws IOException {
-        PrDetail.Head head = detail(owner, repo, number).head();
+        PrDetail.Head head = getPRDetail(owner, repo, number).head();
         return head == null ? "" : head.sha();
     }
 
     public PRHeadInfo getPRHeadInfo(String owner, String repo, int number) throws IOException {
-        PrDetail detail = detail(owner, repo, number);
+        PrDetail detail = getPRDetail(owner, repo, number);
         PrDetail.Head head = detail.head();
         if (head == null) return new PRHeadInfo("", "", false, "");
         boolean fork =
@@ -272,7 +272,7 @@ public final class IntellijGitHubService {
         return result.diff();
     }
 
-    private PrDetail detail(String owner, String repo, int number) throws IOException {
+    public PrDetail getPRDetail(String owner, String repo, int number) throws IOException {
         PrDetailResult result =
                 engine.getPullRequestDetail(
                         new PrDetailService.PrDetailParams(baseUrl(), owner, repo, number));

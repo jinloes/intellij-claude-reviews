@@ -101,7 +101,7 @@ public final class DraftReviewMutationService {
                     client.post(session.apiBase(), session.token(), reviewsUrl, writeJson(payload));
             boolean commentsDropped = false;
             JsonNode created;
-            if (createResponse.statusCode() == 422) {
+            if (createResponse.statusCode() == 422 && !comments.isEmpty()) {
                 // One or more inline comments reference an invalid path or line. Create the
                 // review body-only first (guaranteed to succeed), then add each comment
                 // individually so only the bad ones are dropped.
@@ -128,8 +128,15 @@ public final class DraftReviewMutationService {
                     if (!isSuccess(commentResponse)) dropped.add(comment);
                 }
                 if (!dropped.isEmpty()) {
+                    commentsDropped = true;
+                    List<DraftReviewCodec.LineComment> acceptedComments =
+                            codec.withoutDroppedComments(lineComments, dropped);
                     String updatedBody =
-                            bodyWithOrphans + "\n\n" + codec.buildDroppedSection(dropped);
+                            codec.encodeBody(params.summary(), params.verdict(), acceptedComments);
+                    if (!orphans.isEmpty()) {
+                        updatedBody += "\n\n" + codec.buildOrphanSection(orphans);
+                    }
+                    updatedBody += "\n\n" + codec.buildDroppedSection(dropped);
                     ObjectNode updatePayload = mapper.createObjectNode();
                     updatePayload.put("body", updatedBody);
                     RestResponse updateResponse =
@@ -138,7 +145,6 @@ public final class DraftReviewMutationService {
                                     session.token(),
                                     reviewsUrl + "/" + reviewId,
                                     writeJson(updatePayload));
-                    if (!isSuccess(updateResponse)) commentsDropped = true;
                 }
             } else {
                 requireSuccess(createResponse);
@@ -291,6 +297,10 @@ public final class DraftReviewMutationService {
         return response.statusCode() >= 200 && response.statusCode() < 300;
     }
 
+    static boolean isRetryableHttpMethod(String method) {
+        return !"POST".equals(method);
+    }
+
     private JsonNode readJson(String body) {
         try {
             return mapper.readTree(body);
@@ -434,7 +444,8 @@ public final class DraftReviewMutationService {
 
         private RestResponse send(String method, String url, String token, String jsonBody) {
             URI uri = URI.create(url);
-            for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            int maxAttempts = isRetryableHttpMethod(method) ? MAX_ATTEMPTS : 1;
+            for (int attempt = 1; attempt <= maxAttempts; attempt++) {
                 try {
                     HttpRequest.Builder builder =
                             HttpRequest.newBuilder(uri)
@@ -472,7 +483,7 @@ public final class DraftReviewMutationService {
                                 "Run 'gh auth login' in a terminal for this GitHub host.");
                     }
                     if (statusCode == 429) {
-                        if (attempt < MAX_ATTEMPTS) {
+                        if (attempt < maxAttempts) {
                             backoff(attempt);
                             continue;
                         }
@@ -480,7 +491,7 @@ public final class DraftReviewMutationService {
                                 "rate_limited", "GitHub rate limit exceeded. Try again shortly.");
                     }
                     if (statusCode >= 500) {
-                        if (attempt < MAX_ATTEMPTS) {
+                        if (attempt < maxAttempts) {
                             backoff(attempt);
                             continue;
                         }
@@ -489,7 +500,7 @@ public final class DraftReviewMutationService {
                     }
                     return new RestResponse(statusCode, response.body());
                 } catch (IOException exception) {
-                    if (attempt == MAX_ATTEMPTS) {
+                    if (attempt == maxAttempts) {
                         throw new MutationException(
                                 "network_error", "Unable to reach GitHub. Check your connection.");
                     }

@@ -133,8 +133,9 @@ public interface ReviewEngineApi {
     /**
      * Request for {@link #readGuidelines}.
      *
-     * <p>An empty or null {@code globs} means "use the engine's defaults" rather than "match
-     * nothing", so a host never has to carry its own copy of the default file list.
+     * <p>Configured {@code globs} are prioritized and added to the engine defaults. An empty or
+     * null list therefore means "use only the engine defaults", so a host never has to carry its
+     * own copy of the default file list.
      */
     record ReadGuidelinesParams(String projectDir, List<String> globs) {}
 

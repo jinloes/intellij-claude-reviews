@@ -6,11 +6,64 @@ import com.intellij.openapi.components.State;
 import com.intellij.openapi.components.Storage;
 import com.jinloes.prpilot.model.ReviewProvider;
 import com.jinloes.prpilot.review.RepoGuidelinesReader;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Objects;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 @State(name = "ClaudeReviewSettings", storages = @Storage("claudeReviews.xml"))
 public class PluginSettings implements PersistentStateComponent<PluginSettings.State> {
+
+    public static class ReviewGuidanceProfile {
+        public String id = "";
+        public String name = "";
+        public String focusAreas = "";
+        public String customInstructions = "";
+        public String guidanceGlobs = "";
+
+        public ReviewGuidanceProfile() {}
+
+        public ReviewGuidanceProfile(
+                String id,
+                String name,
+                String focusAreas,
+                String customInstructions,
+                String guidanceGlobs) {
+            this.id = trim(id);
+            this.name = trim(name);
+            this.focusAreas = trim(focusAreas);
+            this.customInstructions = trim(customInstructions);
+            this.guidanceGlobs = trim(guidanceGlobs);
+        }
+
+        public ReviewGuidanceProfile copy() {
+            return new ReviewGuidanceProfile(
+                    id, name, focusAreas, customInstructions, guidanceGlobs);
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (!(other instanceof ReviewGuidanceProfile profile)) {
+                return false;
+            }
+            return Objects.equals(id, profile.id)
+                    && Objects.equals(name, profile.name)
+                    && Objects.equals(focusAreas, profile.focusAreas)
+                    && Objects.equals(customInstructions, profile.customInstructions)
+                    && Objects.equals(guidanceGlobs, profile.guidanceGlobs);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(id, name, focusAreas, customInstructions, guidanceGlobs);
+        }
+
+        private static String trim(String value) {
+            return value != null ? value.trim() : "";
+        }
+    }
 
     public static class State {
         /** Base URL of GitHub instance, e.g. https://github.com or https://github.mycompany.com */
@@ -82,6 +135,14 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
          * RepoGuidelinesReader#DEFAULT_GUIDANCE_GLOBS}.
          */
         public String reviewGuidanceGlobs = "";
+
+        /**
+         * Saved named review-guidance configurations. The legacy fields form the built-in default.
+         */
+        public List<ReviewGuidanceProfile> reviewGuidanceProfiles = new ArrayList<>();
+
+        /** ID of the active named review-guidance profile; blank selects the built-in default. */
+        public String activeReviewGuidanceProfileId = "";
 
         /**
          * When true, review generation runs a second self-critique pass that re-validates each
@@ -244,17 +305,98 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
      * Parsed guidance globs (one per non-blank line), falling back to {@link
      * RepoGuidelinesReader#DEFAULT_GUIDANCE_GLOBS} when nothing is configured.
      */
-    public java.util.List<String> getReviewGuidanceGlobs() {
+    public List<String> getReviewGuidanceGlobs() {
         String raw = getReviewGuidanceGlobsRaw();
         if (raw.isBlank()) {
             return RepoGuidelinesReader.DEFAULT_GUIDANCE_GLOBS;
         }
-        java.util.List<String> globs =
+        List<String> globs =
                 raw.lines()
                         .map(String::strip)
                         .filter(s -> !s.isBlank())
                         .collect(java.util.stream.Collectors.toList());
         return globs.isEmpty() ? RepoGuidelinesReader.DEFAULT_GUIDANCE_GLOBS : globs;
+    }
+
+    public List<ReviewGuidanceProfile> getReviewGuidanceProfiles() {
+        return normalizeProfiles(myState.reviewGuidanceProfiles);
+    }
+
+    public void setReviewGuidanceProfiles(List<ReviewGuidanceProfile> profiles) {
+        myState.reviewGuidanceProfiles = normalizeProfiles(profiles);
+        myState.activeReviewGuidanceProfileId = getActiveReviewGuidanceProfileId();
+    }
+
+    public String getActiveReviewGuidanceProfileId() {
+        String activeId = trim(myState.activeReviewGuidanceProfileId);
+        return getReviewGuidanceProfiles().stream().anyMatch(profile -> profile.id.equals(activeId))
+                ? activeId
+                : "";
+    }
+
+    public void setActiveReviewGuidanceProfileId(String profileId) {
+        String candidate = trim(profileId);
+        myState.activeReviewGuidanceProfileId =
+                getReviewGuidanceProfiles().stream()
+                                .anyMatch(profile -> profile.id.equals(candidate))
+                        ? candidate
+                        : "";
+    }
+
+    public String getResolvedReviewFocusAreas() {
+        ReviewGuidanceProfile active = getActiveReviewGuidanceProfile();
+        return active != null ? active.focusAreas : getReviewFocusAreas();
+    }
+
+    public String getResolvedReviewCustomInstructions() {
+        ReviewGuidanceProfile active = getActiveReviewGuidanceProfile();
+        return active != null ? active.customInstructions : getReviewCustomInstructions();
+    }
+
+    public List<String> getResolvedReviewGuidanceGlobs() {
+        ReviewGuidanceProfile active = getActiveReviewGuidanceProfile();
+        return parseGuidanceGlobs(
+                active != null ? active.guidanceGlobs : getReviewGuidanceGlobsRaw());
+    }
+
+    private ReviewGuidanceProfile getActiveReviewGuidanceProfile() {
+        String activeId = getActiveReviewGuidanceProfileId();
+        return getReviewGuidanceProfiles().stream()
+                .filter(profile -> profile.id.equals(activeId))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private static List<String> parseGuidanceGlobs(String raw) {
+        if (trim(raw).isBlank()) {
+            return RepoGuidelinesReader.DEFAULT_GUIDANCE_GLOBS;
+        }
+        List<String> globs = raw.lines().map(String::strip).filter(s -> !s.isBlank()).toList();
+        return globs.isEmpty() ? RepoGuidelinesReader.DEFAULT_GUIDANCE_GLOBS : globs;
+    }
+
+    private static List<ReviewGuidanceProfile> normalizeProfiles(
+            List<ReviewGuidanceProfile> profiles) {
+        if (profiles == null) {
+            return new ArrayList<>();
+        }
+        List<ReviewGuidanceProfile> normalized = new ArrayList<>();
+        LinkedHashSet<String> ids = new LinkedHashSet<>();
+        for (ReviewGuidanceProfile profile : profiles) {
+            if (profile == null) {
+                continue;
+            }
+            ReviewGuidanceProfile copy = profile.copy();
+            if (copy.id.isBlank() || copy.name.isBlank() || !ids.add(copy.id)) {
+                continue;
+            }
+            normalized.add(copy);
+        }
+        return normalized;
+    }
+
+    private static String trim(String value) {
+        return value != null ? value.trim() : "";
     }
 
     public boolean isReviewSelfCritique() {

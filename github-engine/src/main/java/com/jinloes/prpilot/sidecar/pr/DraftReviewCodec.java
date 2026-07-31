@@ -22,6 +22,9 @@ public final class DraftReviewCodec {
     private static final String TAG_END = " -->";
     private static final String DETACHED_COMMENTS_HEADER =
             "**Comments not attached inline (invalid diff positions):**";
+    private static final Set<String> VALID_VERDICTS =
+            Set.of("APPROVE", "REQUEST_CHANGES", "COMMENT");
+    private static final Set<String> VALID_TYPES = Set.of("issue", "suggestion", "note");
     private final ObjectMapper mapper;
 
     DraftReviewCodec(ObjectMapper mapper) {
@@ -31,11 +34,15 @@ public final class DraftReviewCodec {
     DecodedReview decode(String body, List<ApiComment> apiComments) {
         String safeBody = body == null ? "" : body;
         String verdict = tag(safeBody, VERDICT_TAG, "COMMENT");
+        boolean validVerdict = VALID_VERDICTS.contains(verdict);
         String summary = tag(safeBody, SUMMARY_TAG, "");
         String encoded = tag(safeBody, COMMENTS_TAG, null);
         if (encoded != null) {
             try {
                 List<EncodedComment> comments = mapper.readValue(encoded, new TypeReference<>() {});
+                if (!validVerdict || comments.stream().anyMatch(c -> !validEncodedComment(c))) {
+                    throw new IllegalArgumentException("Invalid embedded review metadata");
+                }
                 List<LineComment> lines = new ArrayList<>();
                 for (EncodedComment c : comments)
                     lines.add(
@@ -44,6 +51,9 @@ public final class DraftReviewCodec {
                 return new DecodedReview(summary, verdict, lines, false);
             } catch (Exception ignored) {
             }
+        }
+        if (!validVerdict) {
+            verdict = "COMMENT";
         }
         List<LineComment> lines = new ArrayList<>();
         for (ApiComment c : apiComments) {
@@ -147,8 +157,7 @@ public final class DraftReviewCodec {
 
         ArrayNode result = mapper.createArrayNode();
         for (LineComment c : lineComments) {
-            String file = c.file() == null ? "" : c.file();
-            if (file.startsWith("a/") || file.startsWith("b/")) file = file.substring(2);
+            String file = normalizePath(c.file());
             if (file.isBlank() || c.line() <= 0 || c.body() == null || c.body().isBlank()) continue;
             if (orphanKeys.contains(orphanKey(c))) continue;
             String dedupeKey = file + "\u0000" + c.line() + "\u0000" + c.body();
@@ -164,13 +173,44 @@ public final class DraftReviewCodec {
     }
 
     private static String orphanKey(LineComment c) {
-        return (c.file() == null ? "" : c.file())
-                + "|"
-                + c.line()
-                + "|"
-                + c.type()
-                + "|"
-                + c.body();
+        return normalizePath(c.file()) + "|" + c.line() + "|" + c.type() + "|" + c.body();
+    }
+
+    List<LineComment> withoutDroppedComments(
+            List<LineComment> lineComments, List<JsonNode> droppedComments) {
+        Set<String> droppedKeys = new HashSet<>();
+        for (JsonNode dropped : droppedComments) {
+            droppedKeys.add(
+                    payloadKey(
+                            dropped.path("path").asText(""),
+                            dropped.path("line").asInt(0),
+                            dropped.path("body").asText("")));
+        }
+        return lineComments.stream()
+                .filter(
+                        comment ->
+                                !droppedKeys.contains(
+                                        payloadKey(comment.file(), comment.line(), comment.body())))
+                .toList();
+    }
+
+    private static boolean validEncodedComment(EncodedComment comment) {
+        return comment != null
+                && comment.l() >= 0
+                && VALID_TYPES.contains(comment.t())
+                && comment.b() != null
+                && !comment.b().isBlank();
+    }
+
+    private static String payloadKey(String file, int line, String body) {
+        return normalizePath(file) + "\u0000" + line + "\u0000" + (body == null ? "" : body);
+    }
+
+    private static String normalizePath(String file) {
+        String normalized = file == null ? "" : file;
+        return normalized.startsWith("a/") || normalized.startsWith("b/")
+                ? normalized.substring(2)
+                : normalized;
     }
 
     /** Formats pre-known orphan comments into the body section GitHub renders verbatim. */

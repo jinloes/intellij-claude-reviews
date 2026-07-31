@@ -41,6 +41,10 @@ public class PluginSettingsConfigurable implements Configurable {
                 || !component.getReviewFocusAreas().equals(s.getReviewFocusAreas())
                 || !component.getReviewCustomInstructions().equals(s.getReviewCustomInstructions())
                 || !component.getReviewGuidanceGlobs().equals(s.getReviewGuidanceGlobsRaw())
+                || !component.getReviewGuidanceProfiles().equals(s.getReviewGuidanceProfiles())
+                || !component
+                        .getActiveReviewGuidanceProfileId()
+                        .equals(s.getActiveReviewGuidanceProfileId())
                 || component.isReviewSelfCritique() != s.isReviewSelfCritique();
     }
 
@@ -73,6 +77,8 @@ public class PluginSettingsConfigurable implements Configurable {
         s.setReviewFocusAreas(component.getReviewFocusAreas());
         s.setReviewCustomInstructions(component.getReviewCustomInstructions());
         s.setReviewGuidanceGlobs(component.getReviewGuidanceGlobs());
+        s.setReviewGuidanceProfiles(component.getReviewGuidanceProfiles());
+        s.setActiveReviewGuidanceProfileId(component.getActiveReviewGuidanceProfileId());
         s.setReviewSelfCritique(component.isReviewSelfCritique());
 
         // Restart/stop polling to reflect the new settings immediately
@@ -103,6 +109,8 @@ public class PluginSettingsConfigurable implements Configurable {
         component.setReviewFocusAreas(s.getReviewFocusAreas());
         component.setReviewCustomInstructions(s.getReviewCustomInstructions());
         component.setReviewGuidanceGlobs(s.getReviewGuidanceGlobsRaw());
+        component.setReviewGuidanceProfiles(s.getReviewGuidanceProfiles());
+        component.setActiveReviewGuidanceProfileId(s.getActiveReviewGuidanceProfileId());
         component.setReviewSelfCritique(s.isReviewSelfCritique());
     }
 

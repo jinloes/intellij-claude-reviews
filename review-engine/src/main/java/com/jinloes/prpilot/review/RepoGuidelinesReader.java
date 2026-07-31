@@ -2,7 +2,10 @@ package com.jinloes.prpilot.review;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -18,17 +21,21 @@ import org.apache.commons.lang3.StringUtils;
  * conventions.
  *
  * <p>The set of files is <b>configurable</b> rather than hardcoded: each entry is either a literal
- * relative path (e.g. {@code AGENTS.md}, {@code .linkedin/ai-agent/coding-pattern.md}) or a glob
- * (e.g. {@code **}{@code /style.md}, {@code .linkedin/**}{@code /*.md}). This lets teams surface
- * repo-specific guidance without a code change. Shared by both hosts: IntelliJ calls it directly;
- * the VS Code extension mirrors the logic in {@code guidelines.ts}.
+ * relative path (e.g. {@code AGENTS.md}, {@code .review/ai-agent/coding-pattern.md}) or a glob
+ * (e.g. {@code **}{@code /style.md}, {@code .review/**}{@code /*.md}). This lets teams surface
+ * repo-specific guidance without a code change. Shared by both hosts: IntelliJ calls it directly,
+ * while VS Code reaches it through the sidecar.
  */
 public final class RepoGuidelinesReader {
 
-    /** Default guidance files scanned when the user has not configured their own list. */
+    /** Standard guidance files scanned for every review. */
     public static final List<String> DEFAULT_GUIDANCE_GLOBS =
             List.of(
-                    "AGENTS.md",
+                    "**/AGENTS.md",
+                    "**/CLAUDE.md",
+                    ".claude/rules/**/*.md",
+                    ".github/copilot-instructions.md",
+                    ".github/instructions/**/*.instructions.md",
                     "CONTRIBUTING.md",
                     ".github/CONTRIBUTING.md",
                     "docs/CONTRIBUTING.md",
@@ -39,6 +46,7 @@ public final class RepoGuidelinesReader {
 
     private static final int MAX_FILES_SCANNED = 5000;
     private static final int MAX_DEPTH = 8;
+    private static final String TRUNCATION_MARKER = "\n...(truncated)";
     private static final Set<String> SKIP_DIRS =
             Set.of(
                     ".git",
@@ -57,37 +65,48 @@ public final class RepoGuidelinesReader {
     /**
      * Reads the guidance files matching {@code globs} under {@code dir}, concatenated and capped at
      * {@link #MAX_GUIDELINES_BYTES}. Returns an empty string when {@code dir} is null/missing or
-     * nothing matches. A blank/empty {@code globs} falls back to {@link #DEFAULT_GUIDANCE_GLOBS}.
+     * nothing matches. Configured {@code globs} are evaluated first, then augmented by {@link
+     * #DEFAULT_GUIDANCE_GLOBS}; matching files are de-duplicated.
      */
     public static String read(File dir, List<String> globs) {
         if (dir == null || !dir.isDirectory()) {
             return "";
         }
-        List<String> patterns = (globs == null || globs.isEmpty()) ? DEFAULT_GUIDANCE_GLOBS : globs;
+        Path root = realDirectory(dir);
+        if (root == null) {
+            return "";
+        }
+        LinkedHashSet<String> patterns = new LinkedHashSet<>();
+        if (globs != null) {
+            patterns.addAll(globs);
+        }
+        patterns.addAll(DEFAULT_GUIDANCE_GLOBS);
         StringBuilder sb = new StringBuilder();
         int total = 0;
-        for (String rel : resolvePaths(dir, patterns)) {
+        for (String rel : resolvePaths(root.toFile(), new ArrayList<>(patterns))) {
             if (total >= MAX_GUIDELINES_BYTES) {
                 break;
             }
-            File f = new File(dir, rel);
-            if (!f.isFile()) {
+            Path file = root.resolve(rel).normalize();
+            if (!isContainedRegularFile(root, file)) {
                 continue;
             }
             try {
-                String content = Files.readString(f.toPath()).trim();
+                String content = Files.readString(file).trim();
                 if (content.isEmpty()) {
                     continue;
                 }
                 int remaining = MAX_GUIDELINES_BYTES - total;
-                if (content.length() > remaining) {
-                    content = content.substring(0, remaining) + "\n...(truncated)";
+                int contentBytes = utf8Length(content);
+                if (contentBytes > remaining) {
+                    content = truncateUtf8(content, remaining);
+                    contentBytes = utf8Length(content);
                 }
                 if (sb.length() > 0) {
                     sb.append("\n\n");
                 }
                 sb.append("## ").append(rel).append("\n").append(content);
-                total += content.length();
+                total += contentBytes;
             } catch (IOException e) {
                 // unreadable — skip
             }
@@ -102,6 +121,10 @@ public final class RepoGuidelinesReader {
      */
     static List<String> resolvePaths(File dir, List<String> patterns) {
         LinkedHashSet<String> ordered = new LinkedHashSet<>();
+        Path root = realDirectory(dir);
+        if (root == null) {
+            return List.of();
+        }
         List<String> allFiles = null;
         for (String raw : patterns) {
             String pattern = StringUtils.strip(raw);
@@ -111,15 +134,23 @@ public final class RepoGuidelinesReader {
             pattern = pattern.replace('\\', '/');
             if (isGlob(pattern)) {
                 if (allFiles == null) {
-                    allFiles = collectRelativeFiles(dir);
+                    allFiles = collectRelativeFiles(root);
                 }
                 Pattern re = Pattern.compile(globToRegex(pattern));
                 allFiles.stream()
                         .filter(f -> re.matcher(f).matches())
                         .sorted()
                         .forEach(ordered::add);
-            } else if (new File(dir, pattern).isFile()) {
-                ordered.add(pattern);
+            } else {
+                Path requested = Path.of(pattern);
+                if (requested.isAbsolute()) {
+                    continue;
+                }
+                Path candidate = root.resolve(requested).normalize();
+                if (isContainedRegularFile(root, candidate)) {
+                    ordered.add(
+                            root.relativize(candidate).toString().replace(File.separatorChar, '/'));
+                }
             }
         }
         return new ArrayList<>(ordered);
@@ -132,26 +163,29 @@ public final class RepoGuidelinesReader {
     /**
      * Bounded breadth-first walk returning '/'-joined relative paths, skipping heavy directories.
      */
-    private static List<String> collectRelativeFiles(File root) {
+    private static List<String> collectRelativeFiles(Path root) {
         List<String> files = new ArrayList<>();
         Deque<Entry> queue = new ArrayDeque<>();
         queue.add(new Entry(root, "", 0));
         while (!queue.isEmpty() && files.size() < MAX_FILES_SCANNED) {
             Entry entry = queue.poll();
-            File[] children = entry.dir.listFiles();
-            if (children == null) {
+            List<Path> children;
+            try (var paths = Files.list(entry.dir)) {
+                children = paths.toList();
+            } catch (IOException e) {
                 continue;
             }
-            for (File child : children) {
+            for (Path child : children) {
                 String rel =
                         entry.prefix.isEmpty()
-                                ? child.getName()
-                                : entry.prefix + "/" + child.getName();
-                if (child.isDirectory()) {
-                    if (entry.depth < MAX_DEPTH && !SKIP_DIRS.contains(child.getName())) {
+                                ? child.getFileName().toString()
+                                : entry.prefix + "/" + child.getFileName();
+                if (Files.isDirectory(child, LinkOption.NOFOLLOW_LINKS)) {
+                    if (entry.depth < MAX_DEPTH
+                            && !SKIP_DIRS.contains(child.getFileName().toString())) {
                         queue.add(new Entry(child, rel, entry.depth + 1));
                     }
-                } else if (child.isFile()) {
+                } else if (Files.isRegularFile(child, LinkOption.NOFOLLOW_LINKS)) {
                     files.add(rel);
                     if (files.size() >= MAX_FILES_SCANNED) {
                         break;
@@ -160,6 +194,65 @@ public final class RepoGuidelinesReader {
             }
         }
         return files;
+    }
+
+    private static Path realDirectory(File dir) {
+        if (dir == null) {
+            return null;
+        }
+        try {
+            Path root = dir.toPath().toRealPath();
+            return Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS) ? root : null;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    private static boolean isContainedRegularFile(Path root, Path candidate) {
+        if (!candidate.startsWith(root)) {
+            return false;
+        }
+        Path current = root;
+        for (Path segment : root.relativize(candidate)) {
+            current = current.resolve(segment);
+            if (Files.isSymbolicLink(current)) {
+                return false;
+            }
+        }
+        if (!Files.isRegularFile(candidate, LinkOption.NOFOLLOW_LINKS)) {
+            return false;
+        }
+        try {
+            return candidate.toRealPath().startsWith(root);
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    private static String truncateUtf8(String content, int maxBytes) {
+        int markerBytes = utf8Length(TRUNCATION_MARKER);
+        if (maxBytes <= markerBytes) {
+            return "";
+        }
+        int contentLimit = maxBytes - markerBytes;
+        StringBuilder truncated = new StringBuilder();
+        int bytes = 0;
+        for (int offset = 0; offset < content.length(); ) {
+            int codePoint = content.codePointAt(offset);
+            String value = new String(Character.toChars(codePoint));
+            int valueBytes = utf8Length(value);
+            if (bytes + valueBytes > contentLimit) {
+                break;
+            }
+            truncated.append(value);
+            bytes += valueBytes;
+            offset += Character.charCount(codePoint);
+        }
+        return truncated.append(TRUNCATION_MARKER).toString();
+    }
+
+    private static int utf8Length(String value) {
+        return value.getBytes(StandardCharsets.UTF_8).length;
     }
 
     /**
@@ -198,5 +291,5 @@ public final class RepoGuidelinesReader {
         return re.append('$').toString();
     }
 
-    private record Entry(File dir, String prefix, int depth) {}
+    private record Entry(Path dir, String prefix, int depth) {}
 }

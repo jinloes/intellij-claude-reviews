@@ -195,7 +195,35 @@
             "type": "string"
           },
           "default": [],
-          "description": "Guidance files (literal relative paths or globs like `**/style.md`, `.linkedin/ai-agent/*.md`) read from the review working directory and folded into the model's repo-guidelines context. One entry per array item. Empty uses the defaults (AGENTS.md, CONTRIBUTING.md, .github/CONTRIBUTING.md, docs/CONTRIBUTING.md, .github/pull_request_template.md)."
+          "description": "Additional guidance files (literal relative paths or globs like `**/style.md`, `.review/ai-agent/*.md`) read from the review working directory and folded into the model's repo-guidelines context. Entries are prioritized and added to the shared engine defaults: AGENTS.md, CLAUDE.md, Claude rules, GitHub Copilot instructions, and contribution guides."
+        },
+        "pr-pilot.reviewGuidanceProfiles": {
+          "type": "array",
+          "default": [],
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "required": ["id", "name", "focusAreas", "customInstructions", "guidanceGlobs"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+              "focusAreas": { "type": "string", "maxLength": 20000 },
+              "customInstructions": { "type": "string", "maxLength": 20000 },
+              "guidanceGlobs": {
+                "type": "array",
+                "maxItems": 100,
+                "items": { "type": "string", "maxLength": 500 }
+              }
+            }
+          },
+          "description": "Named reusable review-guidance profiles. Manage these from PR Pilot Settings; each profile saves focus areas, custom instructions, and additional guidance file paths/globs that augment the shared defaults."
+        },
+        "pr-pilot.activeReviewGuidanceProfileId": {
+          "type": "string",
+          "default": "",
+          "maxLength": 128,
+          "description": "ID of the active saved review-guidance profile. Empty uses the built-in Review defaults settings."
         },
         "pr-pilot.reviewSelfCritique": {
           "type": "boolean",

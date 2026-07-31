@@ -1124,8 +1124,8 @@ export class SidecarClient {
     }
 
     /** Rendered linked-issue context, or empty on any failure. */
-    async getLinkedIssues(githubBaseUrl: string, owner: string, repo: string, number: number): Promise<string> {
-        return this.contextSummary('prs/getLinkedIssues', { githubBaseUrl, owner, repo, number });
+    async getLinkedIssues(githubBaseUrl: string, owner: string, repo: string, prBody: string): Promise<string> {
+        return this.contextSummary('prs/getLinkedIssues', { githubBaseUrl, owner, repo, prBody });
     }
 
     /** Rendered language/build profile for a checkout, or empty on any failure. */

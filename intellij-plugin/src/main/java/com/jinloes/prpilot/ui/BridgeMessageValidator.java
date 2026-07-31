@@ -65,7 +65,11 @@ final class BridgeMessageValidator {
                             && optionalText(node.get("customInstructions"), 20_000);
             case "saveDraft" ->
                     hasValidPrIdentity(node)
+                            && node.path("saveId").canConvertToLong()
+                            && node.path("saveId").asLong() > 0
                             && (node.get("result") == null || validReview(node.get("result")))
+                            && (node.get("generatedResult") == null
+                                    || validReview(node.get("generatedResult")))
                             && validOptionalComments(node.get("orphans"));
             case "submitReview" ->
                     hasValidPrIdentity(node)

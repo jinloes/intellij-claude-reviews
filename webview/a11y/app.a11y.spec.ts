@@ -52,3 +52,30 @@ test('risky submit dialog is accessible and requires acknowledgement', async ({ 
   await page.getByRole('checkbox', { name: /I reviewed these unresolved trust risks/ }).check()
   await expect(submit).toBeEnabled()
 })
+
+test('Comment can be selected from an Approve split menu', async ({ page }) => {
+  await pushHostMessage(page, { type: 'prListLoaded', prs: [examplePr] })
+  await page.getByRole('button', { name: /Improve authentication/ }).click()
+  await pushHostMessage(page, {
+    type: 'draftLoaded',
+    prKey: 'acme/platform#42',
+    prState: 'DRAFT_PRESENT',
+    reviewId: 'draft-1',
+    diff: exampleDiff,
+    result: { summary: 'Ready to submit', verdict: 'APPROVE', lineComments: [] },
+  })
+
+  await page.getByRole('button', { name: 'More submit options' }).click()
+  const comment = page.getByRole('menuitem', { name: 'Comment' })
+  await expect(comment).toBeEnabled()
+  await comment.click()
+  await expect(page.getByRole('alertdialog')).toContainText('Submit comment?')
+  await page.getByRole('button', { name: 'Submit Comment' }).click()
+
+  await expect.poll(() => page.evaluate(() => {
+    const fixture = (window as unknown as {
+      __hostFixture: { outgoing: Array<{ type?: string; verdict?: string }> }
+    }).__hostFixture
+    return fixture.outgoing.filter((message) => message.type === 'submitReview')
+  })).toEqual([expect.objectContaining({ verdict: 'COMMENT' })])
+})

@@ -10,6 +10,11 @@ import {
     normalizeProvider,
     type SettingsState,
 } from './settingsView';
+import {
+    normalizeReviewGuidanceGlobs,
+    normalizeReviewGuidanceProfiles,
+    normalizeReviewGuidanceState,
+} from './reviewGuidanceProfiles';
 
 let panel: vscode.WebviewPanel | undefined;
 
@@ -30,6 +35,10 @@ function readState(): SettingsState {
         copilotConfigDir: c.get<string>('copilotConfigDir', ''),
         reviewFocusAreas: c.get<string>('reviewFocusAreas', ''),
         reviewCustomInstructions: c.get<string>('reviewCustomInstructions', ''),
+        reviewGuidanceGlobs: normalizeReviewGuidanceGlobs(c.get<unknown>('reviewGuidanceGlobs', [])) ?? [],
+        reviewGuidanceProfiles: normalizeReviewGuidanceProfiles(c.get<unknown>('reviewGuidanceProfiles', [])) ?? [],
+        activeReviewGuidanceProfileId: c.get<string>('activeReviewGuidanceProfileId', ''),
+        reviewSelfCritique: c.get<boolean>('reviewSelfCritique', true),
         notificationsEnabled: c.get<boolean>('notificationsEnabled', false),
         notifyReviewRequested: c.get<boolean>('notifyReviewRequested', true),
         notifyStarredRepos: c.get<boolean>('notifyStarredRepos', false),
@@ -40,17 +49,136 @@ function readState(): SettingsState {
 const ALLOWED_KEYS = new Set([
     'reviewProvider', 'reviewModel', 'reviewModelCopilot', 'reviewEffort', 'githubBaseUrl',
     'copilotInheritMcp', 'copilotAutoEnableMcpOnReview', 'copilotConfigDir', 'reviewFocusAreas',
-    'reviewCustomInstructions',
+    'reviewCustomInstructions', 'reviewGuidanceGlobs', 'reviewGuidanceProfiles',
+    'activeReviewGuidanceProfileId', 'reviewSelfCritique',
     'notificationsEnabled', 'notifyReviewRequested', 'notifyStarredRepos', 'notificationPollMinutes',
 ]);
 
 const BOOLEAN_KEYS = new Set([
     'copilotInheritMcp',
     'copilotAutoEnableMcpOnReview',
+    'reviewSelfCritique',
     'notificationsEnabled',
     'notifyReviewRequested',
     'notifyStarredRepos',
 ]);
+
+type SettingsMessage = { type?: string } & Record<string, unknown>;
+
+function saveRequestId(msg: SettingsMessage): number | undefined {
+    return typeof msg.requestId === 'number' && Number.isSafeInteger(msg.requestId)
+        ? msg.requestId
+        : undefined;
+}
+
+function postSaveResult(
+    webview: vscode.Webview,
+    msg: SettingsMessage,
+    key: string,
+    ok: boolean,
+    message: string,
+): void {
+    webview.postMessage({ type: 'saveResult', requestId: saveRequestId(msg), ok, key, message });
+}
+
+async function persistReviewGuidanceState(webview: vscode.Webview, msg: SettingsMessage): Promise<void> {
+    const guidance = normalizeReviewGuidanceState(msg.profiles, msg.activeProfileId);
+    if (guidance === null) {
+        postSaveResult(webview, msg, 'reviewGuidanceState', false, 'Invalid review-guidance profile state.');
+        return;
+    }
+    const current = readState();
+    const previousProfiles = current.reviewGuidanceProfiles;
+    const previousActiveId = current.reviewGuidanceProfiles.some(
+        (profile) => profile.id === current.activeReviewGuidanceProfileId,
+    ) ? current.activeReviewGuidanceProfileId : '';
+    try {
+        await config().update('reviewGuidanceProfiles', guidance.profiles, vscode.ConfigurationTarget.Global);
+        await config().update('activeReviewGuidanceProfileId', guidance.activeProfileId, vscode.ConfigurationTarget.Global);
+        postSaveResult(webview, msg, 'reviewGuidanceState', true, 'Saved.');
+    } catch (err) {
+        await Promise.allSettled([
+            config().update('reviewGuidanceProfiles', previousProfiles, vscode.ConfigurationTarget.Global),
+            config().update('activeReviewGuidanceProfileId', previousActiveId, vscode.ConfigurationTarget.Global),
+        ]);
+        postSaveResult(
+            webview,
+            msg,
+            'reviewGuidanceState',
+            false,
+            err instanceof Error ? err.message : 'Could not save review-guidance profiles.',
+        );
+    }
+}
+
+async function persistSetting(webview: vscode.Webview, msg: SettingsMessage): Promise<void> {
+    const key = typeof msg.key === 'string' ? msg.key : '';
+    if (!ALLOWED_KEYS.has(key)) return;
+    try {
+        if (BOOLEAN_KEYS.has(key)) {
+            await config().update(key, msg.value === true, vscode.ConfigurationTarget.Global);
+            postSaveResult(webview, msg, key, true, 'Saved.');
+            return;
+        }
+        if (key === 'notificationPollMinutes') {
+            const numericValue = typeof msg.value === 'number' ? msg.value : Number.NaN;
+            if (!Number.isInteger(numericValue) || numericValue < 1 || numericValue > 60) {
+                postSaveResult(webview, msg, key, false, 'Polling interval must be between 1 and 60 minutes.');
+                return;
+            }
+            await config().update(key, numericValue, vscode.ConfigurationTarget.Global);
+            postSaveResult(webview, msg, key, true, 'Saved.');
+            return;
+        }
+        if (key === 'reviewGuidanceProfiles') {
+            const profiles = normalizeReviewGuidanceProfiles(msg.value);
+            if (profiles === null) {
+                postSaveResult(webview, msg, key, false, 'Invalid review-guidance profiles.');
+                return;
+            }
+            await config().update(key, profiles, vscode.ConfigurationTarget.Global);
+            postSaveResult(webview, msg, key, true, 'Saved.');
+            return;
+        }
+        if (key === 'reviewGuidanceGlobs') {
+            const globs = normalizeReviewGuidanceGlobs(msg.value);
+            if (globs === null) {
+                postSaveResult(webview, msg, key, false, 'Invalid review-guidance file list.');
+                return;
+            }
+            await config().update(key, globs, vscode.ConfigurationTarget.Global);
+            postSaveResult(webview, msg, key, true, 'Saved.');
+            return;
+        }
+        let value = typeof msg.value === 'string' ? msg.value : '';
+        if (key === 'activeReviewGuidanceProfileId') {
+            value = value.trim();
+            const profiles = readState().reviewGuidanceProfiles;
+            if (value.length > 128 || (value && !profiles.some((profile) => profile.id === value))) {
+                postSaveResult(webview, msg, key, false, 'Invalid review-guidance profile ID.');
+                return;
+            }
+        }
+        if (key === 'githubBaseUrl') {
+            try {
+                value = normalizeGithubBaseUrl(value);
+            } catch {
+                postSaveResult(webview, msg, key, false, GITHUB_BASE_URL_ERROR);
+                return;
+            }
+        }
+        await config().update(key, value, vscode.ConfigurationTarget.Global);
+        postSaveResult(webview, msg, key, true, 'Saved.');
+    } catch (err) {
+        postSaveResult(
+            webview,
+            msg,
+            key,
+            false,
+            err instanceof Error ? err.message : 'Could not save setting.',
+        );
+    }
+}
 
 /** Opens (or reveals) the PR Pilot settings webview panel. */
 export function openSettings(context: vscode.ExtensionContext, sidecar: SidecarClient): void {
@@ -67,6 +195,11 @@ export function openSettings(context: vscode.ExtensionContext, sidecar: SidecarC
     const current = panel;
     const nonce = crypto.randomBytes(16).toString('base64');
     current.webview.html = buildSettingsHtml(current.webview.cspSource, nonce);
+    let saveQueue = Promise.resolve();
+    const enqueueSave = (save: () => Promise<void>): Promise<void> => {
+        saveQueue = saveQueue.then(save, save);
+        return saveQueue;
+    };
 
     const sendInit = async () => {
         const state = readState();
@@ -78,65 +211,18 @@ export function openSettings(context: vscode.ExtensionContext, sidecar: SidecarC
         });
     };
 
-    current.webview.onDidReceiveMessage(async (msg: { type?: string } & Record<string, unknown>) => {
+    current.webview.onDidReceiveMessage(async (msg: SettingsMessage) => {
         if (!msg || typeof msg.type !== 'string') return;
         switch (msg.type) {
             case 'ready':
                 await sendInit();
                 break;
             case 'update': {
-                const key = typeof msg.key === 'string' ? msg.key : '';
-                if (!ALLOWED_KEYS.has(key)) return;
-                if (BOOLEAN_KEYS.has(key)) {
-                    const boolValue = msg.value === true;
-                    try {
-                        await config().update(key, boolValue, vscode.ConfigurationTarget.Global);
-                        current.webview.postMessage({ type: 'saveResult', ok: true, key, message: 'Saved.' });
-                    } catch (err) {
-                        current.webview.postMessage({
-                            type: 'saveResult',
-                            ok: false,
-                            key,
-                            message: err instanceof Error ? err.message : 'Could not save setting.',
-                        });
-                    }
-                    break;
-                }
-                if (key === 'notificationPollMinutes') {
-                    const numericValue = typeof msg.value === 'number' ? msg.value : Number.NaN;
-                    if (!Number.isInteger(numericValue) || numericValue < 1 || numericValue > 60) {
-                        current.webview.postMessage({ type: 'saveResult', ok: false, key, message: 'Polling interval must be between 1 and 60 minutes.' });
-                        return;
-                    }
-                    await config().update(key, numericValue, vscode.ConfigurationTarget.Global);
-                    current.webview.postMessage({ type: 'saveResult', ok: true, key, message: 'Saved.' });
-                    break;
-                }
-                let value = typeof msg.value === 'string' ? msg.value : '';
-                if (key === 'githubBaseUrl') {
-                    try {
-                        value = normalizeGithubBaseUrl(value);
-                    } catch {
-                        current.webview.postMessage({
-                            type: 'saveResult',
-                            ok: false,
-                            key,
-                            message: GITHUB_BASE_URL_ERROR,
-                        });
-                        return;
-                    }
-                }
-                try {
-                    await config().update(key, value, vscode.ConfigurationTarget.Global);
-                    current.webview.postMessage({ type: 'saveResult', ok: true, key, message: 'Saved.' });
-                } catch (err) {
-                    current.webview.postMessage({
-                        type: 'saveResult',
-                        ok: false,
-                        key,
-                        message: err instanceof Error ? err.message : 'Could not save setting.',
-                    });
-                }
+                await enqueueSave(() => persistSetting(current.webview, msg));
+                break;
+            }
+            case 'updateReviewGuidanceState': {
+                await enqueueSave(() => persistReviewGuidanceState(current.webview, msg));
                 break;
             }
             case 'refreshModels': {

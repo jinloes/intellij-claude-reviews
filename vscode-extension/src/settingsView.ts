@@ -8,6 +8,8 @@
  * dropdown of discovered Copilot models. See AGENTS.md cross-host parity rules.
  */
 
+import type { ReviewGuidanceProfile } from './reviewGuidanceProfiles';
+
 export type Provider = 'claude' | 'copilot';
 
 export interface ClaudeModelOption {
@@ -44,6 +46,10 @@ export interface SettingsState {
     copilotConfigDir: string;
     reviewFocusAreas: string;
     reviewCustomInstructions: string;
+    reviewGuidanceGlobs: string[];
+    reviewGuidanceProfiles: ReviewGuidanceProfile[];
+    activeReviewGuidanceProfileId: string;
+    reviewSelfCritique: boolean;
     notificationsEnabled: boolean;
     notifyReviewRequested: boolean;
     notifyStarredRepos: boolean;
@@ -146,6 +152,7 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
   }
   .row { display: flex; gap: 8px; align-items: center; }
   .row select, .row input { flex: 1; }
+  .row.wrap { flex-wrap: wrap; }
   button {
     padding: 5px 12px; font-size: 13px; cursor: pointer; border: none; border-radius: 2px;
     color: var(--vscode-button-foreground); background: var(--vscode-button-background);
@@ -245,6 +252,17 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
     <div class="section-title">Review defaults</div>
 
     <div class="field">
+      <label for="guidanceProfile">Guidance profile</label>
+      <div class="row wrap">
+        <select id="guidanceProfile"></select>
+        <button id="addGuidanceProfile" class="secondary">Save current as…</button>
+        <button id="renameGuidanceProfile" class="secondary">Rename</button>
+        <button id="deleteGuidanceProfile" class="secondary">Delete</button>
+      </div>
+      <div class="hint">Save and reuse focus areas, custom instructions, and guidance files as one named profile.</div>
+    </div>
+
+    <div class="field">
       <label for="focusAreas">Review focus areas</label>
       <input type="text" id="focusAreas" placeholder="e.g. security, performance, test coverage">
       <div class="hint">Comma-separated areas the reviewer should prioritize.</div>
@@ -254,6 +272,17 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
       <label for="customInstructions">Custom review instructions</label>
       <textarea id="customInstructions" rows="3" placeholder="Extra instructions appended to every review prompt (for example team conventions to enforce)."></textarea>
       <div class="hint">Plain text. Use this for conventions or repeated review guidance.</div>
+    </div>
+
+    <div class="field">
+      <label for="guidanceGlobs">Additional guidance files</label>
+      <textarea id="guidanceGlobs" rows="4" placeholder="One relative path or glob per line"></textarea>
+      <div class="hint">These paths are prioritized and added to shared defaults for AGENTS.md, CLAUDE.md, Claude rules, GitHub Copilot instructions, and contribution guides.</div>
+    </div>
+
+    <div class="field">
+      <label><input type="checkbox" id="reviewSelfCritique" style="width:auto;margin-right:6px;">Run a self-critique validation pass</label>
+      <div class="hint">Higher precision, but roughly doubles review time.</div>
     </div>
   </div>
 
@@ -275,6 +304,10 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
   const $ = (id) => document.getElementById(id);
   const CLI_DEFAULT = '__cli_default__';
   let state = null;
+  let guidanceProfiles = [];
+  let activeGuidanceProfileId = '';
+  let nextSaveRequestId = 0;
+  let latestSaveRequestId = 0;
 
   function setStatus(message, kind = '') {
     const el = $('status');
@@ -326,7 +359,74 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
       }
     }
     setStatus('Saving…');
-    vscode.postMessage({ type: 'update', key, value });
+    const requestId = ++nextSaveRequestId;
+    latestSaveRequestId = requestId;
+    vscode.postMessage({ type: 'update', requestId, key, value });
+  }
+
+  function saveGuidanceState() {
+    setStatus('Saving…');
+    const requestId = ++nextSaveRequestId;
+    latestSaveRequestId = requestId;
+    vscode.postMessage({
+      type: 'updateReviewGuidanceState',
+      requestId,
+      profiles: guidanceProfiles,
+      activeProfileId: activeGuidanceProfileId,
+    });
+  }
+
+  function activeGuidanceProfile() {
+    return guidanceProfiles.find((profile) => profile.id === activeGuidanceProfileId) || null;
+  }
+
+  function guidanceValues() {
+    return {
+      focusAreas: $('focusAreas').value.trim(),
+      customInstructions: $('customInstructions').value.trim(),
+      guidanceGlobs: $('guidanceGlobs').value.split(/\\r?\\n/).map((value) => value.trim()).filter(Boolean),
+    };
+  }
+
+  function renderGuidanceProfileOptions() {
+    const select = $('guidanceProfile');
+    select.innerHTML = '';
+    const defaultOption = document.createElement('option');
+    defaultOption.value = '';
+    defaultOption.textContent = 'Default settings';
+    select.appendChild(defaultOption);
+    for (const profile of guidanceProfiles) {
+      const option = document.createElement('option');
+      option.value = profile.id;
+      option.textContent = profile.name;
+      select.appendChild(option);
+    }
+    if (!guidanceProfiles.some((profile) => profile.id === activeGuidanceProfileId)) activeGuidanceProfileId = '';
+    select.value = activeGuidanceProfileId;
+    const named = activeGuidanceProfileId !== '';
+    $('renameGuidanceProfile').disabled = !named;
+    $('deleteGuidanceProfile').disabled = !named;
+  }
+
+  function loadGuidanceFields() {
+    const profile = activeGuidanceProfile();
+    $('focusAreas').value = profile ? profile.focusAreas : (state.reviewFocusAreas || '');
+    $('customInstructions').value = profile ? profile.customInstructions : (state.reviewCustomInstructions || '');
+    $('guidanceGlobs').value = (profile ? profile.guidanceGlobs : (state.reviewGuidanceGlobs || [])).join('\\n');
+  }
+
+  function saveGuidanceField(defaultKey) {
+    const values = guidanceValues();
+    const profile = activeGuidanceProfile();
+    if (profile) {
+      Object.assign(profile, values);
+      saveGuidanceState();
+      return;
+    }
+    if (defaultKey === 'reviewFocusAreas') state.reviewFocusAreas = values.focusAreas;
+    if (defaultKey === 'reviewCustomInstructions') state.reviewCustomInstructions = values.customInstructions;
+    if (defaultKey === 'reviewGuidanceGlobs') state.reviewGuidanceGlobs = values.guidanceGlobs;
+    save(defaultKey, state[defaultKey]);
   }
 
   $('provider').addEventListener('change', () => {
@@ -341,8 +441,46 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
   $('reviewAutoEnableMcp').addEventListener('change', () => save('copilotAutoEnableMcpOnReview', $('reviewAutoEnableMcp').checked));
   $('copilotConfigDir').addEventListener('change', () => save('copilotConfigDir', $('copilotConfigDir').value.trim()));
   $('baseUrl').addEventListener('change', () => save('githubBaseUrl', $('baseUrl').value.trim()));
-  $('focusAreas').addEventListener('change', () => save('reviewFocusAreas', $('focusAreas').value.trim()));
-  $('customInstructions').addEventListener('change', () => save('reviewCustomInstructions', $('customInstructions').value.trim()));
+  $('guidanceProfile').addEventListener('change', () => {
+    activeGuidanceProfileId = $('guidanceProfile').value;
+    saveGuidanceState();
+    renderGuidanceProfileOptions();
+    loadGuidanceFields();
+  });
+  $('addGuidanceProfile').addEventListener('click', () => {
+    const entered = window.prompt('Profile name:');
+    const name = entered ? entered.trim() : '';
+    if (!name) return;
+    const values = guidanceValues();
+    const id = 'profile-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    guidanceProfiles.push({ id, name, ...values });
+    activeGuidanceProfileId = id;
+    saveGuidanceState();
+    renderGuidanceProfileOptions();
+  });
+  $('renameGuidanceProfile').addEventListener('click', () => {
+    const profile = activeGuidanceProfile();
+    if (!profile) return;
+    const entered = window.prompt('Profile name:', profile.name);
+    const name = entered ? entered.trim() : '';
+    if (!name) return;
+    profile.name = name;
+    saveGuidanceState();
+    renderGuidanceProfileOptions();
+  });
+  $('deleteGuidanceProfile').addEventListener('click', () => {
+    const profile = activeGuidanceProfile();
+    if (!profile || !window.confirm('Delete guidance profile "' + profile.name + '"?')) return;
+    guidanceProfiles = guidanceProfiles.filter((candidate) => candidate.id !== profile.id);
+    activeGuidanceProfileId = '';
+    saveGuidanceState();
+    renderGuidanceProfileOptions();
+    loadGuidanceFields();
+  });
+  $('focusAreas').addEventListener('change', () => saveGuidanceField('reviewFocusAreas'));
+  $('customInstructions').addEventListener('change', () => saveGuidanceField('reviewCustomInstructions'));
+  $('guidanceGlobs').addEventListener('change', () => saveGuidanceField('reviewGuidanceGlobs'));
+  $('reviewSelfCritique').addEventListener('change', () => save('reviewSelfCritique', $('reviewSelfCritique').checked));
   $('notificationsEnabled').addEventListener('change', () => save('notificationsEnabled', $('notificationsEnabled').checked));
   $('notifyReviewRequested').addEventListener('change', () => save('notifyReviewRequested', $('notifyReviewRequested').checked));
   $('notifyStarredRepos').addEventListener('change', () => save('notifyStarredRepos', $('notifyStarredRepos').checked));
@@ -382,8 +520,11 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
       $('inheritMcp').checked = state.copilotInheritMcp === true;
       $('reviewAutoEnableMcp').checked = state.copilotAutoEnableMcpOnReview === true;
       $('copilotConfigDir').value = state.copilotConfigDir || '';
-      $('focusAreas').value = state.reviewFocusAreas || '';
-      $('customInstructions').value = state.reviewCustomInstructions || '';
+      guidanceProfiles = Array.isArray(state.reviewGuidanceProfiles) ? state.reviewGuidanceProfiles : [];
+      activeGuidanceProfileId = state.activeReviewGuidanceProfileId || '';
+      renderGuidanceProfileOptions();
+      loadGuidanceFields();
+      $('reviewSelfCritique').checked = state.reviewSelfCritique !== false;
       $('notificationsEnabled').checked = state.notificationsEnabled === true;
       $('notifyReviewRequested').checked = state.notifyReviewRequested === true;
       $('notifyStarredRepos').checked = state.notifyStarredRepos === true;
@@ -395,6 +536,7 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
       renderCopilotModels(msg.copilotModels || [], copilotModelValue());
       setStatus(msg.ok === false ? (msg.message || 'Could not refresh models.') : 'Model list refreshed.', msg.ok === false ? 'error' : 'ok');
     } else if (msg.type === 'saveResult') {
+      if (typeof msg.requestId === 'number' && msg.requestId !== latestSaveRequestId) return;
       setStatus(msg.ok ? (msg.message || 'Saved.') : (msg.message || 'Could not save setting.'), msg.ok ? 'ok' : 'error');
     } else if (msg.type === 'testResult') {
       $('testConnection').textContent = 'Test';

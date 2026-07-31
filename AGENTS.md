@@ -148,6 +148,7 @@ Test framework and location rules:
 
 - Prefer Apache Commons helpers over hand-rolled equivalents (`CollectionUtils`, `StringUtils`, `Strings.CS`, `StringEscapeUtils`).
 - `core`'s shared model classes are plain Java (JavaBean getters/setters). Don't reintroduce Kotlin, kotlinx.serialization, or jackson-module-kotlin for these classes — Jackson (plain bean introspection) is the only runtime JSON serializer used against them.
+- For Java JSON, use the applicable Jackson `ObjectMapper` to serialize DTOs, maps, or tree nodes; do not concatenate raw JSON strings. Tests must build valid JSON fixtures through that serialization path, except when intentionally testing malformed JSON input.
 - In `intellij-plugin`, Jackson is allowed for webview bridge deserialization.
 - IntelliJ threading: background work on pooled threads, UI updates on EDT via `invokeLater()`.
 - Follow Google Java Style (Spotless-enforced), avoid FQNs in method bodies, keep imports explicit.

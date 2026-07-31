@@ -37,7 +37,7 @@ function packageJsonDefaults(): Record<string, unknown> {
 function readerFallback(setting: string): string {
     const source = fs.readFileSync(path.join(extensionRoot, 'src', 'extension.ts'), 'utf8');
     const match = new RegExp(
-        `config\\(\\)\\.get<boolean>\\('${setting}',\\s*(true|false)\\s*\\)`,
+        `(?:config\\(\\)|c)\\.get<boolean>\\('${setting}',\\s*(true|false)\\s*\\)`,
     ).exec(source);
     assert.ok(match, `extension.ts has no boolean reader for '${setting}'`);
     return match[1];
@@ -53,6 +53,25 @@ test('reviewSelfCritique reader fallback matches the contribution default', () =
     assert.equal(readerFallback('reviewSelfCritique'), String(property.default));
 });
 
+test('review-guidance profile settings default to the built-in profile', () => {
+    const properties = packageJsonDefaults();
+    const profiles = properties['pr-pilot.reviewGuidanceProfiles'] as {
+        default: unknown[];
+        maxItems: number;
+        items: { additionalProperties: boolean; required: string[] };
+    };
+    const active = properties['pr-pilot.activeReviewGuidanceProfileId'] as { default: string };
+
+    assert.deepEqual(profiles.default, []);
+    assert.equal(profiles.maxItems, 50);
+    assert.equal(profiles.items.additionalProperties, false);
+    assert.deepEqual(
+        profiles.items.required,
+        ['id', 'name', 'focusAreas', 'customInstructions', 'guidanceGlobs'],
+    );
+    assert.equal(active.default, '');
+});
+
 test('every boolean setting reader fallback matches its contribution default', () => {
     const properties = packageJsonDefaults();
     const source = fs.readFileSync(path.join(extensionRoot, 'src', 'extension.ts'), 'utf8');
@@ -63,7 +82,7 @@ test('every boolean setting reader fallback matches its contribution default', (
 
         const setting = key.replace(/^pr-pilot\./, '');
         const match = new RegExp(
-            `config\\(\\)\\.get<boolean>\\('${setting}',\\s*(true|false)\\s*\\)`,
+            `(?:config\\(\\)|c)\\.get<boolean>\\('${setting}',\\s*(true|false)\\s*\\)`,
         ).exec(source);
         // Not every contributed setting is read through this helper shape; only check the ones
         // that are, so adding a differently-read setting does not fail this guard spuriously.

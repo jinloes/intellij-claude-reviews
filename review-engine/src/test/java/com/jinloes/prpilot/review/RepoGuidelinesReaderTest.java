@@ -4,12 +4,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.List;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -17,6 +19,7 @@ import org.junit.jupiter.api.Test;
 class RepoGuidelinesReaderTest {
 
     private Path tempDir;
+    private Path outsideFile;
 
     @BeforeEach
     void setUp() throws IOException {
@@ -29,6 +32,9 @@ class RepoGuidelinesReaderTest {
             try (Stream<Path> paths = Files.walk(tempDir)) {
                 paths.sorted(Comparator.reverseOrder()).forEach(p -> p.toFile().delete());
             }
+        }
+        if (outsideFile != null) {
+            Files.deleteIfExists(outsideFile);
         }
     }
 
@@ -75,16 +81,15 @@ class RepoGuidelinesReaderTest {
         @Test
         void literalPathsResolveInPriorityOrder() throws IOException {
             write("AGENTS.md", "a");
-            write(".linkedin/ai-agent/coding-pattern.md", "b");
+            write(".review/ai-agent/coding-pattern.md", "b");
             List<String> resolved =
                     RepoGuidelinesReader.resolvePaths(
                             tempDir.toFile(),
                             List.of(
-                                    ".linkedin/ai-agent/coding-pattern.md",
+                                    ".review/ai-agent/coding-pattern.md",
                                     "AGENTS.md",
                                     "MISSING.md"));
-            assertThat(resolved)
-                    .containsExactly(".linkedin/ai-agent/coding-pattern.md", "AGENTS.md");
+            assertThat(resolved).containsExactly(".review/ai-agent/coding-pattern.md", "AGENTS.md");
         }
 
         @Test
@@ -106,6 +111,49 @@ class RepoGuidelinesReaderTest {
                     RepoGuidelinesReader.resolvePaths(tempDir.toFile(), List.of("**/style.md"));
             assertThat(resolved).containsExactly("keep/style.md");
         }
+
+        @Test
+        void rejectsTraversalAndAbsolutePaths() throws IOException {
+            outsideFile = Files.createTempFile(tempDir.getParent(), "outside-guidance", ".md");
+            Files.writeString(outsideFile, "secret");
+            write("inside.md", "safe");
+
+            List<String> resolved =
+                    RepoGuidelinesReader.resolvePaths(
+                            tempDir.toFile(),
+                            List.of(
+                                    "../" + outsideFile.getFileName(),
+                                    outsideFile.toString(),
+                                    "inside.md"));
+
+            assertThat(resolved).containsExactly("inside.md");
+        }
+
+        @Test
+        void rejectsFileAndDirectorySymlinks() throws IOException {
+            outsideFile = Files.createTempFile(tempDir.getParent(), "outside-guidance", ".md");
+            Files.writeString(outsideFile, "secret");
+            Path outsideDirectory =
+                    Files.createTempDirectory(tempDir.getParent(), "outside-guidance-dir");
+            Files.writeString(outsideDirectory.resolve("AGENTS.md"), "directory secret");
+            try {
+                Files.createSymbolicLink(tempDir.resolve("linked.md"), outsideFile);
+                Files.createSymbolicLink(tempDir.resolve("linked-dir"), outsideDirectory);
+            } catch (UnsupportedOperationException | IOException | SecurityException e) {
+                deleteTree(outsideDirectory);
+                Assumptions.abort("Symbolic links are unavailable: " + e.getMessage());
+            }
+
+            try {
+                assertThat(
+                                RepoGuidelinesReader.resolvePaths(
+                                        tempDir.toFile(),
+                                        List.of("linked.md", "linked-dir/**/*.md", "**/*.md")))
+                        .isEmpty();
+            } finally {
+                deleteTree(outsideDirectory);
+            }
+        }
     }
 
     @Nested
@@ -114,13 +162,13 @@ class RepoGuidelinesReaderTest {
         @Test
         void concatenatesMatchedFilesWithHeaders() throws IOException {
             write("AGENTS.md", "agent rules");
-            write(".linkedin/ai-agent/coding-pattern.md", "pattern rules");
+            write(".review/ai-agent/coding-pattern.md", "pattern rules");
             String result =
                     RepoGuidelinesReader.read(
-                            tempDir.toFile(), List.of("AGENTS.md", ".linkedin/ai-agent/*.md"));
+                            tempDir.toFile(), List.of("AGENTS.md", ".review/ai-agent/*.md"));
             assertThat(result)
                     .contains("## AGENTS.md\nagent rules")
-                    .contains("## .linkedin/ai-agent/coding-pattern.md\npattern rules");
+                    .contains("## .review/ai-agent/coding-pattern.md\npattern rules");
         }
 
         @Test
@@ -131,10 +179,76 @@ class RepoGuidelinesReaderTest {
         }
 
         @Test
+        void defaultsIncludeStandardAgentInstructionFilesInPriorityOrder() throws IOException {
+            write("AGENTS.md", "root agents");
+            write("module/AGENTS.md", "module agents");
+            write("CLAUDE.md", "claude");
+            write(".claude/rules/java.md", "claude rule");
+            write(".github/copilot-instructions.md", "copilot");
+            write(".github/instructions/java.instructions.md", "copilot java");
+            write(".review/ai-agent/coding-pattern.md", "team patterns");
+            write("CONTRIBUTING.md", "contributing");
+
+            List<String> resolved =
+                    RepoGuidelinesReader.resolvePaths(
+                            tempDir.toFile(), RepoGuidelinesReader.DEFAULT_GUIDANCE_GLOBS);
+
+            assertThat(resolved)
+                    .containsExactly(
+                            "AGENTS.md",
+                            "module/AGENTS.md",
+                            "CLAUDE.md",
+                            ".claude/rules/java.md",
+                            ".github/copilot-instructions.md",
+                            ".github/instructions/java.instructions.md",
+                            "CONTRIBUTING.md");
+        }
+
+        @Test
+        void configuredPathsArePrioritizedAndAddedToDefaults() throws IOException {
+            write("AGENTS.md", "default rules");
+            write(".review/ai-agent/coding-pattern.md", "team rules");
+
+            String result =
+                    RepoGuidelinesReader.read(
+                            tempDir.toFile(),
+                            List.of(".review/ai-agent/coding-pattern.md", "AGENTS.md"));
+
+            assertThat(result)
+                    .contains("## .review/ai-agent/coding-pattern.md\nteam rules")
+                    .contains("## AGENTS.md\ndefault rules");
+            assertThat(result.indexOf(".review/ai-agent/coding-pattern.md"))
+                    .isLessThan(result.indexOf("AGENTS.md"));
+            assertThat(result).containsOnlyOnce("## AGENTS.md");
+        }
+
+        @Test
         void capsTotalBytes() throws IOException {
-            write("AGENTS.md", "x".repeat(RepoGuidelinesReader.MAX_GUIDELINES_BYTES + 500));
+            write("AGENTS.md", "😀".repeat(RepoGuidelinesReader.MAX_GUIDELINES_BYTES));
             String result = RepoGuidelinesReader.read(tempDir.toFile(), List.of("AGENTS.md"));
+            String guidance = result.substring(result.indexOf('\n') + 1);
+
             assertThat(result).contains("...(truncated)");
+            assertThat(guidance).doesNotContain("�");
+            assertThat(guidance.getBytes(StandardCharsets.UTF_8).length)
+                    .isLessThanOrEqualTo(RepoGuidelinesReader.MAX_GUIDELINES_BYTES);
+        }
+
+        @Test
+        void doesNotReadOutsideContentThroughLiteralOrDefaultGlob() throws IOException {
+            outsideFile = Files.createTempFile(tempDir.getParent(), "outside-guidance", ".md");
+            Files.writeString(outsideFile, "outside secret");
+            try {
+                Files.createSymbolicLink(tempDir.resolve("AGENTS.md"), outsideFile);
+            } catch (UnsupportedOperationException | IOException | SecurityException e) {
+                Assumptions.abort("Symbolic links are unavailable: " + e.getMessage());
+            }
+
+            assertThat(
+                            RepoGuidelinesReader.read(
+                                    tempDir.toFile(),
+                                    List.of("../" + outsideFile.getFileName(), "AGENTS.md")))
+                    .isEmpty();
         }
 
         @Test
@@ -144,6 +258,15 @@ class RepoGuidelinesReaderTest {
                             RepoGuidelinesReader.read(
                                     new File(tempDir.toFile(), "nope"), List.of("AGENTS.md")))
                     .isEmpty();
+        }
+    }
+
+    private static void deleteTree(Path root) throws IOException {
+        if (!Files.exists(root)) {
+            return;
+        }
+        try (Stream<Path> paths = Files.walk(root)) {
+            paths.sorted(Comparator.reverseOrder()).forEach(path -> path.toFile().delete());
         }
     }
 }

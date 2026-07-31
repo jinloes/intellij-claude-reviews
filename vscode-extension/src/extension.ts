@@ -15,6 +15,18 @@ import { buildErrorHtml, buildLauncherHtml, buildMainWebviewHtml } from './webvi
 import { classifyHostTheme, type HostTheme } from './hostTheme';
 import { SidecarClient, resolveSidecarJarPath, type OutcomeComment } from './sidecar';
 import type { LineComment, PR, PRSearchScope, ReviewResult } from './models';
+import {
+    canPersistDraft,
+    cancelThenCleanup,
+    cancelForSelection,
+    invalidateChatAndCancel,
+    invalidateGenerationAndCancel,
+} from './operationCorrelation';
+import {
+    normalizeReviewGuidanceGlobs,
+    resolveReviewGuidance,
+    type ResolvedReviewGuidance,
+} from './reviewGuidanceProfiles';
 
 // Process-wide, lazily-started Java engine host. GitHub operations are never performed in the
 // Node extension process, so missing Java/jar or transport failures surface as setup errors.
@@ -298,16 +310,22 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
             activeDiff: '',
             activeValidationDiff: '',
             activeReviewResult: null,
-            generatedReviewResult: null,
-            editedReviewResult: null,
             pendingReviewId: null,
             pendingReviewKey: null,
             selectionRevision: 0,
+            refreshRevision: 0,
+            generationRevision: 0,
+            chatRevision: 0,
+            activeProviderOperation: null,
+            generatedReviews: new Map(),
             mutationQueue: Promise.resolve(),
             chatHistory: new Map(),
             worktreeDir: null,
             gitRoot: null,
             worktreeKey: null,
+            worktreeEpoch: 0,
+            worktreeCreation: null,
+            disposed: false,
         };
         this.state = state;
 
@@ -321,7 +339,10 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
         // temp directories or detached worktrees registered against the user's repo.
         onDidDispose(() => {
             themeSubscription.dispose();
-            clearWorktree(state);
+            state.disposed = true;
+            state.generationRevision++;
+            state.chatRevision++;
+            void cancelThenCleanup(cancelActiveProvider, () => clearWorktree(state));
             onDispose?.();
         });
 
@@ -378,7 +399,7 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
                     await handleGenerateReview(state, msg);
                     break;
                 case 'cancelReview':
-                    await cancelActiveProvider();
+                    await invalidateGenerationAndCancel(state, cancelActiveProvider);
                     break;
                 case 'saveDraft':
                     await enqueueMutation(state, () => handleSaveDraft(state, msg));
@@ -393,6 +414,8 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
                     await handleAskClaude(state, msg);
                     break;
                 case 'clearChat': {
+                    const ownsProvider = state.activeProviderOperation?.kind === 'chat';
+                    await invalidateChatAndCancel(state, cancelActiveProvider, ownsProvider);
                     const key = prKey(state.activePR);
                     if (key) state.chatHistory.delete(key);
                     break;
@@ -441,20 +464,18 @@ interface ViewState {
     activeDiff: string;
     activeValidationDiff: string;
     activeReviewResult: ReviewResult | null;
-    /**
-     * The review exactly as the model produced it, set *only* on generation — never when a draft is
-     * loaded from GitHub, which was not generated in this session and would otherwise record every
-     * comment as "kept". Mirrors WebviewPanel.java's `generatedResult`.
-     */
-    generatedReviewResult: ReviewResult | null;
-    /**
-     * The review as the reviewer edited it, captured from `saveDraft` — the only message that
-     * carries it. Outcome logging diffs this against `generatedReviewResult`.
-     */
-    editedReviewResult: ReviewResult | null;
     pendingReviewId: string | null;
     pendingReviewKey: string | null;
     selectionRevision: number;
+    refreshRevision: number;
+    generationRevision: number;
+    chatRevision: number;
+    activeProviderOperation: { kind: 'review' | 'chat'; revision: number } | null;
+    generatedReviews: Map<string, {
+        result: ReviewResult;
+        editedResult: ReviewResult | null;
+        attribution: { provider: Provider; model: string };
+    }>;
     mutationQueue: Promise<void>;
     chatHistory: Map<string, claude.ChatMessage[]>;
     // PR-branch worktree, lazily created on first review/chat for the active PR and reused until
@@ -462,6 +483,9 @@ interface ViewState {
     worktreeDir: string | null;
     gitRoot: string | null;
     worktreeKey: string | null;
+    worktreeEpoch: number;
+    worktreeCreation: { key: string; promise: Promise<string> } | null;
+    disposed: boolean;
 }
 
 function providerReadiness(): { provider: Provider; available: boolean; detail: string } {
@@ -503,6 +527,8 @@ function clearWorktree(state: ViewState): void {
     state.worktreeDir = null;
     state.gitRoot = null;
     state.worktreeKey = null;
+    state.worktreeEpoch++;
+    state.worktreeCreation = null;
     if (wt && root) {
         void sidecarClient.removeWorktree(root, wt);
     }
@@ -530,6 +556,27 @@ async function resolveWorkingDir(
     const key = worktreeKey(pr);
     if (state.worktreeDir && state.worktreeKey === key) return state.worktreeDir;
     if (!fallback) return fallback;
+
+    if (state.worktreeCreation?.key === key) return state.worktreeCreation.promise;
+    const epoch = state.worktreeEpoch;
+    const promise = createWorkingDir(state, pr, fallback, key, epoch, emitStatus, bridgePrKey);
+    state.worktreeCreation = { key, promise };
+    try {
+        return await promise;
+    } finally {
+        if (state.worktreeCreation?.promise === promise) state.worktreeCreation = null;
+    }
+}
+
+async function createWorkingDir(
+    state: ViewState,
+    pr: ActivePR,
+    fallback: string,
+    key: string,
+    epoch: number,
+    emitStatus: boolean,
+    bridgePrKey?: string,
+): Promise<string> {
 
     const gitRoot = await sidecarClient.findGitRoot(fallback);
     const currentRepo = await sidecarClient.detectRepo(fallback);
@@ -564,7 +611,7 @@ async function resolveWorkingDir(
         }
 
         // The PR may have changed while we awaited git; discard the worktree if so.
-        if (!isSameActivePR(state, pr)) {
+        if (state.disposed || state.worktreeEpoch !== epoch || !isSameActivePR(state, pr)) {
             void sidecarClient.removeWorktree(gitRoot, created.worktreeDir);
             return fallback;
         }
@@ -598,53 +645,48 @@ function githubBaseUrl(): string {
     return config().get<string>('githubBaseUrl', 'https://github.com');
 }
 
-function reviewModel(): string {
-    const key = provider() === 'copilot' ? 'reviewModelCopilot' : 'reviewModel';
-    return config().get<string>(key, '');
+interface ReviewGenerationSettings {
+    provider: Provider;
+    model: string;
+    effort: string;
+    inheritMcp: boolean;
+    configDir: string;
+    selfCritique: boolean;
+    githubBaseUrl: string;
+    guidance: ResolvedReviewGuidance;
 }
 
-function reviewEffort(): string {
-    const value = config().get<string>('reviewEffort', 'high');
-    return value && value.trim().length > 0 ? value : 'high';
-}
-
-function copilotInheritMcp(): boolean {
-    return config().get<boolean>('copilotInheritMcp', false);
-}
-
-function copilotAutoEnableMcpOnReview(): boolean {
-    return config().get<boolean>('copilotAutoEnableMcpOnReview', false);
-}
-
-function copilotConfigDir(): string {
-    return config().get<string>('copilotConfigDir', '').trim();
-}
-
-function reviewFocusAreas(): string {
-    return config().get<string>('reviewFocusAreas', '').trim();
-}
-
-function reviewCustomInstructions(): string {
-    return config().get<string>('reviewCustomInstructions', '').trim();
-}
-
-/**
- * User-configured guidance globs. Returns an empty list when unset, which the engine reads as
- * "use the default file list" — the defaults deliberately live only in `RepoGuidelinesReader`.
- */
-function reviewGuidanceGlobs(): string[] {
-    const globs = config().get<string[]>('reviewGuidanceGlobs', []);
-    return Array.isArray(globs)
-        ? globs.map((g) => String(g).trim()).filter((g) => g.length > 0)
-        : [];
-}
-
-/**
- * When true, review generation runs a second self-critique validation pass. Default on; the
- * fallback here must match the `pr-pilot.reviewSelfCritique` default in package.json.
- */
-function reviewSelfCritique(): boolean {
-    return config().get<boolean>('reviewSelfCritique', true);
+function snapshotReviewGenerationSettings(): ReviewGenerationSettings {
+    const c = config();
+    const selectedProvider: Provider = c.get<string>('reviewProvider', 'claude') === 'copilot'
+        ? 'copilot'
+        : 'claude';
+    const effort = c.get<string>('reviewEffort', 'high').trim() || 'high';
+    const guidanceGlobs = normalizeReviewGuidanceGlobs(c.get<unknown>('reviewGuidanceGlobs', [])) ?? [];
+    const guidance = resolveReviewGuidance(
+        c.get<unknown>('reviewGuidanceProfiles', []),
+        c.get<unknown>('activeReviewGuidanceProfileId', ''),
+        {
+            focusAreas: c.get<string>('reviewFocusAreas', '').trim(),
+            customInstructions: c.get<string>('reviewCustomInstructions', '').trim(),
+            guidanceGlobs,
+        },
+    );
+    return {
+        provider: selectedProvider,
+        model: c.get<string>(selectedProvider === 'copilot' ? 'reviewModelCopilot' : 'reviewModel', ''),
+        effort,
+        inheritMcp: selectedProvider === 'copilot'
+            ? copilot.resolveReviewInheritMcp(
+                c.get<boolean>('copilotInheritMcp', false),
+                c.get<boolean>('copilotAutoEnableMcpOnReview', false),
+            )
+            : false,
+        configDir: selectedProvider === 'copilot' ? c.get<string>('copilotConfigDir', '').trim() : '',
+        selfCritique: c.get<boolean>('reviewSelfCritique', true),
+        githubBaseUrl: c.get<string>('githubBaseUrl', 'https://github.com'),
+        guidance,
+    };
 }
 
 /** Formats a prior generated review as compact context for a re-generation prompt. */
@@ -667,6 +709,7 @@ function workingDir(): string {
 // ── Message handlers ───────────────────────────────────────────────────────────
 
 async function handleRefreshPRs(state: ViewState, msg: Record<string, unknown>): Promise<void> {
+    const refreshRevision = ++state.refreshRevision;
     try {
         if (typeof msg.state === 'string') state.prStateFilter = msg.state;
         if (typeof msg.searchScope === 'string') {
@@ -677,9 +720,14 @@ async function handleRefreshPRs(state: ViewState, msg: Record<string, unknown>):
             state.searchScope = 'reviewRequested';
         }
 
+        const prStateFilter = state.prStateFilter;
+        const searchScope = state.searchScope;
+        const baseUrl = githubBaseUrl();
+
         const currentRepo = await sidecarClient.detectRepo(workingDir() || process.cwd());
         const found = await sidecarClient.listPullRequests(
-            githubBaseUrl(), state.prStateFilter, state.searchScope, currentRepo ?? undefined);
+            baseUrl, prStateFilter, searchScope, currentRepo ?? undefined);
+        if (state.refreshRevision !== refreshRevision || state.disposed) return;
         if (found.status !== 'ok') throw new Error(found.message);
         const prs = found.prs.map((item) => ({ ...item, hasReviewDraft: false })).map((pr) => {
             if (!state.activePR || !state.pendingReviewId) return pr;
@@ -693,13 +741,14 @@ async function handleRefreshPRs(state: ViewState, msg: Record<string, unknown>):
             prs,
             defaultRepo: currentRepo ?? undefined,
             listStatus: {
-                searchScope: state.searchScope,
+                searchScope,
                 currentRepo: currentRepo ?? undefined,
                 resultLimit: found.resultLimit,
                 limited: found.limited,
             },
         });
     } catch (err) {
+        if (state.refreshRevision !== refreshRevision || state.disposed) return;
         const reason = classifySetupAuthError(err);
         const detail = reason === 'gh_not_installed'
             ? "The 'gh' CLI was not found. Install it from https://cli.github.com, then run 'gh auth login' in a terminal and click Refresh."
@@ -725,13 +774,14 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
     const title = typeof msg.title === 'string' ? msg.title : '';
     const body = typeof msg.body === 'string' ? msg.body : '';
 
+    state.generationRevision++;
+    state.chatRevision++;
+    if (!await cancelForSelection(state, selectionRevision, cancelActiveProvider)) return;
     clearWorktree(state);
     state.activePR = { number, owner, repo, title, body };
     state.activeDiff = '';
     state.activeValidationDiff = '';
     state.activeReviewResult = null;
-    state.generatedReviewResult = null;
-    state.editedReviewResult = null;
     state.pendingReviewId = null;
     state.pendingReviewKey = null;
     push(state, { type: 'draftLoading', prKey: key });
@@ -769,10 +819,6 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
         state.activeDiff = diff;
         state.activeValidationDiff = validationDiff;
         state.activeReviewResult = draft?.result ?? null;
-        // A draft fetched from GitHub was not generated in this session, so there is no
-        // model-authored baseline to diff against. Leave both outcome-logging halves empty.
-        state.generatedReviewResult = null;
-        state.editedReviewResult = null;
         state.pendingReviewId = draft?.id ?? null;
         state.pendingReviewKey = draft ? key : null;
 
@@ -807,6 +853,11 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
                 if (fullResult.status !== 'ok' || fullResult.diff === null) return;
                 if (prKey(state.activePR) === key && state.selectionRevision === selectionRevision) {
                     state.activeValidationDiff = fullResult.diff || diff;
+                    push(state, {
+                        type: 'validationDiffUpdated',
+                        prKey: key,
+                        validationDiff: state.activeValidationDiff,
+                    });
                 }
             })
             .catch((err) => {
@@ -836,10 +887,19 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
         return;
     }
     const selectionRevision = state.selectionRevision;
+    const generationRevision = ++state.generationRevision;
+    const activePr = state.activePR;
+    const settings = snapshotReviewGenerationSettings();
+    const priorReview = formatPriorReview(state.activeReviewResult);
+    const isCurrentGeneration = () =>
+        !state.disposed
+        && prKey(state.activePR) === key
+        && state.selectionRevision === selectionRevision
+        && state.generationRevision === generationRevision;
 
     // Provider preflight: fail fast with actionable guidance instead of a raw CLI spawn error
     // when the configured review provider's binary isn't installed/resolvable.
-    const isCopilot = provider() === 'copilot';
+    const isCopilot = settings.provider === 'copilot';
     if (isCopilot ? !copilot.copilotBinaryAvailable() : !claude.claudeBinaryAvailable()) {
         push(state, {
             type: 'reviewError',
@@ -851,30 +911,38 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
 
     push(state, { type: 'reviewGenerating', prKey: key, message: 'Fetching PR data…' });
     try {
-        const base = githubBaseUrl();
+        const base = settings.githubBaseUrl;
 
         const requestedDiff = typeof msg.diff === 'string' && msg.diff.trim() ? msg.diff : undefined;
         let diff = requestedDiff ?? state.activeDiff;
-        let validationDiff = state.activeValidationDiff;
         if (!diff) {
             const result = await sidecarClient.getPullRequestDiff(base, owner, repo, number, 'review');
             if (!result || result.status !== 'ok' || result.diff === null) throw new Error(result?.message ?? 'Invalid sidecar diff response.');
             diff = result.diff;
-            if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
+            if (!isCurrentGeneration()) return;
             state.activeDiff = diff;
         }
-        if (!validationDiff) {
-            const result = await sidecarClient.getPullRequestDiff(base, owner, repo, number, 'validation').catch(() => null);
-            validationDiff = result?.status === 'ok' && result.diff !== null ? result.diff : diff;
-            if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
-            state.activeValidationDiff = validationDiff;
-        }
+        let resolvedValidationDiff = state.activeValidationDiff;
+        let reviewResultPublished = false;
+        const validationDiffPromise = resolvedValidationDiff
+            ? Promise.resolve(resolvedValidationDiff)
+            : sidecarClient.getPullRequestDiff(base, owner, repo, number, 'validation')
+                .then((result) => result?.status === 'ok' && result.diff !== null ? result.diff : diff)
+                .catch(() => diff);
+        void validationDiffPromise.then((fullDiff) => {
+            if (!isCurrentGeneration()) return;
+            resolvedValidationDiff = fullDiff;
+            state.activeValidationDiff = fullDiff;
+            if (reviewResultPublished) {
+                push(state, { type: 'validationDiffUpdated', prKey: key, validationDiff: fullDiff });
+            }
+        });
 
         const reviewsResult = await sidecarClient.getExistingReviews(base, owner, repo, number).catch(() => null);
         const existingReviews = reviewsResult?.status === 'ok' ? reviewsResult.summary : '';
 
-        const title = state.activePR?.title ?? '';
-        const body = state.activePR?.body ?? '';
+        const title = activePr?.title ?? '';
+        const body = activePr?.body ?? '';
 
         const reviewDir = await resolveWorkingDir(
             state,
@@ -895,32 +963,35 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
                 ? sidecarClient.getCheckStatus(base, owner, repo, headSha)
                 : Promise.resolve({ summary: '', annotations: [] }),
             sidecarClient.getCommits(base, owner, repo, number),
-            sidecarClient.getLinkedIssues(base, owner, repo, number),
+            sidecarClient.getLinkedIssues(base, owner, repo, body),
             sidecarClient.getRepoProfile(reviewDir),
         ]);
-        if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
+        if (!isCurrentGeneration()) return;
 
         // Per-review overrides from the webview take precedence over the saved settings defaults.
+        const guidance = settings.guidance;
         const focusAreas = typeof msg.focusAreas === 'string' && msg.focusAreas.trim()
             ? msg.focusAreas.trim()
-            : reviewFocusAreas();
+            : guidance.focusAreas;
         const customInstructions = typeof msg.customInstructions === 'string' && msg.customInstructions.trim()
             ? msg.customInstructions.trim()
-            : reviewCustomInstructions();
+            : guidance.customInstructions;
 
         // Prompt construction happens sidecar-side (shared review-engine ClaudeService/CopilotService);
         // the extension only supplies raw PR/diff/context fields.
-        const result = await sidecarClient.generateReview(
-            {
-                provider: isCopilot ? 'copilot' : 'claude',
+        const providerOperation = { kind: 'review' as const, revision: generationRevision };
+        state.activeProviderOperation = providerOperation;
+        let result: ReviewResult | null;
+        try {
+            result = await sidecarClient.generateReview(
+                {
+                provider: settings.provider,
                 projectDir: reviewDir,
-                model: reviewModel(),
-                effort: reviewEffort(),
-                inheritMcp: isCopilot
-                    ? copilot.resolveReviewInheritMcp(copilotInheritMcp(), copilotAutoEnableMcpOnReview())
-                    : false,
-                configDir: isCopilot ? copilotConfigDir() : undefined,
-                selfCritique: reviewSelfCritique(),
+                model: settings.model,
+                effort: settings.effort,
+                inheritMcp: settings.inheritMcp,
+                configDir: isCopilot ? settings.configDir : undefined,
+                selfCritique: settings.selfCritique,
                 pr: {
                     title,
                     // htmlUrl/author/createdAt/isDraft aren't used by ClaudeService/CopilotService's
@@ -937,9 +1008,9 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
                     isDraft: false,
                 },
                 diff,
-                priorReview: formatPriorReview(state.activeReviewResult),
+                priorReview,
                 existingReviews,
-                repoGuidelines: await sidecarClient.readRepoGuidelines(reviewDir, reviewGuidanceGlobs()),
+                repoGuidelines: await sidecarClient.readRepoGuidelines(reviewDir, guidance.guidanceGlobs),
                 focusAreas,
                 customInstructions,
                 ciStatus: checkStatus.summary,
@@ -952,19 +1023,36 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
                     level: a.level,
                     message: a.message,
                 })),
-            },
-            (status) => push(state, { type: 'reviewGenerating', prKey: key, message: status }),
-            (kind, chunk) => push(state, { type: 'reviewChunk', prKey: key, kind, chunk }),
-        );
+                },
+                (status) => {
+                    if (isCurrentGeneration()) push(state, { type: 'reviewGenerating', prKey: key, message: status });
+                },
+                (kind, chunk) => {
+                    if (isCurrentGeneration()) push(state, { type: 'reviewChunk', prKey: key, kind, chunk });
+                },
+            );
+        } finally {
+            if (state.activeProviderOperation === providerOperation) state.activeProviderOperation = null;
+        }
 
         if (!result) throw new Error('Provider produced no output.');
-        if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
+        if (!isCurrentGeneration()) return;
         state.activeReviewResult = result;
-        state.generatedReviewResult = result;
-        state.editedReviewResult = null;
-        push(state, { type: 'reviewResult', prKey: key, result, diff, validationDiff });
+        state.generatedReviews.set(key, {
+            result,
+            editedResult: null,
+            attribution: { provider: settings.provider, model: settings.model },
+        });
+        push(state, {
+            type: 'reviewResult',
+            prKey: key,
+            result,
+            diff,
+            validationDiff: resolvedValidationDiff ?? diff,
+        });
+        reviewResultPublished = true;
     } catch (err) {
-        if (isCancellationError(err)) return;
+        if (isCancellationError(err) || !isCurrentGeneration()) return;
         push(state, { type: 'reviewError', prKey: key, message: toUserFacingError(err, 'generate review') });
     }
 }
@@ -973,17 +1061,16 @@ async function handleSaveDraft(state: ViewState, msg: Record<string, unknown>): 
     const number = msg.number as number;
     const owner = msg.owner as string;
     const repo = msg.repo as string;
+    const saveId = msg.saveId as number;
     const resultFromMsg = msg.result as ReviewResult | undefined;
+    const generatedResultFromMsg = msg.generatedResult as ReviewResult | undefined;
     const orphansFromMsg = (msg.orphans as LineComment[] | undefined) ?? [];
     const review = resultFromMsg ?? state.activeReviewResult;
     if (!number || !owner || !repo || !review) return;
-    // The edited review only ever arrives here. Retain it so submit can diff it against the
-    // generated one for outcome logging; activeReviewResult must keep holding the *generated*
-    // review, which is the other half of that diff.
-    state.editedReviewResult = review;
     const key = prKeyFromParts(number, owner, repo);
-    if (prKey(state.activePR) !== key) {
-        push(state, { type: 'draftSaveError', prKey: key, message: 'The selected pull request changed before the draft could be saved.' });
+    const activeAtStart = prKey(state.activePR) === key;
+    if (!canPersistDraft(activeAtStart, resultFromMsg !== undefined)) {
+        push(state, { type: 'draftSaveError', prKey: key, saveId, message: 'The selected pull request changed before the draft could be saved.' });
         return;
     }
     const selectionRevision = state.selectionRevision;
@@ -995,15 +1082,26 @@ async function handleSaveDraft(state: ViewState, msg: Record<string, unknown>): 
         );
         if (mutation.status !== 'ok' || !mutation.reviewId) throw new Error(mutation.message);
         const { reviewId, commentsDropped } = mutation;
+        const tracked = state.generatedReviews.get(key);
+        if (tracked) {
+            state.generatedReviews.set(key, {
+                ...tracked,
+                result: generatedResultFromMsg ?? tracked.result,
+                editedResult: review,
+            });
+        }
         if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
+        state.activeReviewResult = review;
         state.pendingReviewId = reviewId;
         state.pendingReviewKey = key;
-        push(state, { type: 'draftSaved', prKey: key, reviewId, commentsDropped });
+        push(state, { type: 'draftSaved', prKey: key, saveId, reviewId, commentsDropped });
         push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasReviewDraft: true });
     } catch (err) {
+        if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
         push(state, {
             type: 'draftSaveError',
             prKey: key,
+            saveId,
             message: toUserFacingError(err, 'save draft review'),
         });
     }
@@ -1025,12 +1123,14 @@ async function handleSubmitReview(state: ViewState, msg: Record<string, unknown>
         return;
     }
     const reviewId = state.pendingReviewId;
+    const selectionRevision = state.selectionRevision;
 
     try {
         const mutation = await sidecarClient.submitReview(
             githubBaseUrl(), owner, repo, number, reviewId, verdict, comment);
         if (mutation.status !== 'ok') throw new Error(mutation.message);
-        void recordReviewOutcome(state);
+        if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
+        void recordReviewOutcome(state, key);
         if (state.pendingReviewId === reviewId && state.pendingReviewKey === key) {
             state.pendingReviewId = null;
             state.pendingReviewKey = null;
@@ -1038,6 +1138,7 @@ async function handleSubmitReview(state: ViewState, msg: Record<string, unknown>
         push(state, { type: 'reviewSubmitted', prKey: key });
         push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasReviewDraft: false });
     } catch (err) {
+        if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
         push(state, {
             type: 'reviewSubmitError',
             prKey: key,
@@ -1054,10 +1155,12 @@ async function handleSubmitReview(state: ViewState, msg: Record<string, unknown>
  *
  * Mirrors WebviewPanel.recordReviewOutcome.
  */
-async function recordReviewOutcome(state: ViewState): Promise<void> {
-    const generated = state.generatedReviewResult;
-    if (!generated) return;
-    const submitted = state.editedReviewResult ?? generated;
+async function recordReviewOutcome(state: ViewState, key: string): Promise<void> {
+    const tracked = state.generatedReviews.get(key);
+    if (!tracked) return;
+    state.generatedReviews.delete(key);
+    const generated = tracked.result;
+    const submitted = tracked.editedResult ?? generated;
     const toOutcome = (comments: LineComment[] | undefined): OutcomeComment[] =>
         (comments ?? []).map((c) => ({
             file: c.file,
@@ -1068,8 +1171,8 @@ async function recordReviewOutcome(state: ViewState): Promise<void> {
             confidence: c.confidence,
         }));
     await sidecarClient.recordReviewOutcome(
-        provider() === 'copilot' ? 'copilot' : 'claude',
-        reviewModel(),
+        tracked.attribution.provider,
+        tracked.attribution.model,
         toOutcome(generated.lineComments),
         toOutcome(submitted.lineComments),
     );
@@ -1088,11 +1191,14 @@ async function handleDeleteDraft(state: ViewState, msg: Record<string, unknown>)
         return;
     }
     const reviewId = state.pendingReviewId;
+    const selectionRevision = state.selectionRevision;
 
     try {
         const mutation = await sidecarClient.deleteDraftReview(
             githubBaseUrl(), owner, repo, number, reviewId);
         if (mutation.status !== 'ok') throw new Error(mutation.message);
+        state.generatedReviews.delete(key);
+        if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
         if (state.pendingReviewId === reviewId && state.pendingReviewKey === key) {
             state.pendingReviewId = null;
             state.pendingReviewKey = null;
@@ -1100,6 +1206,7 @@ async function handleDeleteDraft(state: ViewState, msg: Record<string, unknown>)
         push(state, { type: 'draftDeleted', prKey: key });
         push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasReviewDraft: false });
     } catch (err) {
+        if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
         push(state, {
             type: 'draftDeleteError',
             prKey: key,
@@ -1114,11 +1221,27 @@ async function handleAskClaude(state: ViewState, msg: Record<string, unknown>): 
     if (!question.trim()) return;
 
     const key = prKey(state.activePR);
-    if (key && !state.chatHistory.has(key)) state.chatHistory.set(key, []);
-    const history = key ? (state.chatHistory.get(key) ?? []) : [];
-
-    // Add user turn to history before sending
-    history.push({ role: 'USER', content: question });
+    const activePr = state.activePR;
+    const selectionRevision = state.selectionRevision;
+    const chatRevision = ++state.chatRevision;
+    const history = key ? [...(state.chatHistory.get(key) ?? [])] : [];
+    const prContext = buildPrContext(state);
+    const c = config();
+    const selectedProvider: Provider = c.get<string>('reviewProvider', 'claude') === 'copilot'
+        ? 'copilot'
+        : 'claude';
+    const effort = c.get<string>('reviewEffort', 'high').trim() || 'high';
+    const inheritMcp = selectedProvider === 'copilot'
+        ? c.get<boolean>('copilotInheritMcp', false)
+        : false;
+    const configDir = selectedProvider === 'copilot'
+        ? c.get<string>('copilotConfigDir', '').trim()
+        : undefined;
+    const isCurrentChat = () =>
+        !state.disposed
+        && state.chatRevision === chatRevision
+        && state.selectionRevision === selectionRevision
+        && prKey(state.activePR) === key;
 
     // Focused chat builds its (small) prompt client-side, matching IntelliJ's
     // IntellijClaudeService.chatFocused; regular chat sends raw context/history and lets the
@@ -1126,31 +1249,45 @@ async function handleAskClaude(state: ViewState, msg: Record<string, unknown>): 
     const focused = context.trim().length > 0;
     const rawPrompt = focused ? claude.buildFocusedChatPrompt(context, question) : undefined;
 
-    const isCopilot = provider() === 'copilot';
     try {
         // Reuse the PR-branch worktree if one was built for the active PR (e.g. during review) so
         // chat sees the same source.
-        const chatDir = state.activePR
-            ? await resolveWorkingDir(state, state.activePR, false)
+        const chatDir = activePr
+            ? await resolveWorkingDir(state, activePr, false)
             : workingDir();
-        const response = await sidecarClient.chatReview(
-            {
-                provider: isCopilot ? 'copilot' : 'claude',
+        const providerOperation = { kind: 'chat' as const, revision: chatRevision };
+        state.activeProviderOperation = providerOperation;
+        let response: string;
+        try {
+            response = await sidecarClient.chatReview(
+                {
+                provider: selectedProvider,
                 projectDir: chatDir,
-                effort: reviewEffort(),
-                inheritMcp: isCopilot ? copilotInheritMcp() : false,
-                configDir: isCopilot ? copilotConfigDir() : undefined,
+                effort,
+                inheritMcp,
+                configDir,
                 ...(focused
                     ? { rawPrompt }
-                    : { prContext: buildPrContext(state), history: history.slice(0, -1), userMessage: question }),
-            },
-            (chunk) => push(state, { type: 'chatChunk', prKey: key ?? undefined, chunk }),
-        );
-        history.push({ role: 'ASSISTANT', content: response });
+                    : { prContext, history, userMessage: question }),
+                },
+                (chunk) => {
+                    if (isCurrentChat()) push(state, { type: 'chatChunk', prKey: key ?? undefined, chunk });
+                },
+            );
+        } finally {
+            if (state.activeProviderOperation === providerOperation) state.activeProviderOperation = null;
+        }
+        if (!isCurrentChat()) return;
+        if (key) {
+            state.chatHistory.set(key, [
+                ...history,
+                { role: 'USER', content: question },
+                { role: 'ASSISTANT', content: response },
+            ]);
+        }
         push(state, { type: 'chatResponse', prKey: key ?? undefined, response });
     } catch (err) {
-        history.pop(); // always undo the pre-push so cancelled/failed turns don't orphan in history
-        if (isCancellationError(err)) return;
+        if (isCancellationError(err) || !isCurrentChat()) return;
         push(state, { type: 'chatError', prKey: key ?? undefined, message: toUserFacingError(err, 'answer chat question') });
     }
 }

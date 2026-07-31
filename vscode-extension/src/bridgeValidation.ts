@@ -97,7 +97,9 @@ export function isValidBridgeRequest(msg: AnyMessage | null | undefined): msg is
         && (msg.customInstructions === undefined || isBoundedString(msg.customInstructions, 20_000));
     case 'saveDraft':
       return hasValidPrIdentity(msg)
+        && Number.isSafeInteger(msg.saveId) && (msg.saveId as number) > 0
         && (msg.result === undefined || isReviewResult(msg.result))
+        && (msg.generatedResult === undefined || isReviewResult(msg.generatedResult))
         && (msg.orphans === undefined
           || (Array.isArray(msg.orphans) && msg.orphans.length <= MAX_COMMENTS && msg.orphans.every(isLineComment)));
     case 'submitReview':

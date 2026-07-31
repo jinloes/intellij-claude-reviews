@@ -79,6 +79,7 @@ class DraftReviewMutationServiceTest {
     @Test
     void fallsBackToBodyOnlyReviewWhenCommentsAre422() {
         AtomicInteger commentAttempts = new AtomicInteger();
+        List<String> updatedBodies = new ArrayList<>();
         DraftReviewMutationService.GitHubRestClient client =
                 new DraftReviewMutationService.GitHubRestClient() {
                     @Override
@@ -107,6 +108,7 @@ class DraftReviewMutationServiceTest {
                     @Override
                     public DraftReviewMutationService.RestResponse put(
                             String apiBase, String token, String path, String jsonBody) {
+                        updatedBodies.add(jsonBody);
                         return new DraftReviewMutationService.RestResponse(200, "{}");
                     }
 
@@ -133,10 +135,27 @@ class DraftReviewMutationServiceTest {
 
         assertThat(result.status()).isEqualTo("ok");
         assertThat(result.reviewId()).isEqualTo("7");
-        // The dropped comment was still successfully documented in the body via PUT, so
-        // commentsDropped (which only tracks the case where that PUT itself fails) is false.
-        assertThat(result.commentsDropped()).isFalse();
+        assertThat(result.commentsDropped()).isTrue();
         assertThat(commentAttempts.get()).isEqualTo(1);
+        assertThat(updatedBodies).hasSize(1);
+        String updatedBody;
+        try {
+            updatedBody = mapper.readTree(updatedBodies.get(0)).path("body").asText();
+        } catch (Exception e) {
+            throw new AssertionError(e);
+        }
+        assertThat(updatedBody).contains("- `a.java:3`: fix");
+        DraftReviewCodec.DecodedReview decoded =
+                new DraftReviewCodec(mapper).decode(updatedBody, List.of());
+        assertThat(decoded.lineComments()).isEmpty();
+    }
+
+    @Test
+    void retriesOnlyIdempotentHttpMethods() {
+        assertThat(DraftReviewMutationService.isRetryableHttpMethod("GET")).isTrue();
+        assertThat(DraftReviewMutationService.isRetryableHttpMethod("PUT")).isTrue();
+        assertThat(DraftReviewMutationService.isRetryableHttpMethod("DELETE")).isTrue();
+        assertThat(DraftReviewMutationService.isRetryableHttpMethod("POST")).isFalse();
     }
 
     @Test

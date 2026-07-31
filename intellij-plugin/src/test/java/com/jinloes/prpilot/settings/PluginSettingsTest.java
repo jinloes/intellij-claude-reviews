@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.jinloes.prpilot.model.ReviewProvider;
 import com.jinloes.prpilot.review.RepoGuidelinesReader;
+import java.util.Arrays;
+import java.util.List;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 class PluginSettingsTest {
@@ -108,9 +111,9 @@ class PluginSettingsTest {
     @Test
     void reviewGuidanceGlobsParsesNonBlankLines() {
         PluginSettings s = new PluginSettings();
-        s.setReviewGuidanceGlobs("**/style.md\n\n  .linkedin/ai-agent/*.md  \n");
+        s.setReviewGuidanceGlobs("**/style.md\n\n  .review/ai-agent/*.md  \n");
         assertThat(s.getReviewGuidanceGlobs())
-                .containsExactly("**/style.md", ".linkedin/ai-agent/*.md");
+                .containsExactly("**/style.md", ".review/ai-agent/*.md");
     }
 
     @Test
@@ -228,5 +231,88 @@ class PluginSettingsTest {
 
         s.setReviewProvider(ReviewProvider.COPILOT);
         assertThat(s.getActiveReviewModel()).isEqualTo("gpt-5.4");
+    }
+
+    @Nested
+    class ReviewGuidanceProfiles {
+
+        @Test
+        void namedProfileOverridesAllLegacyGuidanceDefaults() {
+            PluginSettings settings = new PluginSettings();
+            settings.setReviewFocusAreas("legacy focus");
+            settings.setReviewCustomInstructions("legacy instructions");
+            settings.setReviewGuidanceGlobs("AGENTS.md");
+            settings.setReviewGuidanceProfiles(
+                    List.of(
+                            new PluginSettings.ReviewGuidanceProfile(
+                                    "team-java",
+                                    "Team Java",
+                                    "security, concurrency",
+                                    "Require regression tests",
+                                    "CLAUDE.md\n.review/ai-agent/*.md")));
+            settings.setActiveReviewGuidanceProfileId("team-java");
+
+            assertThat(settings.getResolvedReviewFocusAreas()).isEqualTo("security, concurrency");
+            assertThat(settings.getResolvedReviewCustomInstructions())
+                    .isEqualTo("Require regression tests");
+            assertThat(settings.getResolvedReviewGuidanceGlobs())
+                    .containsExactly("CLAUDE.md", ".review/ai-agent/*.md");
+        }
+
+        @Test
+        void blankProfileGlobsUseSharedEngineDefaults() {
+            PluginSettings settings = new PluginSettings();
+            settings.setReviewGuidanceProfiles(
+                    List.of(
+                            new PluginSettings.ReviewGuidanceProfile(
+                                    "defaults", "Defaults", "", "", "")));
+            settings.setActiveReviewGuidanceProfileId("defaults");
+
+            assertThat(settings.getResolvedReviewGuidanceGlobs())
+                    .isEqualTo(RepoGuidelinesReader.DEFAULT_GUIDANCE_GLOBS);
+        }
+
+        @Test
+        void missingActiveProfileFallsBackAtomicallyToLegacyDefaults() {
+            PluginSettings settings = new PluginSettings();
+            PluginSettings.State state = new PluginSettings.State();
+            state.reviewFocusAreas = "legacy focus";
+            state.reviewCustomInstructions = "legacy instructions";
+            state.reviewGuidanceGlobs = "AGENTS.md";
+            state.activeReviewGuidanceProfileId = "deleted";
+            state.reviewGuidanceProfiles = List.of();
+            settings.loadState(state);
+
+            assertThat(settings.getActiveReviewGuidanceProfileId()).isEmpty();
+            assertThat(settings.getResolvedReviewFocusAreas()).isEqualTo("legacy focus");
+            assertThat(settings.getResolvedReviewCustomInstructions())
+                    .isEqualTo("legacy instructions");
+            assertThat(settings.getResolvedReviewGuidanceGlobs()).containsExactly("AGENTS.md");
+        }
+
+        @Test
+        void malformedPersistedProfilesAreDroppedAndReturnedDefensively() {
+            PluginSettings settings = new PluginSettings();
+            PluginSettings.State state = new PluginSettings.State();
+            PluginSettings.ReviewGuidanceProfile valid =
+                    new PluginSettings.ReviewGuidanceProfile(
+                            "valid", "Valid", "focus", "instructions", "AGENTS.md");
+            state.reviewGuidanceProfiles =
+                    Arrays.asList(
+                            null,
+                            new PluginSettings.ReviewGuidanceProfile("", "Missing ID", "", "", ""),
+                            valid,
+                            new PluginSettings.ReviewGuidanceProfile(
+                                    "valid", "Duplicate ID", "", "", ""));
+            settings.loadState(state);
+
+            List<PluginSettings.ReviewGuidanceProfile> profiles =
+                    settings.getReviewGuidanceProfiles();
+            profiles.get(0).name = "mutated";
+
+            assertThat(settings.getReviewGuidanceProfiles())
+                    .singleElement()
+                    .satisfies(profile -> assertThat(profile.name).isEqualTo("Valid"));
+        }
     }
 }

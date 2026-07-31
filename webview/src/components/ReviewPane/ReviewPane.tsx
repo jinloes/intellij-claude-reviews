@@ -345,7 +345,14 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   // debounce (and on hide / PR-switch). No separate local store.
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastSavedSnapshotRef = useRef<string | null>(null)
-  const lastSaveWasAutoRef = useRef(false)
+  const generatedBaselineRef = useRef<ReviewResult | null>(null)
+  const nextSaveIdRef = useRef(0)
+  const inFlightSaveRef = useRef<{
+    saveId: number
+    prKey: string
+    snapshot: string
+    isAuto: boolean
+  } | null>(null)
   const pendingAutosaveRef = useRef<{
     pr: PR
     result: ReviewResult
@@ -358,6 +365,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   const saveWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const submitWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const deleteWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const allocateSaveId = useCallback(() => ++nextSaveIdRef.current, [])
 
   const clearAllWatchdogs = useCallback(() => {
     clearWatchdog(saveWatchdogRef)
@@ -391,7 +399,8 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     setChunkedProgress(null)
     chunkSessionRef.current = null
     lastSavedSnapshotRef.current = null
-    lastSaveWasAutoRef.current = false
+    generatedBaselineRef.current = null
+    inFlightSaveRef.current = null
     pendingAutosaveRef.current = null
     if (autosaveTimerRef.current !== null) {
       clearTimeout(autosaveTimerRef.current)
@@ -399,11 +408,6 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     }
     clearAllWatchdogs()
   }, [pr, clearAllWatchdogs])
-
-  useEffect(() => {
-    const dirty = state.kind === 'reviewUnsaved' || state.kind === 'saveError'
-    onDirtyStateChange?.(dirty)
-  }, [state, onDirtyStateChange])
 
   useEffect(() => {
     const cleanup = onHostMessage((msg) => {
@@ -416,6 +420,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
           break
 
         case 'draftLoaded':
+          generatedBaselineRef.current = null
           if (msg.prState === 'MERGED') {
             setState({ kind: 'merged', status: msg.status })
           } else if (msg.prState === 'DRAFT_PRESENT' && msg.result) {
@@ -547,6 +552,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
             const merged = mergeChunkResults(chunkSession.aggregated.map((item) => item.result))
             const elapsedSec = Math.max(0, Math.round((Date.now() - chunkSession.startedAtMs) / 1000))
             const finalized = withSortedComments(withValidatedComments(merged, chunkSession.validationDiff))
+            generatedBaselineRef.current = finalized
             chunkSessionRef.current = null
             setChunkedProgress({
               running: false,
@@ -568,6 +574,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
           }
 
           setFocusedCommentIdx(0)
+          generatedBaselineRef.current = result
           setState((prev) => {
             const elapsedSec =
               prev.kind === 'generating'
@@ -606,10 +613,45 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
           setState({ kind: 'error', message: msg.message })
           break
 
+        case 'validationDiffUpdated':
+          if (generatedBaselineRef.current) {
+            generatedBaselineRef.current = withSortedComments(
+              withValidatedComments(generatedBaselineRef.current, msg.validationDiff),
+            )
+          }
+          setState((prev) => {
+            const validationDiff = msg.validationDiff
+            if (prev.kind === 'draftPresent' || prev.kind === 'reviewUnsaved') {
+              return {
+                ...prev,
+                validationDiff,
+                result: withSortedComments(withValidatedComments(prev.result, validationDiff)),
+              }
+            }
+            if (prev.kind === 'saveError' || prev.kind === 'submitError') {
+              return {
+                ...prev,
+                validationDiff,
+                result: prev.result
+                  ? withSortedComments(withValidatedComments(prev.result, validationDiff))
+                  : null,
+              }
+            }
+            if (prev.kind === 'noDraft' || prev.kind === 'authError') {
+              return { ...prev, validationDiff }
+            }
+            return prev
+          })
+          break
+
         case 'draftSaved': {
+          const inFlight = inFlightSaveRef.current
+          if (!inFlight || msg.saveId !== inFlight.saveId) break
+          lastSavedSnapshotRef.current = inFlight.snapshot
+          inFlightSaveRef.current = null
           clearWatchdog(saveWatchdogRef)
           setSaving(false)
-          if (msg.commentsDropped && !lastSaveWasAutoRef.current) {
+          if (msg.commentsDropped && !inFlight.isAuto) {
             toast.warning('Some comments were dropped', {
               description: 'Outdated line references were removed when saving to GitHub.',
             })
@@ -666,12 +708,10 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
         }
 
         case 'draftSaveError':
+          if (msg.saveId !== inFlightSaveRef.current?.saveId) break
+          inFlightSaveRef.current = null
           clearWatchdog(saveWatchdogRef)
           setSaving(false)
-          // The optimistic snapshot set when dispatching the save is no longer
-          // valid — clear it so the review is treated as unsaved (dirty) again.
-          lastSavedSnapshotRef.current = null
-          lastSaveWasAutoRef.current = false
           pendingSubmit.current = null
           submitInFlightRef.current = false
           setState((prev) => ({
@@ -801,24 +841,34 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   const savableSnapshot = savableResult ? reviewSnapshot(savableResult) : null
   const autosaveDirty = isReviewDirty(savableSnapshot, lastSavedSnapshotRef.current)
 
+  useEffect(() => {
+    const dirty = autosaveDirty || state.kind === 'reviewUnsaved' || state.kind === 'saveError'
+    onDirtyStateChange?.(dirty)
+  }, [autosaveDirty, state.kind, onDirtyStateChange])
+
   // Persists a review to its GitHub draft. Used by manual Save, Submit, and
   // autosave alike so the saved-snapshot bookkeeping stays consistent.
   const dispatchSave = useCallback(
     (targetPr: PR, r: ReviewResult, orphans: LineComment[], isAuto: boolean) => {
-      lastSaveWasAutoRef.current = isAuto
-      lastSavedSnapshotRef.current = reviewSnapshot(r)
+      const saveId = allocateSaveId()
+      inFlightSaveRef.current = {
+        saveId,
+        prKey: prKey(targetPr),
+        snapshot: reviewSnapshot(r),
+        isAuto,
+      }
       if (autosaveTimerRef.current !== null) {
         clearTimeout(autosaveTimerRef.current)
         autosaveTimerRef.current = null
       }
       setSaving(true)
       armWatchdog(saveWatchdogRef, () => {
+        if (inFlightSaveRef.current?.saveId !== saveId) return
+        inFlightSaveRef.current = null
         // A pending submit is blocked behind this save. Release its synchronous lock as well as
         // the visual saving state so the reviewer can retry after a dropped host message.
         if (pendingSubmit.current !== null) submitInFlightRef.current = false
         setSaving(false)
-        lastSavedSnapshotRef.current = null
-        lastSaveWasAutoRef.current = false
         pendingSubmit.current = null
         setState((prev) => ({
           kind: 'saveError',
@@ -838,11 +888,13 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
         number: targetPr.number,
         owner: targetPr.owner,
         repo: targetPr.repo,
+        saveId,
         result: r,
+        generatedResult: generatedBaselineRef.current ?? undefined,
         orphans,
       })
     },
-    [],
+    [allocateSaveId],
   )
 
   // Schedule autosave: immediately after generation, debounced for later edits.
@@ -893,6 +945,8 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     function flushPending() {
       const p = pendingAutosaveRef.current
       if (!p || p.snapshot === lastSavedSnapshotRef.current) return
+      const inFlight = inFlightSaveRef.current
+      if (inFlight?.prKey === prKey(p.pr) && inFlight.snapshot === p.snapshot) return
       if (autosaveTimerRef.current !== null) {
         clearTimeout(autosaveTimerRef.current)
         autosaveTimerRef.current = null
@@ -919,20 +973,26 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
         autosaveTimerRef.current = null
       }
       const p = pendingAutosaveRef.current
-      if (p && p.snapshot !== lastSavedSnapshotRef.current) {
-        lastSavedSnapshotRef.current = p.snapshot
+      const inFlight = inFlightSaveRef.current
+      const alreadyInFlight = p
+        && inFlight?.prKey === prKey(p.pr)
+        && inFlight.snapshot === p.snapshot
+      if (p && p.snapshot !== lastSavedSnapshotRef.current && !alreadyInFlight) {
+        const saveId = allocateSaveId()
         sendToHost({
           type: 'saveDraft',
           number: p.pr.number,
           owner: p.pr.owner,
           repo: p.pr.repo,
+          saveId,
           result: p.result,
+          generatedResult: generatedBaselineRef.current ?? undefined,
           orphans: p.orphans,
         })
       }
       pendingAutosaveRef.current = null
     }
-  }, [pr])
+  }, [pr, allocateSaveId])
 
   function handleRunQualityCheck() {
     setQualityExpanded(true)
@@ -2383,6 +2443,7 @@ function SubmitSplitButton({
   const [confirming, setConfirming] = useState<Verdict | null>(null)
   const [comment, setComment] = useState('')
   const [risksAcknowledged, setRisksAcknowledged] = useState(false)
+  const pendingMenuVerdictRef = useRef<Verdict | null>(null)
   const t = useI18n()
   const riskCount = qualityReport?.issues.reduce((count, issue) => count + issue.count, 0) ?? 0
   const riskKey = qualityReport?.issues.map((issue) => `${issue.id}:${issue.count}`).join('|') ?? ''
@@ -2405,6 +2466,19 @@ function SubmitSplitButton({
   }
 
   const others: Verdict[] = (['COMMENT', 'APPROVE', 'REQUEST_CHANGES'] as Verdict[]).filter((v) => v !== verdict)
+
+  const requestMenuConfirmation = (nextVerdict: Verdict) => {
+    pendingMenuVerdictRef.current = nextVerdict
+  }
+
+  const openPendingMenuConfirmation = (event: Event) => {
+    const nextVerdict = pendingMenuVerdictRef.current
+    if (!nextVerdict) return
+    // Let the menu release its modal pointer/focus guards before mounting another modal layer.
+    event.preventDefault()
+    pendingMenuVerdictRef.current = null
+    setConfirming(nextVerdict)
+  }
 
   return (
     <div className="flex items-stretch rounded-md overflow-hidden">
@@ -2430,12 +2504,18 @@ function SubmitSplitButton({
             <ChevronDown className="w-3.5 h-3.5" />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="w-48">
+        <DropdownMenuContent
+          align="end"
+          className="w-48"
+          onCloseAutoFocus={openPendingMenuConfirmation}
+        >
           {others.filter((v) => v !== 'REQUEST_CHANGES').map((v) => (
             <DropdownMenuItem
               key={v}
-              onSelect={() => setConfirming(v)}
-              className="gap-2 text-xs cursor-pointer"
+              onSelect={() => requestMenuConfirmation(v)}
+              className={v === 'COMMENT'
+                ? 'gap-2 text-xs cursor-pointer text-status-comment focus:text-status-comment'
+                : 'gap-2 text-xs cursor-pointer'}
             >
               {ICON[v]}
               {LABEL[v]}
@@ -2444,7 +2524,7 @@ function SubmitSplitButton({
           {others.includes('REQUEST_CHANGES') && <DropdownMenuSeparator />}
           {others.includes('REQUEST_CHANGES') && (
             <DropdownMenuItem
-              onSelect={() => setConfirming('REQUEST_CHANGES')}
+              onSelect={() => requestMenuConfirmation('REQUEST_CHANGES')}
               className="gap-2 text-xs cursor-pointer text-destructive focus:text-destructive"
             >
               {ICON.REQUEST_CHANGES}

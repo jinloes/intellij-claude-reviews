@@ -306,5 +306,24 @@ class GitWorktreeServiceTest {
                     .isInstanceOf(IOException.class)
                     .hasMessageContaining("git rev-parse");
         }
+
+        @Test
+        void timeoutTerminatesAProcessThatKeepsOutputOpen() {
+            class HangingGitService extends GitWorktreeService {
+                private Process spawnedProcess;
+
+                @Override
+                Process startGitProcess(ProcessBuilder processBuilder) throws IOException {
+                    spawnedProcess = new ProcessBuilder("sh", "-c", "sleep 30").start();
+                    return spawnedProcess;
+                }
+            }
+            HangingGitService hangingService = new HangingGitService();
+
+            assertThatThrownBy(() -> hangingService.runGit(tmpDir, 1, "status"))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("git status timed out after 1s");
+            assertThat(hangingService.spawnedProcess.isAlive()).isFalse();
+        }
     }
 }

@@ -3,11 +3,12 @@ package com.jinloes.prpilot.ui;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.jinloes.prpilot.model.PullRequest;
-import com.jinloes.prpilot.model.ReviewResult;
+import com.jinloes.prpilot.model.ReviewProvider;
+import com.jinloes.prpilot.sidecar.pr.PrDetail;
 import java.awt.BorderLayout;
 import java.awt.Rectangle;
-import java.util.List;
 import javax.swing.JPanel;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -63,22 +64,101 @@ class WebviewPanelTest {
     }
 
     @Nested
-    class IsCurrentSession {
+    class IsCurrentSelection {
 
         @Test
-        void acceptsTheActivePrAtTheSameRevision() {
-            PullRequest pr = new PullRequest("t", "", "owner", "repo", 7, "", "a", "");
+        void acceptsHydratedInstanceAtCapturedRevision() {
+            PullRequest hydrated =
+                    new PullRequest("detail", "", "acme", "platform", 7, "body", "a", "");
 
-            assertThat(WebviewPanel.isCurrentSession(pr, 3, pr, 3)).isTrue();
+            assertThat(WebviewPanel.isCurrentSelection(hydrated, 4, "acme/platform#7", 4)).isTrue();
         }
 
         @Test
-        void rejectsAnOlderRevisionOrDifferentPr() {
-            PullRequest active = new PullRequest("t", "", "owner", "repo", 7, "", "a", "");
-            PullRequest previous = new PullRequest("t", "", "owner", "repo", 7, "", "a", "");
+        void rejectsSamePrReselectedAtNewerRevision() {
+            PullRequest reselected =
+                    new PullRequest("detail", "", "acme", "platform", 7, "body", "a", "");
 
-            assertThat(WebviewPanel.isCurrentSession(active, 4, active, 3)).isFalse();
-            assertThat(WebviewPanel.isCurrentSession(active, 4, previous, 4)).isFalse();
+            assertThat(WebviewPanel.isCurrentSelection(reselected, 5, "acme/platform#7", 4))
+                    .isFalse();
+        }
+    }
+
+    @Nested
+    class IsCurrentChat {
+
+        private final PullRequest pr =
+                new PullRequest("title", "", "acme", "platform", 7, "", "a", "");
+
+        @Test
+        void acceptsMatchingSelectionAndChatId() {
+            assertThat(WebviewPanel.isCurrentChat(pr, 3, 9, "acme/platform#7", 3, 9)).isTrue();
+        }
+
+        @Test
+        void rejectsOlderChatOrSelection() {
+            assertThat(WebviewPanel.isCurrentChat(pr, 3, 10, "acme/platform#7", 3, 9)).isFalse();
+            assertThat(WebviewPanel.isCurrentChat(pr, 4, 9, "acme/platform#7", 3, 9)).isFalse();
+        }
+    }
+
+    @Nested
+    class WorktreeCoordinator {
+
+        @Test
+        void concurrentSameKeyAcquiresShareOneCreation() {
+            WebviewPanel.WorktreeCoordinator<String> coordinator =
+                    new WebviewPanel.WorktreeCoordinator<>("fallback");
+
+            WebviewPanel.WorktreeLease<String> owner = coordinator.acquire("acme/repo#7");
+            WebviewPanel.WorktreeLease<String> waiter = coordinator.acquire("acme/repo#7");
+
+            assertThat(owner.owner()).isTrue();
+            assertThat(waiter.owner()).isFalse();
+            assertThat(waiter.future()).isSameAs(owner.future());
+            assertThat(coordinator.install(owner, "worktree")).isTrue();
+            assertThat(waiter.future()).isCompletedWithValue("worktree");
+            assertThat(coordinator.activeValue()).isEqualTo("worktree");
+        }
+
+        @Test
+        void clearDuringCreationRejectsLateInstallAndCompletesWaitersWithFallback() {
+            WebviewPanel.WorktreeCoordinator<String> coordinator =
+                    new WebviewPanel.WorktreeCoordinator<>("fallback");
+            WebviewPanel.WorktreeLease<String> owner = coordinator.acquire("acme/repo#7");
+            WebviewPanel.WorktreeLease<String> waiter = coordinator.acquire("acme/repo#7");
+
+            assertThat(coordinator.clear()).isNull();
+            assertThat(waiter.future()).isCompletedWithValue("fallback");
+
+            assertThat(coordinator.install(owner, "stale-worktree")).isFalse();
+            assertThat(waiter.future()).isCompletedWithValue("fallback");
+            assertThat(coordinator.activeValue()).isNull();
+        }
+
+        @Test
+        void clearReturnsInstalledValueAndStartsNewEpoch() {
+            WebviewPanel.WorktreeCoordinator<String> coordinator =
+                    new WebviewPanel.WorktreeCoordinator<>("fallback");
+            WebviewPanel.WorktreeLease<String> first = coordinator.acquire("acme/repo#7");
+            coordinator.install(first, "worktree");
+
+            assertThat(coordinator.clear()).isEqualTo("worktree");
+            WebviewPanel.WorktreeLease<String> next = coordinator.acquire("acme/repo#7");
+            assertThat(next.owner()).isTrue();
+            assertThat(next.future()).isNotSameAs(first.future());
+        }
+
+        @Test
+        void failedCreationReleasesKeyForRetry() {
+            WebviewPanel.WorktreeCoordinator<String> coordinator =
+                    new WebviewPanel.WorktreeCoordinator<>("fallback");
+            WebviewPanel.WorktreeLease<String> failed = coordinator.acquire("acme/repo#7");
+
+            coordinator.fail(failed);
+
+            assertThat(failed.future()).isCompletedWithValue("fallback");
+            assertThat(coordinator.acquire("acme/repo#7").owner()).isTrue();
         }
     }
 
@@ -100,6 +180,66 @@ class WebviewPanelTest {
             assertThat(WebviewPanel.matchesPrRequest(pr, 8, "owner", "repo")).isFalse();
             assertThat(WebviewPanel.matchesPrRequest(pr, 7, "other", "repo")).isFalse();
             assertThat(WebviewPanel.matchesPrRequest(pr, 7, "owner", "other")).isFalse();
+        }
+    }
+
+    @Nested
+    class HydratePullRequest {
+
+        @Test
+        void replacesDetailFieldsAndPreservesListMetadata() {
+            PullRequest summary =
+                    new PullRequest(
+                            "List title",
+                            "https://github.com/acme/platform/pull/7",
+                            "acme",
+                            "platform",
+                            7,
+                            "",
+                            "octocat",
+                            "2026-07-30T12:00:00Z",
+                            true);
+            PrDetail detail =
+                    new PrDetail(
+                            false,
+                            "Detailed title",
+                            "Closes #42",
+                            new PrDetail.Head("sha", "branch", "acme/platform", "clone"),
+                            "acme/platform");
+
+            PullRequest hydrated = WebviewPanel.hydratePullRequest(summary, detail);
+
+            assertThat(hydrated.getTitle()).isEqualTo("Detailed title");
+            assertThat(hydrated.getBody()).isEqualTo("Closes #42");
+            assertThat(hydrated.getHtmlUrl()).isEqualTo(summary.getHtmlUrl());
+            assertThat(hydrated.getOwner()).isEqualTo("acme");
+            assertThat(hydrated.getRepo()).isEqualTo("platform");
+            assertThat(hydrated.getNumber()).isEqualTo(7);
+            assertThat(hydrated.getAuthor()).isEqualTo("octocat");
+            assertThat(hydrated.getCreatedAt()).isEqualTo("2026-07-30T12:00:00Z");
+            assertThat(hydrated.isDraft()).isTrue();
+        }
+
+        @Test
+        void returnsSummaryWhenDetailReadFailed() {
+            PullRequest summary =
+                    new PullRequest("Title", "", "acme", "platform", 7, "", "octocat", "");
+
+            assertThat(WebviewPanel.hydratePullRequest(summary, null)).isSameAs(summary);
+        }
+    }
+
+    @Nested
+    class CanPersistDraft {
+        @Test
+        void activePrMayUseHostState() {
+            assertThat(WebviewPanel.canPersistDraft(true, false)).isTrue();
+        }
+
+        @Test
+        void outgoingPrRequiresExplicitResult() {
+            assertThat(WebviewPanel.canPersistDraft(false, true)).isTrue();
+            assertThat(WebviewPanel.canPersistDraft(false, false)).isFalse();
         }
     }
 
@@ -229,11 +369,39 @@ class WebviewPanelTest {
         void rejectsMalformedNestedReview() throws Exception {
             var node =
                     MAPPER.readTree(
-                            "{\"protocolVersion\":1,\"type\":\"saveDraft\",\"number\":7,"
+                            "{\"protocolVersion\":1,\"type\":\"saveDraft\",\"number\":7,\"saveId\":1,"
                                     + "\"owner\":\"acme\",\"repo\":\"platform\",\"result\":{"
                                     + "\"summary\":\"s\",\"verdict\":\"INVALID\",\"lineComments\":[]}}");
 
             assertThat(WebviewPanel.isValidIncomingMessage(node)).isFalse();
+        }
+
+        @Test
+        void validatesGeneratedReviewBaseline() throws Exception {
+            var valid =
+                    MAPPER.readTree(
+                            "{\"protocolVersion\":1,\"type\":\"saveDraft\",\"number\":7,\"saveId\":1,"
+                                    + "\"owner\":\"acme\",\"repo\":\"platform\",\"generatedResult\":{"
+                                    + "\"summary\":\"generated\",\"verdict\":\"COMMENT\",\"lineComments\":[]}}");
+            var invalid = (ObjectNode) valid.deepCopy();
+            ((ObjectNode) invalid.path("generatedResult")).put("verdict", "INVALID");
+
+            assertThat(WebviewPanel.isValidIncomingMessage(valid)).isTrue();
+            assertThat(WebviewPanel.isValidIncomingMessage(invalid)).isFalse();
+        }
+
+        @Test
+        void rejectsDraftSaveWithoutPositiveCorrelationId() throws Exception {
+            var missing =
+                    MAPPER.readTree(
+                            "{\"protocolVersion\":1,\"type\":\"saveDraft\",\"number\":7,"
+                                    + "\"owner\":\"acme\",\"repo\":\"widget\"}");
+            var zero = ((ObjectNode) missing.deepCopy()).put("saveId", 0);
+            var valid = ((ObjectNode) missing.deepCopy()).put("saveId", 1);
+
+            assertThat(WebviewPanel.isValidIncomingMessage(missing)).isFalse();
+            assertThat(WebviewPanel.isValidIncomingMessage(zero)).isFalse();
+            assertThat(WebviewPanel.isValidIncomingMessage(valid)).isTrue();
         }
 
         @Test
@@ -266,7 +434,7 @@ class WebviewPanelTest {
         void rejectsInvalidRichCommentMetadata() throws Exception {
             var node =
                     MAPPER.readTree(
-                            "{\"protocolVersion\":1,\"type\":\"saveDraft\",\"number\":7,"
+                            "{\"protocolVersion\":1,\"type\":\"saveDraft\",\"number\":7,\"saveId\":1,"
                                     + "\"owner\":\"acme\",\"repo\":\"platform\",\"result\":{"
                                     + "\"summary\":\"s\",\"verdict\":\"COMMENT\",\"lineComments\":[{"
                                     + "\"file\":\"a.java\",\"line\":1,\"type\":\"note\",\"body\":\"b\","
@@ -280,7 +448,7 @@ class WebviewPanelTest {
     class DraftLoadedSerialization {
 
         @Test
-        void omitsAbsentOptionalFieldsFromNoDraftMessage() {
+        void includesBoundedAndValidationDiffsInNoDraftMessage() {
             var message =
                     new WebviewPanel.DraftLoadedMsg(
                             "draftLoaded",
@@ -288,8 +456,8 @@ class WebviewPanelTest {
                             "NO_DRAFT",
                             null,
                             null,
-                            null,
-                            "diff",
+                            "bounded diff",
+                            "full validation diff",
                             false,
                             false,
                             "",
@@ -299,8 +467,8 @@ class WebviewPanelTest {
 
             assertThat(json.has("reviewId")).isFalse();
             assertThat(json.has("result")).isFalse();
-            assertThat(json.has("diff")).isFalse();
-            assertThat(json.path("validationDiff").asText()).isEqualTo("diff");
+            assertThat(json.path("diff").asText()).isEqualTo("bounded diff");
+            assertThat(json.path("validationDiff").asText()).isEqualTo("full validation diff");
         }
 
         @Test
@@ -329,53 +497,16 @@ class WebviewPanelTest {
     }
 
     @Nested
-    class ShouldRecordOutcome {
-
-        private static final ReviewResult GENERATED =
-                new ReviewResult("summary", "COMMENT", List.of());
+    class GenerationMetadata {
 
         @Test
-        void recordsWhenTheGeneratedReviewBelongsToTheSubmittedPr() {
-            assertThat(
-                            WebviewPanel.shouldRecordOutcome(
-                                    GENERATED, "acme/platform#42", "acme/platform#42"))
-                    .isTrue();
-        }
+        void capturesGenerationTimeProviderAndModel() {
+            var metadata =
+                    WebviewPanel.generationMetadata(ReviewProvider.COPILOT, "claude-sonnet-4.6");
 
-        // The regression this guard exists for: generate on PR A, switch to PR B, load B's draft
-        // from GitHub, submit B. Without the key the log records all of A's comments as "deleted"
-        // and all of B's as "added" — rows describing something no reviewer did, in the log that
-        // decides whether prompt changes helped.
-        @Test
-        void refusesWhenTheGeneratedReviewBelongsToADifferentPr() {
-            assertThat(
-                            WebviewPanel.shouldRecordOutcome(
-                                    GENERATED, "acme/platform#42", "acme/platform#43"))
-                    .isFalse();
-        }
-
-        @Test
-        void refusesWhenNoReviewWasGeneratedThisSession() {
-            assertThat(WebviewPanel.shouldRecordOutcome(null, null, "acme/platform#42")).isFalse();
-            assertThat(
-                            WebviewPanel.shouldRecordOutcome(
-                                    null, "acme/platform#42", "acme/platform#42"))
-                    .isFalse();
-        }
-
-        @Test
-        void refusesWhenTheGeneratedKeyIsAbsentEvenIfTheSubmitKeyIsNot() {
-            assertThat(WebviewPanel.shouldRecordOutcome(GENERATED, null, "acme/platform#42"))
-                    .isFalse();
-        }
-
-        // A null/null pair is equal under StringUtils.equals, so the blank check is what stops an
-        // uninitialized panel from authorizing a log write.
-        @Test
-        void refusesWhenTheSubmitKeyIsBlank() {
-            assertThat(WebviewPanel.shouldRecordOutcome(GENERATED, null, null)).isFalse();
-            assertThat(WebviewPanel.shouldRecordOutcome(GENERATED, "", "")).isFalse();
-            assertThat(WebviewPanel.shouldRecordOutcome(GENERATED, "  ", "  ")).isFalse();
+            assertThat(metadata.promptVersion()).isNotBlank();
+            assertThat(metadata.provider()).isEqualTo("copilot");
+            assertThat(metadata.model()).isEqualTo("claude-sonnet-4.6");
         }
     }
 

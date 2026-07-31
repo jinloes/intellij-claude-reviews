@@ -3,11 +3,33 @@ package com.jinloes.prpilot.services;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.jinloes.prpilot.model.ReviewProvider;
+import com.jinloes.prpilot.settings.PluginSettings;
 import java.io.IOException;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 class IntellijClaudeServiceTest {
+
+    @Nested
+    class SnapshotReviewRuntimeSettings {
+
+        @Test
+        void remainsStableWhenSettingsChange() {
+            PluginSettings settings = new PluginSettings();
+            PluginSettings.State initial = new PluginSettings.State();
+            initial.reviewProvider = "copilot";
+            initial.reviewModelCopilot = "generation-model";
+            settings.loadState(initial);
+
+            IntellijClaudeService.ReviewRuntimeSettings snapshot =
+                    IntellijClaudeService.snapshotReviewRuntimeSettings(settings);
+
+            settings.setReviewProvider(ReviewProvider.CLAUDE);
+            settings.setReviewModel("later-model");
+            assertThat(snapshot.provider()).isEqualTo(ReviewProvider.COPILOT);
+            assertThat(snapshot.model()).isEqualTo("generation-model");
+        }
+    }
 
     @Nested
     class ResolveReviewInheritMcp {

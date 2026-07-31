@@ -31,7 +31,7 @@ public class IntellijClaudeService {
         T get() throws Exception;
     }
 
-    private static final class RuntimeSettings {
+    public static final class ReviewRuntimeSettings {
         private final ReviewProvider provider;
         private final String model;
         private final String effort;
@@ -40,7 +40,7 @@ public class IntellijClaudeService {
         private final String configDir;
         private final boolean selfCritique;
 
-        private RuntimeSettings(
+        private ReviewRuntimeSettings(
                 ReviewProvider provider,
                 String model,
                 String effort,
@@ -55,6 +55,14 @@ public class IntellijClaudeService {
             this.forceMcpOnReview = forceMcpOnReview;
             this.configDir = configDir;
             this.selfCritique = selfCritique;
+        }
+
+        public ReviewProvider provider() {
+            return provider;
+        }
+
+        public String model() {
+            return model;
         }
     }
 
@@ -85,7 +93,16 @@ public class IntellijClaudeService {
             BiConsumer<String, String> onChunk,
             Consumer<ReviewResult> onComplete,
             Consumer<String> onError) {
-        RuntimeSettings settings = readRuntimeSettings();
+        reviewPR(request, snapshotReviewRuntimeSettings(), onStatus, onChunk, onComplete, onError);
+    }
+
+    public void reviewPR(
+            PRReviewRequest request,
+            ReviewRuntimeSettings settings,
+            Consumer<String> onStatus,
+            BiConsumer<String, String> onChunk,
+            Consumer<ReviewResult> onComplete,
+            Consumer<String> onError) {
         Consumer<String> wrappedStatus = wrapCallback(onStatus);
         BiConsumer<String, String> wrappedChunk = wrapChunkCallback(onChunk);
         runOnPooledThread(
@@ -121,7 +138,24 @@ public class IntellijClaudeService {
             Consumer<String> onChunk,
             Consumer<String> onDone,
             Consumer<String> onError) {
-        RuntimeSettings settings = readRuntimeSettings();
+        chat(
+                prContext,
+                history,
+                userMessage,
+                snapshotReviewRuntimeSettings(),
+                onChunk,
+                onDone,
+                onError);
+    }
+
+    public void chat(
+            String prContext,
+            List<ChatMessage> history,
+            String userMessage,
+            ReviewRuntimeSettings settings,
+            Consumer<String> onChunk,
+            Consumer<String> onDone,
+            Consumer<String> onError) {
         Consumer<String> wrappedChunk = wrapCallback(onChunk);
         runOnPooledThread(
                 settings.provider,
@@ -153,7 +187,22 @@ public class IntellijClaudeService {
             Consumer<String> onChunk,
             Consumer<String> onDone,
             Consumer<String> onError) {
-        RuntimeSettings settings = readRuntimeSettings();
+        chatFocused(
+                focusedContext,
+                question,
+                snapshotReviewRuntimeSettings(),
+                onChunk,
+                onDone,
+                onError);
+    }
+
+    public void chatFocused(
+            String focusedContext,
+            String question,
+            ReviewRuntimeSettings settings,
+            Consumer<String> onChunk,
+            Consumer<String> onDone,
+            Consumer<String> onError) {
         String rawPrompt = ClaudeService.buildFocusedChatPrompt(focusedContext, question);
         Consumer<String> wrappedChunk = wrapCallback(onChunk);
         runOnPooledThread(
@@ -196,9 +245,12 @@ public class IntellijClaudeService {
                 : (kind, chunk) -> invokeLater(() -> callback.accept(kind, chunk));
     }
 
-    private static RuntimeSettings readRuntimeSettings() {
-        PluginSettings settings = PluginSettings.getInstance();
-        return new RuntimeSettings(
+    public static ReviewRuntimeSettings snapshotReviewRuntimeSettings() {
+        return snapshotReviewRuntimeSettings(PluginSettings.getInstance());
+    }
+
+    static ReviewRuntimeSettings snapshotReviewRuntimeSettings(PluginSettings settings) {
+        return new ReviewRuntimeSettings(
                 settings.getReviewProvider(),
                 settings.getActiveReviewModel(),
                 settings.getReviewEffort(),

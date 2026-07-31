@@ -21,7 +21,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -272,7 +274,6 @@ public class ClaudeService {
     private static final int MAX_USER_MESSAGE_CHARS = 4_000;
 
     private static final int MAX_SUMMARY_CHARS = 800;
-    private static final int MAX_BODY_CHARS = 300;
     private static final int MAX_RATIONALE_CHARS = 200;
     private static final int MAX_LINE_COMMENTS = 20;
     private static final Set<String> VALID_TYPES = Set.of("issue", "suggestion", "note");
@@ -382,15 +383,15 @@ public class ClaudeService {
             CompletableFuture<Void> stdinFuture =
                     CompletableFuture.runAsync(() -> writeStdin(finalProcess, prompt));
 
-            boolean finished = process.waitFor(30, TimeUnit.MINUTES);
-            stdinFuture.join(); // propagate any stdin write error
+            boolean finished = process.waitFor(reviewTimeoutMillis(), TimeUnit.MILLISECONDS);
             if (!finished) {
-                process.destroyForcibly();
+                terminateProcess(process, stdinFuture, stderrFuture);
                 throw new IOException(
                         "Review timed out — claude did not finish within 30 minutes.");
             }
+            awaitIo(stdinFuture, "write the review prompt");
             int exitCode = process.exitValue();
-            String stderr = stderrFuture.join();
+            String stderr = awaitIo(stderrFuture, "read review stderr");
             if (exitCode != 0) {
                 ErrorInfo errorInfo = findErrorInfo(stdoutFile);
                 if ("error_max_turns".equals(errorInfo.subtype())
@@ -450,15 +451,15 @@ public class ClaudeService {
             CompletableFuture<Void> stdinFuture =
                     CompletableFuture.runAsync(() -> writeStdin(finalProcess, RESUME_NUDGE));
 
-            boolean finished = process.waitFor(10, TimeUnit.MINUTES);
-            stdinFuture.join();
+            boolean finished = process.waitFor(resumeTimeoutMillis(), TimeUnit.MILLISECONDS);
             if (!finished) {
-                process.destroyForcibly();
+                terminateProcess(process, stdinFuture, stderrFuture);
                 throw new IOException(
                         "Resume timed out — claude did not finish within 10 minutes.");
             }
+            awaitIo(stdinFuture, "write the resume prompt");
             int exitCode = process.exitValue();
-            String stderr = stderrFuture.join();
+            String stderr = awaitIo(stderrFuture, "read resume stderr");
             if (exitCode != 0) {
                 ErrorInfo errorInfo = findErrorInfo(stdoutFile);
                 String msg =
@@ -672,7 +673,7 @@ public class ClaudeService {
      * @param prContext formatted PR + review background (may be empty)
      * @param history prior turns in this conversation
      * @param userMessage the user's latest message
-     * @param onChunk called on the calling thread with each new text chunk as it arrives
+     * @param onChunk called with each new text chunk as it arrives
      * @return the complete response text
      */
     public String chat(
@@ -701,38 +702,29 @@ public class ClaudeService {
         try {
             process = buildProcess();
             activeProcess.set(process);
-            writeStdin(process, prompt);
-
+            Process finalProcess = process;
+            CompletableFuture<Void> stdinFuture =
+                    CompletableFuture.runAsync(() -> writeStdin(finalProcess, prompt));
             CompletableFuture<String> stderrFuture = drainStderr(process);
+            CompletableFuture<String> stdoutFuture =
+                    CompletableFuture.supplyAsync(() -> readChatOutput(finalProcess, onChunk));
 
-            StringBuilder buffer = new StringBuilder();
-            try (var reader =
-                    IOUtils.toBufferedReader(
-                            new InputStreamReader(
-                                    process.getInputStream(), StandardCharsets.UTF_8))) {
-                char[] buf = new char[256];
-                int n;
-                while ((n = reader.read(buf, 0, buf.length)) != -1) {
-                    String chunk = new String(buf, 0, n);
-                    buffer.append(chunk);
-                    onChunk.accept(chunk);
-                }
-            }
-
-            boolean finished = process.waitFor(10, TimeUnit.MINUTES);
+            boolean finished = process.waitFor(chatTimeoutMillis(), TimeUnit.MILLISECONDS);
             if (!finished) {
-                process.destroyForcibly();
+                terminateProcess(process, stdinFuture, stdoutFuture, stderrFuture);
                 throw new IOException("Chat timed out — claude did not finish within 10 minutes.");
             }
+            awaitIo(stdinFuture, "write the chat prompt");
             int exitCode = process.exitValue();
+            String response = awaitIo(stdoutFuture, "read chat stdout");
+            String stderr = awaitIo(stderrFuture, "read chat stderr");
             if (exitCode != 0) {
-                String stderr = stderrFuture.join();
                 throw new IOException(
                         "claude exited "
                                 + exitCode
                                 + (StringUtils.isBlank(stderr) ? "" : ": " + stderr.trim()));
             }
-            return buffer.toString();
+            return response;
         } finally {
             activeProcess.set(null);
             if (process != null) {
@@ -752,7 +744,7 @@ public class ClaudeService {
         }
     }
 
-    private Process buildProcess(String... extraArgs) throws IOException {
+    Process buildProcess(String... extraArgs) throws IOException {
         return buildProcess(null, DEFAULT_MAX_TURNS, extraArgs);
     }
 
@@ -772,6 +764,18 @@ public class ClaudeService {
             pb.redirectOutput(stdoutFile);
         }
         return pb.start();
+    }
+
+    long reviewTimeoutMillis() {
+        return TimeUnit.MINUTES.toMillis(30);
+    }
+
+    long resumeTimeoutMillis() {
+        return TimeUnit.MINUTES.toMillis(10);
+    }
+
+    long chatTimeoutMillis() {
+        return TimeUnit.MINUTES.toMillis(10);
     }
 
     /**
@@ -1143,6 +1147,49 @@ public class ClaudeService {
                 });
     }
 
+    private static String readChatOutput(Process process, Consumer<String> onChunk) {
+        StringBuilder buffer = new StringBuilder();
+        try (var reader =
+                IOUtils.toBufferedReader(
+                        new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+            char[] chars = new char[256];
+            int count;
+            while ((count = reader.read(chars, 0, chars.length)) != -1) {
+                String chunk = new String(chars, 0, count);
+                buffer.append(chunk);
+                onChunk.accept(chunk);
+            }
+            return buffer.toString();
+        } catch (IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+    }
+
+    private static <T> T awaitIo(CompletableFuture<T> future, String operation)
+            throws IOException, InterruptedException {
+        try {
+            return future.get(5, TimeUnit.SECONDS);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof java.io.UncheckedIOException unchecked) {
+                throw unchecked.getCause();
+            }
+            throw new IOException("Failed to " + operation + ".", cause);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            throw new IOException("Timed out while waiting to " + operation + ".", e);
+        }
+    }
+
+    private static void terminateProcess(Process process, CompletableFuture<?>... ioFutures)
+            throws InterruptedException {
+        process.destroyForcibly();
+        process.waitFor(5, TimeUnit.SECONDS);
+        for (CompletableFuture<?> future : ioFutures) {
+            future.cancel(true);
+        }
+    }
+
     private static void writeStdin(Process process, String prompt) {
         try (var out = process.getOutputStream()) {
             IOUtils.write(prompt, out, StandardCharsets.UTF_8);
@@ -1283,7 +1330,6 @@ public class ClaudeService {
             body = body.replaceAll("[\\r\\n]+", " ").trim();
         }
         if (StringUtils.isBlank(body)) return dropComment("blank/missing body");
-        if (body.length() > MAX_BODY_CHARS) body = body.substring(0, MAX_BODY_CHARS);
 
         String severity = optionalString(element, "severity");
         if (severity == null || !VALID_SEVERITIES.contains(severity))

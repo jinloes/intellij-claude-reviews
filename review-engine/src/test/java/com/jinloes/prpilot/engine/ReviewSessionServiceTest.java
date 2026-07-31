@@ -145,7 +145,7 @@ class ReviewSessionServiceTest {
         }
 
         @Test
-        void honoursExplicitGlobsInsteadOfTheDefaults() throws IOException {
+        void addsExplicitGlobsToTheDefaults() throws IOException {
             write("AGENTS.md", "default file");
             write("docs/style.md", "custom file");
 
@@ -155,7 +155,9 @@ class ReviewSessionServiceTest {
                                             repoDir.toString(), List.of("**/style.md")))
                             .guidelines();
 
-            assertThat(guidelines).contains("custom file").doesNotContain("default file");
+            assertThat(guidelines).contains("custom file").contains("default file");
+            assertThat(guidelines.indexOf("custom file"))
+                    .isLessThan(guidelines.indexOf("default file"));
         }
 
         @Test

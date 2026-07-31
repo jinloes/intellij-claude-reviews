@@ -35,6 +35,21 @@ class DraftReviewCodecTest {
     }
 
     @Test
+    void recoversGitHubCommentsWhenEmbeddedMetadataIsInvalid() {
+        DraftReviewCodec.DecodedReview review =
+                codec.decode(
+                        "<!-- claude-summary: summary -->\n"
+                                + "<!-- claude-verdict: BOGUS -->\n"
+                                + "<!-- claude-comments: [{\"f\":\"a.java\",\"l\":2,\"t\":\"invalid\",\"b\":\"body\"}] -->",
+                        List.of(new DraftReviewCodec.ApiComment("a.java", 2, null, "[NOTE] api")));
+
+        assertThat(review.importedFromGitHub()).isTrue();
+        assertThat(review.verdict()).isEqualTo("COMMENT");
+        assertThat(review.lineComments()).hasSize(1);
+        assertThat(review.lineComments().get(0).body()).isEqualTo("api");
+    }
+
+    @Test
     void encodeBodyRoundTripsThroughDecode() {
         List<DraftReviewCodec.LineComment> comments =
                 List.of(
@@ -141,6 +156,36 @@ class DraftReviewCodecTest {
 
         assertThat(array).hasSize(1);
         assertThat(array.get(0).path("body").asText()).isEqualTo("same body");
+    }
+
+    @Test
+    void buildCommentArrayNormalizesOrphanPathPrefixes() {
+        DraftReviewCodec.LineComment comment =
+                new DraftReviewCodec.LineComment(
+                        "b/x.java", 1, "note", "same body", null, null, null, null);
+        DraftReviewCodec.LineComment orphan =
+                new DraftReviewCodec.LineComment(
+                        "x.java", 1, "note", "same body", null, null, null, null);
+
+        assertThat(codec.buildCommentArray(List.of(comment), List.of(orphan))).isEmpty();
+    }
+
+    @Test
+    void withoutDroppedCommentsMatchesNormalizedPostedPayloadIdentity() {
+        DraftReviewCodec.LineComment dropped =
+                new DraftReviewCodec.LineComment(
+                        "b/x.java", 4, "issue", "rejected", null, null, null, null);
+        DraftReviewCodec.LineComment accepted =
+                new DraftReviewCodec.LineComment(
+                        "x.java", 5, "note", "accepted", null, null, null, null);
+        ObjectMapper mapper = new ObjectMapper();
+        var payload = mapper.createObjectNode();
+        payload.put("path", "x.java");
+        payload.put("line", 4);
+        payload.put("body", "rejected");
+
+        assertThat(codec.withoutDroppedComments(List.of(dropped, accepted), List.of(payload)))
+                .containsExactly(accepted);
     }
 
     @Test

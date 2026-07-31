@@ -16,6 +16,7 @@ import com.jinloes.prpilot.sidecar.pr.ExistingReviewsResult;
 import com.jinloes.prpilot.sidecar.pr.LinkedIssueResult;
 import com.jinloes.prpilot.sidecar.pr.LinkedIssueService;
 import com.jinloes.prpilot.sidecar.pr.PrCommitsResult;
+import com.jinloes.prpilot.sidecar.pr.PrDetail;
 import com.jinloes.prpilot.sidecar.pr.PrDetailResult;
 import com.jinloes.prpilot.sidecar.pr.PrDetailService;
 import com.jinloes.prpilot.sidecar.pr.PrDiffResult;
@@ -184,6 +185,32 @@ class IntellijGitHubServiceTest {
     }
 
     @Nested
+    class GetPrDetail {
+
+        @Test
+        void returnsDetailedTitleBodyAndHead() throws IOException {
+            PrDetail detail =
+                    new PrDetail(
+                            false,
+                            "Detailed title",
+                            "Closes #7",
+                            new PrDetail.Head("sha", "branch", "acme/widgets", "clone"),
+                            "acme/widgets");
+            IntellijGitHubService service =
+                    serviceOver(
+                            new StubEngine() {
+                                @Override
+                                public PrDetailResult getPullRequestDetail(
+                                        PrDetailService.PrDetailParams params) {
+                                    return new PrDetailResult("ok", "loaded", detail);
+                                }
+                            });
+
+            assertThat(service.getPRDetail("acme", "widgets", 42)).isEqualTo(detail);
+        }
+    }
+
+    @Nested
     class GetExistingReviewsSummary {
 
         @Test
@@ -308,17 +335,20 @@ class IntellijGitHubServiceTest {
 
         @Test
         void linkedIssueSummaryReturnsEmptyRatherThanThrowing() {
+            LinkedIssueService.Params[] seen = new LinkedIssueService.Params[1];
             IntellijGitHubService service =
                     serviceOver(
                             new StubEngine() {
                                 @Override
                                 public LinkedIssueResult getLinkedIssues(
                                         LinkedIssueService.Params params) {
+                                    seen[0] = params;
                                     return new LinkedIssueResult("api_failed", "boom", 0, "");
                                 }
                             });
 
             assertThat(service.getLinkedIssueSummary("acme", "widgets", "Closes #1")).isEmpty();
+            assertThat(seen[0].prBody()).isEqualTo("Closes #1");
         }
     }
 

@@ -23,6 +23,17 @@ function isPrKey(value: unknown): boolean {
   return value === undefined || (isString(value, 512) && /^[^/\s]+\/[^#\s]+#[1-9]\d*$/.test(value))
 }
 
+
+function isRequiredPrKey(value: unknown): boolean {
+  return isString(value, 512) && /^[^/\s]+\/[^#\s]+#[1-9]\d*$/.test(value)
+}
+
+const PR_SCOPED_TYPES = new Set([
+  'draftLoading', 'draftLoaded', 'reviewGenerating', 'reviewChunk', 'reviewResult',
+  'reviewError', 'validationDiffUpdated', 'draftSaved', 'draftSaveError',
+  'reviewSubmitted', 'reviewSubmitError', 'draftDeleted', 'draftDeleteError',
+])
+
 function isLineComment(value: unknown): value is LineComment {
   if (!isRecord(value)) return false
   return isString(value.file, 4_096)
@@ -83,6 +94,7 @@ export function parseIncomingMessage(value: unknown): IncomingMessage | null {
     return null
   }
   if (!isPrKey(value.prKey)) return null
+  if (PR_SCOPED_TYPES.has(value.type) && !isRequiredPrKey(value.prKey)) return null
 
   let valid = false
   switch (value.type) {
@@ -112,7 +124,6 @@ export function parseIncomingMessage(value: unknown): IncomingMessage | null {
       break
     case 'reviewGenerating':
     case 'reviewError':
-    case 'draftSaveError':
     case 'reviewSubmitError':
     case 'draftDeleteError':
     case 'chatError':
@@ -126,8 +137,19 @@ export function parseIncomingMessage(value: unknown): IncomingMessage | null {
         && isString(value.diff, MAX_DIFF)
         && isOptionalString(value.validationDiff, MAX_DIFF)
       break
+    case 'validationDiffUpdated':
+      valid = isString(value.validationDiff, MAX_DIFF)
+      break
     case 'draftSaved':
-      valid = isString(value.reviewId, 256) && typeof value.commentsDropped === 'boolean'
+      valid = isString(value.reviewId, 256)
+        && typeof value.commentsDropped === 'boolean'
+        && Number.isSafeInteger(value.saveId)
+        && (value.saveId as number) > 0
+      break
+    case 'draftSaveError':
+      valid = hasMessage(value)
+        && Number.isSafeInteger(value.saveId)
+        && (value.saveId as number) > 0
       break
     case 'prDraftStatusUpdated':
       valid = Number.isInteger(value.number) && (value.number as number) > 0

@@ -214,8 +214,8 @@ public class ReviewSessionService implements ReviewEngineApi {
         if (params == null || StringUtils.isBlank(params.projectDir())) {
             return new GuidelinesResult("");
         }
-        // A null/empty glob list means "engine defaults"; RepoGuidelinesReader.read already applies
-        // that fallback, so no host needs its own copy of the default file list.
+        // RepoGuidelinesReader adds configured globs to the engine defaults, so no host needs its
+        // own copy of the default file list.
         return new GuidelinesResult(
                 RepoGuidelinesReader.read(new File(params.projectDir()), params.globs()));
     }

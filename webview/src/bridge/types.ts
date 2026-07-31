@@ -61,6 +61,12 @@ export interface ReviewResultMessage {
   validationDiff?: string
 }
 
+export interface ValidationDiffUpdatedMessage {
+  type: 'validationDiffUpdated'
+  prKey: string
+  validationDiff: string
+}
+
 export interface ReviewErrorMessage {
   type: 'reviewError'
   prKey?: string
@@ -72,12 +78,14 @@ export interface DraftSavedMessage {
   prKey?: string
   reviewId: string
   commentsDropped: boolean
+  saveId: number
 }
 
 export interface DraftSaveErrorMessage {
   type: 'draftSaveError'
   prKey?: string
   message: string
+  saveId: number
 }
 
 export interface ReviewSubmittedMessage {
@@ -156,6 +164,7 @@ export type IncomingMessage = { readonly protocolVersion: typeof BRIDGE_PROTOCOL
   | ReviewGeneratingMessage
   | ReviewChunkMessage
   | ReviewResultMessage
+  | ValidationDiffUpdatedMessage
   | ReviewErrorMessage
   | DraftSavedMessage
   | DraftSaveErrorMessage
@@ -254,7 +263,10 @@ export interface SaveDraftRequest {
   number: number
   owner: string
   repo: string
+  saveId: number
   result?: ReviewResult
+  /** Final model-authored baseline before reviewer edits; merged across chunked batches. */
+  generatedResult?: ReviewResult
   /**
    * Comments the webview pre-validated as having no anchor in the diff. The host
    * skips these when building the inline-comment POST and appends them to the

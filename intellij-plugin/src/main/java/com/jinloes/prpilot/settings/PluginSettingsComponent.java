@@ -16,6 +16,7 @@ import java.awt.Component;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.UUID;
 import javax.swing.*;
 import javax.swing.event.ChangeEvent;
 
@@ -69,6 +70,17 @@ public class PluginSettingsComponent {
     private final JBTextField reviewFocusAreasField = new JBTextField();
     private final JBTextArea reviewCustomInstructionsArea = new JBTextArea(3, 0);
     private final JBTextArea reviewGuidanceGlobsArea = new JBTextArea(3, 0);
+    private final JComboBox<PluginSettings.ReviewGuidanceProfile> reviewGuidanceProfileCombo =
+            new JComboBox<>();
+    private final JButton addReviewGuidanceProfileButton = new JButton("Save current as…");
+    private final JButton renameReviewGuidanceProfileButton = new JButton("Rename");
+    private final JButton deleteReviewGuidanceProfileButton = new JButton("Delete");
+    private List<PluginSettings.ReviewGuidanceProfile> reviewGuidanceProfiles = new ArrayList<>();
+    private String activeReviewGuidanceProfileId = "";
+    private String defaultReviewFocusAreas = "";
+    private String defaultReviewCustomInstructions = "";
+    private String defaultReviewGuidanceGlobs = "";
+    private boolean updatingReviewGuidanceProfile;
     private final JCheckBox reviewSelfCritiqueBox =
             new JCheckBox("Run a self-critique validation pass (slower, higher precision)");
     private final JComboBox<ReviewProvider> providerCombo =
@@ -227,6 +239,37 @@ public class PluginSettingsComponent {
                 (ChangeEvent e) -> updateNotificationSubOptions());
         updateNotificationSubOptions();
 
+        reviewGuidanceProfileCombo.setRenderer(
+                new DefaultListCellRenderer() {
+                    @Override
+                    public Component getListCellRendererComponent(
+                            JList<?> list,
+                            Object value,
+                            int index,
+                            boolean isSelected,
+                            boolean cellHasFocus) {
+                        super.getListCellRendererComponent(
+                                list, value, index, isSelected, cellHasFocus);
+                        setText(
+                                value instanceof PluginSettings.ReviewGuidanceProfile profile
+                                        ? profile.name
+                                        : "Default settings");
+                        return this;
+                    }
+                });
+        reviewGuidanceProfileCombo.addActionListener(e -> selectReviewGuidanceProfile());
+        addReviewGuidanceProfileButton.addActionListener(e -> addReviewGuidanceProfile());
+        renameReviewGuidanceProfileButton.addActionListener(e -> renameReviewGuidanceProfile());
+        deleteReviewGuidanceProfileButton.addActionListener(e -> deleteReviewGuidanceProfile());
+        rebuildReviewGuidanceProfileCombo();
+
+        JPanel reviewGuidanceProfilePanel =
+                new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 4, 0));
+        reviewGuidanceProfilePanel.add(reviewGuidanceProfileCombo);
+        reviewGuidanceProfilePanel.add(addReviewGuidanceProfileButton);
+        reviewGuidanceProfilePanel.add(renameReviewGuidanceProfileButton);
+        reviewGuidanceProfilePanel.add(deleteReviewGuidanceProfileButton);
+
         mainPanel =
                 FormBuilder.createFormBuilder()
                         .addComponent(sectionTitle("GitHub connection"), 1)
@@ -242,6 +285,16 @@ public class PluginSettingsComponent {
                         .addComponent(advancedCopilotSection, 1)
                         .addSeparator(8)
                         .addComponent(sectionTitle("Review defaults"), 1)
+                        .addLabeledComponent(
+                                new JBLabel("Guidance profile:"),
+                                reviewGuidanceProfilePanel,
+                                1,
+                                false)
+                        .addComponent(
+                                hintLabel(
+                                        "<html><small>Save and reuse focus areas, custom instructions,"
+                                                + " and guidance files as one named profile.</small></html>"),
+                                1)
                         .addLabeledComponent(
                                 new JBLabel("Review focus areas:"), reviewFocusAreasField, 1, false)
                         .addComponent(
@@ -260,7 +313,7 @@ public class PluginSettingsComponent {
                                                 + " prompt, such as team conventions.</small></html>"),
                                 1)
                         .addLabeledComponent(
-                                new JBLabel("Review guidance files:"),
+                                new JBLabel("Additional guidance files:"),
                                 new JBScrollPane(reviewGuidanceGlobsArea),
                                 1,
                                 false)
@@ -269,8 +322,9 @@ public class PluginSettingsComponent {
                                         "<html><small>One path or glob per line, read from the review"
                                                 + " working directory into repo guidelines (for example"
                                                 + " <code>**/style.md</code> or"
-                                                + " <code>.linkedin/ai-agent/*.md</code>). Blank uses the"
-                                                + " defaults (AGENTS.md, CONTRIBUTING.md, …).</small></html>"),
+                                                + " <code>.review/ai-agent/*.md</code>). These are"
+                                                + " prioritized and added to the standard agent"
+                                                + " instructions and contribution guides.</small></html>"),
                                 1)
                         .addComponent(reviewSelfCritiqueBox, 1)
                         .addComponent(
@@ -425,27 +479,69 @@ public class PluginSettingsComponent {
     }
 
     public String getReviewFocusAreas() {
-        return reviewFocusAreasField.getText().trim();
+        syncCurrentReviewGuidanceProfile();
+        return defaultReviewFocusAreas;
     }
 
     public void setReviewFocusAreas(String value) {
-        reviewFocusAreasField.setText(value != null ? value : "");
+        defaultReviewFocusAreas = value != null ? value.trim() : "";
+        if (activeReviewGuidanceProfileId.isBlank()) {
+            reviewFocusAreasField.setText(defaultReviewFocusAreas);
+        }
     }
 
     public String getReviewCustomInstructions() {
-        return reviewCustomInstructionsArea.getText().trim();
+        syncCurrentReviewGuidanceProfile();
+        return defaultReviewCustomInstructions;
     }
 
     public void setReviewCustomInstructions(String value) {
-        reviewCustomInstructionsArea.setText(value != null ? value : "");
+        defaultReviewCustomInstructions = value != null ? value.trim() : "";
+        if (activeReviewGuidanceProfileId.isBlank()) {
+            reviewCustomInstructionsArea.setText(defaultReviewCustomInstructions);
+        }
     }
 
     public String getReviewGuidanceGlobs() {
-        return reviewGuidanceGlobsArea.getText().trim();
+        syncCurrentReviewGuidanceProfile();
+        return defaultReviewGuidanceGlobs;
     }
 
     public void setReviewGuidanceGlobs(String value) {
-        reviewGuidanceGlobsArea.setText(value != null ? value : "");
+        defaultReviewGuidanceGlobs = value != null ? value.trim() : "";
+        if (activeReviewGuidanceProfileId.isBlank()) {
+            reviewGuidanceGlobsArea.setText(defaultReviewGuidanceGlobs);
+        }
+    }
+
+    public List<PluginSettings.ReviewGuidanceProfile> getReviewGuidanceProfiles() {
+        syncCurrentReviewGuidanceProfile();
+        return reviewGuidanceProfiles.stream()
+                .map(PluginSettings.ReviewGuidanceProfile::copy)
+                .toList();
+    }
+
+    public void setReviewGuidanceProfiles(List<PluginSettings.ReviewGuidanceProfile> profiles) {
+        reviewGuidanceProfiles =
+                profiles == null
+                        ? new ArrayList<>()
+                        : profiles.stream()
+                                .map(PluginSettings.ReviewGuidanceProfile::copy)
+                                .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+        rebuildReviewGuidanceProfileCombo();
+    }
+
+    public String getActiveReviewGuidanceProfileId() {
+        return activeReviewGuidanceProfileId;
+    }
+
+    public void setActiveReviewGuidanceProfileId(String profileId) {
+        String candidate = profileId != null ? profileId.trim() : "";
+        activeReviewGuidanceProfileId =
+                reviewGuidanceProfiles.stream().anyMatch(profile -> profile.id.equals(candidate))
+                        ? candidate
+                        : "";
+        loadActiveReviewGuidanceProfile();
     }
 
     public boolean isReviewSelfCritique() {
@@ -460,6 +556,127 @@ public class PluginSettingsComponent {
         JBLabel label = new JBLabel("<html><b>" + text + "</b></html>");
         label.setBorder(JBUI.Borders.emptyTop(8));
         return label;
+    }
+
+    private void selectReviewGuidanceProfile() {
+        if (updatingReviewGuidanceProfile) {
+            return;
+        }
+        syncCurrentReviewGuidanceProfile();
+        Object selected = reviewGuidanceProfileCombo.getSelectedItem();
+        activeReviewGuidanceProfileId =
+                selected instanceof PluginSettings.ReviewGuidanceProfile profile ? profile.id : "";
+        loadActiveReviewGuidanceProfile();
+    }
+
+    private void addReviewGuidanceProfile() {
+        syncCurrentReviewGuidanceProfile();
+        String name =
+                JOptionPane.showInputDialog(
+                        mainPanel,
+                        "Profile name:",
+                        "Save guidance profile",
+                        JOptionPane.PLAIN_MESSAGE);
+        if (name == null || name.trim().isEmpty()) {
+            return;
+        }
+        PluginSettings.ReviewGuidanceProfile profile =
+                new PluginSettings.ReviewGuidanceProfile(
+                        UUID.randomUUID().toString(),
+                        name,
+                        reviewFocusAreasField.getText(),
+                        reviewCustomInstructionsArea.getText(),
+                        reviewGuidanceGlobsArea.getText());
+        reviewGuidanceProfiles.add(profile);
+        activeReviewGuidanceProfileId = profile.id;
+        rebuildReviewGuidanceProfileCombo();
+    }
+
+    private void renameReviewGuidanceProfile() {
+        PluginSettings.ReviewGuidanceProfile active = findActiveReviewGuidanceProfile();
+        if (active == null) {
+            return;
+        }
+        String name =
+                (String)
+                        JOptionPane.showInputDialog(
+                                mainPanel,
+                                "Profile name:",
+                                "Rename guidance profile",
+                                JOptionPane.PLAIN_MESSAGE,
+                                null,
+                                null,
+                                active.name);
+        if (name == null || name.trim().isEmpty()) {
+            return;
+        }
+        active.name = name.trim();
+        rebuildReviewGuidanceProfileCombo();
+    }
+
+    private void deleteReviewGuidanceProfile() {
+        PluginSettings.ReviewGuidanceProfile active = findActiveReviewGuidanceProfile();
+        if (active == null) {
+            return;
+        }
+        int answer =
+                JOptionPane.showConfirmDialog(
+                        mainPanel,
+                        "Delete guidance profile \"" + active.name + "\"?",
+                        "Delete guidance profile",
+                        JOptionPane.YES_NO_OPTION,
+                        JOptionPane.WARNING_MESSAGE);
+        if (answer != JOptionPane.YES_OPTION) {
+            return;
+        }
+        reviewGuidanceProfiles.remove(active);
+        activeReviewGuidanceProfileId = "";
+        rebuildReviewGuidanceProfileCombo();
+        loadActiveReviewGuidanceProfile();
+    }
+
+    private void syncCurrentReviewGuidanceProfile() {
+        PluginSettings.ReviewGuidanceProfile active = findActiveReviewGuidanceProfile();
+        if (active == null) {
+            defaultReviewFocusAreas = reviewFocusAreasField.getText().trim();
+            defaultReviewCustomInstructions = reviewCustomInstructionsArea.getText().trim();
+            defaultReviewGuidanceGlobs = reviewGuidanceGlobsArea.getText().trim();
+            return;
+        }
+        active.focusAreas = reviewFocusAreasField.getText().trim();
+        active.customInstructions = reviewCustomInstructionsArea.getText().trim();
+        active.guidanceGlobs = reviewGuidanceGlobsArea.getText().trim();
+    }
+
+    private void loadActiveReviewGuidanceProfile() {
+        PluginSettings.ReviewGuidanceProfile active = findActiveReviewGuidanceProfile();
+        reviewFocusAreasField.setText(active != null ? active.focusAreas : defaultReviewFocusAreas);
+        reviewCustomInstructionsArea.setText(
+                active != null ? active.customInstructions : defaultReviewCustomInstructions);
+        reviewGuidanceGlobsArea.setText(
+                active != null ? active.guidanceGlobs : defaultReviewGuidanceGlobs);
+        renameReviewGuidanceProfileButton.setEnabled(active != null);
+        deleteReviewGuidanceProfileButton.setEnabled(active != null);
+    }
+
+    private PluginSettings.ReviewGuidanceProfile findActiveReviewGuidanceProfile() {
+        return reviewGuidanceProfiles.stream()
+                .filter(profile -> profile.id.equals(activeReviewGuidanceProfileId))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private void rebuildReviewGuidanceProfileCombo() {
+        updatingReviewGuidanceProfile = true;
+        DefaultComboBoxModel<PluginSettings.ReviewGuidanceProfile> model =
+                new DefaultComboBoxModel<>();
+        model.addElement(null);
+        reviewGuidanceProfiles.forEach(model::addElement);
+        reviewGuidanceProfileCombo.setModel(model);
+        PluginSettings.ReviewGuidanceProfile active = findActiveReviewGuidanceProfile();
+        reviewGuidanceProfileCombo.setSelectedItem(active);
+        updatingReviewGuidanceProfile = false;
+        loadActiveReviewGuidanceProfile();
     }
 
     /** Left-aligns a model combo and caps its width so it doesn't stretch to the row/hint width. */

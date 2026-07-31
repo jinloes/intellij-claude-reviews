@@ -50,11 +50,13 @@ function createSidecarHarness(
   children: ChildProcessWithoutNullStreams[];
   commands: Array<{ command: string; args: string[] }>;
   methods: string[];
+  requests: Array<{ method: string; params: unknown }>;
   killCount: { value: number };
 } {
   const children: ChildProcessWithoutNullStreams[] = [];
   const commands: Array<{ command: string; args: string[] }> = [];
   const methods: string[] = [];
+  const requests: Array<{ method: string; params: unknown }> = [];
   const killCount = { value: 0 };
   const spawnSidecar: SidecarSpawn = (command, args) => {
     commands.push({ command, args });
@@ -76,6 +78,7 @@ function createSidecarHarness(
       requestBuffer = extractFrames(Buffer.concat([requestBuffer, chunk]), (body) => {
         const request = JSON.parse(body) as { id: number; method: string; params: unknown };
         methods.push(request.method);
+        requests.push({ method: request.method, params: request.params });
         const result = responder(request.method, request.params);
         if (result === NO_RESPONSE) return;
         queueMicrotask(() => stdout.write(encodeFrame(JSON.stringify({
@@ -87,7 +90,7 @@ function createSidecarHarness(
     });
     return child;
   };
-  return { spawnSidecar, children, commands, methods, killCount };
+  return { spawnSidecar, children, commands, methods, requests, killCount };
 }
 
 test('supplemental GitHub parsers accept valid token-free results', () => {
@@ -526,7 +529,7 @@ test('context reads degrade to empty instead of rejecting when the sidecar is un
     summary: '', annotations: [],
   });
   assert.equal(await client.getCommits('https://github.com', 'o', 'r', 1), '');
-  assert.equal(await client.getLinkedIssues('https://github.com', 'o', 'r', 1), '');
+  assert.equal(await client.getLinkedIssues('https://github.com', 'o', 'r', 'Closes #1'), '');
   assert.equal(await client.getRepoProfile('/tmp/x'), '');
   assert.equal(harness.commands.length, 0);
   client.dispose();
@@ -545,6 +548,26 @@ test('context reads tolerate a malformed payload without throwing', async () => 
     { path: 'ok.java', startLine: 0, endLine: 0, level: 'warning', message: 'm' },
   ]);
   assert.equal(await client.getCommits('https://github.com', 'o', 'r', 1), '');
+  client.dispose();
+});
+
+test('getLinkedIssues sends the PR body required by the engine contract', async () => {
+  const harness = createSidecarHarness((method) => method === 'initialize'
+    ? initializeResult
+    : { summary: 'Issue #7' });
+  const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar);
+
+  assert.equal(
+    await client.getLinkedIssues('https://github.com', 'acme', 'widgets', 'Fixes #7'),
+    'Issue #7',
+  );
+  const request = harness.requests.find(({ method }) => method === 'prs/getLinkedIssues');
+  assert.deepEqual(request?.params, {
+    githubBaseUrl: 'https://github.com',
+    owner: 'acme',
+    repo: 'widgets',
+    prBody: 'Fixes #7',
+  });
   client.dispose();
 });
 

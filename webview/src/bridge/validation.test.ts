@@ -54,6 +54,30 @@ void test('rejects malformed nested review values', () => {
 
 void test('rejects malformed PR correlation keys', () => {
   assert.equal(parseIncomingMessage({ ...version, type: 'draftLoading', prKey: '42' }), null)
+  assert.equal(parseIncomingMessage({ ...version, type: 'draftLoading' }), null)
+})
+
+void test('validates late diff updates and correlated save acknowledgements', () => {
+  assert.notEqual(parseIncomingMessage({
+    ...version,
+    type: 'validationDiffUpdated',
+    prKey: 'acme/platform#42',
+    validationDiff: 'full diff',
+  }), null)
+  assert.notEqual(parseIncomingMessage({
+    ...version,
+    type: 'draftSaved',
+    prKey: 'acme/platform#42',
+    reviewId: '123',
+    commentsDropped: false,
+    saveId: 7,
+  }), null)
+  assert.equal(parseIncomingMessage({
+    ...version,
+    type: 'draftSaveError',
+    prKey: 'acme/platform#42',
+    message: 'failed',
+  }), null)
 })
 
 void test('validates PR list metadata', () => {
