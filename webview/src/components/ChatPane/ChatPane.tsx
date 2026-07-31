@@ -37,6 +37,11 @@ function prKey(pr: Pick<PR, 'owner' | 'repo' | 'number'>): string {
   return `${pr.owner}/${pr.repo}#${pr.number}`
 }
 
+function newOperationId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
 export function ChatPane({
   pr,
   selectedContext,
@@ -55,6 +60,7 @@ export function ChatPane({
   const messagesRef = useRef<HTMLDivElement>(null)
   const sentPendingMessageIdRef = useRef<number | null>(null)
   const pendingTokenRef = useRef<string | undefined>(undefined)
+  const activeOperationIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     setMessages([])
@@ -63,6 +69,7 @@ export function ChatPane({
     setBusy(false)
     setAppliedTokens(new Set())
     pendingTokenRef.current = undefined
+    activeOperationIdRef.current = null
   }, [pr.number, pr.owner, pr.repo])
 
   useEffect(() => {
@@ -79,6 +86,7 @@ export function ChatPane({
           setStreaming('')
           setMessages((prev) => [...prev, { role: 'assistant', content: msg.response, token }])
           setBusy(false)
+          activeOperationIdRef.current = null
           break
         }
         case 'chatError':
@@ -89,6 +97,7 @@ export function ChatPane({
             { role: 'assistant', content: msg.message, isError: true },
           ])
           setBusy(false)
+          activeOperationIdRef.current = null
           break
         default:
           break
@@ -104,7 +113,9 @@ export function ChatPane({
     setMessages((prev) => [...prev, { role: 'user', content: q }])
     setBusy(true)
     onPendingMessageSent?.()
-    sendToHost({ type: 'askClaude', context: ctx, question: q })
+    const operationId = newOperationId()
+    activeOperationIdRef.current = operationId
+    sendToHost({ type: 'askClaude', operationId, context: ctx, question: q })
   }, [pendingMessage, busy, onPendingMessageSent])
 
   function handleApplyVerifyAction(result: VerifyResult, token: string) {
@@ -120,10 +131,12 @@ export function ChatPane({
   }, [messages.length, busy])
 
   function handleClear() {
+    const operationId = activeOperationIdRef.current ?? newOperationId()
     setMessages([])
     setStreaming('')
     setBusy(false)
-    sendToHost({ type: 'clearChat' })
+    activeOperationIdRef.current = null
+    sendToHost({ type: 'clearChat', operationId })
   }
 
   function handleSend() {
@@ -134,7 +147,9 @@ export function ChatPane({
     setInput('')
     setBusy(true)
     onContextUsed?.()
-    sendToHost({ type: 'askClaude', context: ctx, question: q })
+    const operationId = newOperationId()
+    activeOperationIdRef.current = operationId
+    sendToHost({ type: 'askClaude', operationId, context: ctx, question: q })
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {

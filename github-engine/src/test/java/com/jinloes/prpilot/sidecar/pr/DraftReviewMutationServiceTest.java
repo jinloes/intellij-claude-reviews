@@ -151,6 +151,63 @@ class DraftReviewMutationServiceTest {
     }
 
     @Test
+    void failsSaveWhenFallbackMetadataRepairIsRejected() {
+        DraftReviewMutationService.GitHubRestClient client =
+                new DraftReviewMutationService.GitHubRestClient() {
+                    @Override
+                    public DraftReviewMutationService.RestResponse get(
+                            String apiBase, String token, String path) {
+                        if (path.endsWith("/reviews")) {
+                            return new DraftReviewMutationService.RestResponse(200, "[]");
+                        }
+                        return new DraftReviewMutationService.RestResponse(
+                                200, "{\"head\":{\"sha\":\"abc123\"}}");
+                    }
+
+                    @Override
+                    public DraftReviewMutationService.RestResponse post(
+                            String apiBase, String token, String path, String jsonBody) {
+                        if (path.endsWith("/comments")) {
+                            return new DraftReviewMutationService.RestResponse(422, "{}");
+                        }
+                        if (jsonBody.contains("\"comments\":[]")) {
+                            return new DraftReviewMutationService.RestResponse(200, "{\"id\":7}");
+                        }
+                        return new DraftReviewMutationService.RestResponse(422, "{}");
+                    }
+
+                    @Override
+                    public DraftReviewMutationService.RestResponse put(
+                            String apiBase, String token, String path, String jsonBody) {
+                        return new DraftReviewMutationService.RestResponse(422, "{}");
+                    }
+
+                    @Override
+                    public DraftReviewMutationService.RestResponse delete(
+                            String apiBase, String token, String path) {
+                        return new DraftReviewMutationService.RestResponse(200, "{}");
+                    }
+                };
+        DraftReviewMutationService service =
+                new DraftReviewMutationService(
+                        ignored -> GitHubAuthService.TokenResolution.resolved("secret-token"),
+                        client,
+                        mapper);
+
+        DraftReviewMutationResult result =
+                service.save(
+                        saveParams(
+                                List.of(
+                                        new DraftReviewMutationService.CommentInput(
+                                                "a.java", 3, "issue", "fix", null, null, null,
+                                                null)),
+                                List.of()));
+
+        assertThat(result.status()).isEqualTo("api_failed");
+        assertThat(result.reviewId()).isNull();
+    }
+
+    @Test
     void retriesOnlyIdempotentHttpMethods() {
         assertThat(DraftReviewMutationService.isRetryableHttpMethod("GET")).isTrue();
         assertThat(DraftReviewMutationService.isRetryableHttpMethod("PUT")).isTrue();

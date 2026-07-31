@@ -15,7 +15,8 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import org.apache.commons.lang3.StringUtils;
@@ -28,14 +29,14 @@ import org.apache.commons.lang3.StringUtils;
  * way — the sidecar wraps it in JSON-RPC for VS Code, while an in-process client (IntelliJ, a
  * future CLI) can call it directly. It has no transport, Spring, or IDE dependencies.
  *
- * <p>Holds the currently-active provider instance so {@link #cancel()} can reach it; only one
- * review or chat request is ever in flight per instance, matching IntelliJ's "only one active
- * process at any time" behavior.
+ * <p>Tracks active provider instances by operation ID so cancellation can reach exactly the request
+ * that owns it.
  */
 public class ReviewSessionService implements ReviewEngineApi {
 
-    private final AtomicReference<ClaudeService> activeClaude = new AtomicReference<>();
-    private final AtomicReference<CopilotService> activeCopilot = new AtomicReference<>();
+    private static final int MAX_OPERATION_ID_LENGTH = 128;
+
+    private final OperationRegistry activeOperations = new OperationRegistry();
     private final ReviewOutcomeLog outcomeLog;
     private final GitWorktreeService worktreeService = new GitWorktreeService();
 
@@ -67,6 +68,9 @@ public class ReviewSessionService implements ReviewEngineApi {
             Consumer<String> onStatus,
             BiConsumer<String, String> onChunk)
             throws IOException, InterruptedException {
+        throwIfInterrupted();
+        requireValidGenerateParams(params);
+        boolean copilot = "copilot".equals(params.provider());
         PRReviewRequest request =
                 PRReviewRequest.builder(toPullRequest(params.pr()), params.diff())
                         .priorReview(params.priorReview())
@@ -80,9 +84,10 @@ public class ReviewSessionService implements ReviewEngineApi {
                         .repoProfile(params.repoProfile())
                         .ciAnnotations(toCiAnnotations(params.ciAnnotations()))
                         .build();
-        if ("copilot".equals(params.provider())) {
+        if (copilot) {
             CopilotService service = new CopilotService(params.projectDir());
-            activeCopilot.set(service);
+            ActiveOperation operation =
+                    startOperation(params.operationId(), service::cancelCurrentRequest);
             try {
                 return service.reviewPR(
                         request,
@@ -94,22 +99,25 @@ public class ReviewSessionService implements ReviewEngineApi {
                         params.configDir(),
                         params.selfCritique());
             } finally {
-                activeCopilot.compareAndSet(service, null);
+                activeOperations.finish(operation);
             }
         }
         ClaudeService service = new ClaudeService(params.projectDir());
-        activeClaude.set(service);
+        ActiveOperation operation =
+                startOperation(params.operationId(), service::cancelCurrentRequest);
         try {
             return service.reviewPR(
                     request, params.model(), params.selfCritique(), onStatus, onChunk);
         } finally {
-            activeClaude.compareAndSet(service, null);
+            activeOperations.finish(operation);
         }
     }
 
     @Override
     public ChatResult chat(ChatParams params, Consumer<String> onChunk)
             throws IOException, InterruptedException {
+        throwIfInterrupted();
+        requireValidChatParams(params);
         boolean focused = params.rawPrompt() != null;
         List<ChatMessage> history =
                 params.history() == null
@@ -125,7 +133,8 @@ public class ReviewSessionService implements ReviewEngineApi {
                                 .toList();
         if ("copilot".equals(params.provider())) {
             CopilotService service = new CopilotService(params.projectDir());
-            activeCopilot.set(service);
+            ActiveOperation operation =
+                    startOperation(params.operationId(), service::cancelCurrentRequest);
             try {
                 String content =
                         focused
@@ -145,11 +154,12 @@ public class ReviewSessionService implements ReviewEngineApi {
                                         params.configDir());
                 return new ChatResult(content);
             } finally {
-                activeCopilot.compareAndSet(service, null);
+                activeOperations.finish(operation);
             }
         }
         ClaudeService service = new ClaudeService(params.projectDir());
-        activeClaude.set(service);
+        ActiveOperation operation =
+                startOperation(params.operationId(), service::cancelCurrentRequest);
         try {
             String content =
                     focused
@@ -158,16 +168,89 @@ public class ReviewSessionService implements ReviewEngineApi {
                                     params.prContext(), history, params.userMessage(), onChunk);
             return new ChatResult(content);
         } finally {
-            activeClaude.compareAndSet(service, null);
+            activeOperations.finish(operation);
         }
     }
 
     @Override
-    public void cancel() {
-        ClaudeService claude = activeClaude.get();
-        if (claude != null) claude.cancelCurrentRequest();
-        CopilotService copilot = activeCopilot.get();
-        if (copilot != null) copilot.cancelCurrentRequest();
+    public CancelResult cancel(CancelParams params) {
+        return activeOperations.cancel(params);
+    }
+
+    private ActiveOperation startOperation(String operationId, Runnable cancel)
+            throws InterruptedException {
+        ActiveOperation operation = activeOperations.start(operationId, cancel);
+        try {
+            throwIfInterrupted();
+            return operation;
+        } catch (InterruptedException exception) {
+            activeOperations.finish(operation);
+            throw exception;
+        }
+    }
+
+    private static void throwIfInterrupted() throws InterruptedException {
+        if (Thread.currentThread().isInterrupted()) {
+            throw new InterruptedException("Operation interrupted before provider startup.");
+        }
+    }
+
+    static boolean validOperationId(String operationId) {
+        return operationId != null
+                && !operationId.isBlank()
+                && operationId.length() <= MAX_OPERATION_ID_LENGTH
+                && operationId.chars().noneMatch(Character::isISOControl);
+    }
+
+    private record ActiveOperation(String operationId, Runnable cancel) {}
+
+    static final class OperationRegistry {
+        private final ConcurrentMap<String, ActiveOperation> operations = new ConcurrentHashMap<>();
+
+        ActiveOperation start(String operationId, Runnable cancel) {
+            if (!validOperationId(operationId)) {
+                throw new IllegalArgumentException(
+                        "Operation ID is required and must be at most 128 characters.");
+            }
+            ActiveOperation operation = new ActiveOperation(operationId, cancel);
+            if (operations.putIfAbsent(operationId, operation) != null) {
+                throw new IllegalStateException("An operation with this ID is already active.");
+            }
+            return operation;
+        }
+
+        CancelResult cancel(CancelParams params) {
+            if (params == null || !validOperationId(params.operationId())) {
+                return new CancelResult(false);
+            }
+            ActiveOperation operation = operations.remove(params.operationId());
+            if (operation == null) return new CancelResult(false);
+            operation.cancel().run();
+            return new CancelResult(true);
+        }
+
+        void finish(ActiveOperation operation) {
+            operations.remove(operation.operationId(), operation);
+        }
+    }
+
+    private static void requireValidGenerateParams(GenerateReviewParams params) {
+        if (params == null
+                || !validOperationId(params.operationId())
+                || params.pr() == null
+                || params.provider() == null
+                || params.diff() == null) {
+            throw new IllegalArgumentException("Invalid review generation parameters.");
+        }
+    }
+
+    private static void requireValidChatParams(ChatParams params) {
+        if (params == null
+                || !validOperationId(params.operationId())
+                || params.provider() == null
+                || (params.rawPrompt() == null) == (params.userMessage() == null)) {
+            throw new IllegalArgumentException("Invalid chat parameters.");
+        }
     }
 
     @Override
@@ -255,9 +338,9 @@ public class ReviewSessionService implements ReviewEngineApi {
                         repoDir, params.branch(), params.headSha(), worktreeDir);
             }
             return new WorktreeResult("created", worktreeDir.getAbsolutePath(), "");
-        } catch (IOException e) {
-            // Domain result, not an exception: callers fall back to the user's own checkout, so a
-            // failed worktree degrades review accuracy rather than failing the review.
+        } catch (IOException | IllegalStateException e) {
+            // Domain result, not an exception: hosts present an actionable failure rather than
+            // granting a provider access to an arbitrary open checkout.
             return new WorktreeResult("failed", "", String.valueOf(e.getMessage()));
         }
     }

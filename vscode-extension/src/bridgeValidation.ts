@@ -37,6 +37,15 @@ function isBoundedString(value: unknown, maxLength = MAX_TEXT): value is string 
   return typeof value === 'string' && value.length <= maxLength;
 }
 
+function isOperationId(value: unknown): value is string {
+  return isBoundedString(value, 128)
+    && value.trim().length > 0
+    && [...value].every((character) => {
+      const code = character.charCodeAt(0);
+      return code > 31 && code !== 127;
+    });
+}
+
 function isLineComment(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const comment = value as Record<string, unknown>;
@@ -80,18 +89,20 @@ export function isValidBridgeRequest(msg: AnyMessage | null | undefined): msg is
     case 'clearChat':
     case 'openSettings':
     case 'runAuthLogin':
-      return true;
+      return msg.type === 'openSettings' || msg.type === 'runAuthLogin' || isOperationId(msg.operationId);
     case 'openUrl':
       return isBoundedString(msg.url, 4_096);
     case 'webviewLayoutChanged':
       return isBoundedString(msg.reason, 4_096);
     case 'askClaude':
-      return isBoundedString(msg.question)
+      return isOperationId(msg.operationId)
+        && isBoundedString(msg.question)
         && (msg.context === undefined || isBoundedString(msg.context));
     case 'selectPR':
       return hasValidPrIdentity(msg);
     case 'generateReview':
-      return hasValidPrIdentity(msg)
+      return isOperationId(msg.operationId)
+        && hasValidPrIdentity(msg)
         && (msg.diff === undefined || isBoundedString(msg.diff, MAX_REVIEW_DIFF))
         && (msg.focusAreas === undefined || isBoundedString(msg.focusAreas, 10_000))
         && (msg.customInstructions === undefined || isBoundedString(msg.customInstructions, 20_000));

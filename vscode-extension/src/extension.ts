@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { randomUUID } from 'crypto';
 import * as claude from './claude';
 import * as copilot from './copilot';
 import * as settings from './settings';
@@ -39,9 +40,13 @@ function provider(): Provider {
     return value === 'copilot' ? 'copilot' : 'claude';
 }
 
-async function cancelActiveProvider(): Promise<void> {
-    // Cancellation now happens on the sidecar side (it owns the active Claude/Copilot process).
-    await sidecarClient.cancelReview().catch(() => undefined);
+async function cancelActiveProvider(operationId: string): Promise<void> {
+    // Cancellation now happens on the sidecar side (it owns the active provider process).
+    await sidecarClient.cancelReview(operationId).catch(() => undefined);
+}
+
+function newOperationId(): string {
+    return randomUUID();
 }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -342,7 +347,11 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
             state.disposed = true;
             state.generationRevision++;
             state.chatRevision++;
-            void cancelThenCleanup(cancelActiveProvider, () => clearWorktree(state));
+            const operationId = state.activeProviderOperation?.operationId;
+            void cancelThenCleanup(
+                operationId ? () => cancelActiveProvider(operationId) : () => Promise.resolve(),
+                () => clearWorktree(state),
+            );
             onDispose?.();
         });
 
@@ -399,7 +408,13 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
                     await handleGenerateReview(state, msg);
                     break;
                 case 'cancelReview':
-                    await invalidateGenerationAndCancel(state, cancelActiveProvider);
+                    if (state.activeProviderOperation?.kind === 'review'
+                        && state.activeProviderOperation.operationId === msg.operationId) {
+                        await invalidateGenerationAndCancel(
+                            state,
+                            () => cancelActiveProvider(msg.operationId as string),
+                        );
+                    }
                     break;
                 case 'saveDraft':
                     await enqueueMutation(state, () => handleSaveDraft(state, msg));
@@ -414,8 +429,13 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
                     await handleAskClaude(state, msg);
                     break;
                 case 'clearChat': {
-                    const ownsProvider = state.activeProviderOperation?.kind === 'chat';
-                    await invalidateChatAndCancel(state, cancelActiveProvider, ownsProvider);
+                    const ownsProvider = state.activeProviderOperation?.kind === 'chat'
+                        && state.activeProviderOperation.operationId === msg.operationId;
+                    await invalidateChatAndCancel(
+                        state,
+                        () => cancelActiveProvider(msg.operationId as string),
+                        ownsProvider,
+                    );
                     const key = prKey(state.activePR);
                     if (key) state.chatHistory.delete(key);
                     break;
@@ -470,7 +490,7 @@ interface ViewState {
     refreshRevision: number;
     generationRevision: number;
     chatRevision: number;
-    activeProviderOperation: { kind: 'review' | 'chat'; revision: number } | null;
+    activeProviderOperation: { kind: 'review' | 'chat'; revision: number; operationId: string } | null;
     generatedReviews: Map<string, {
         result: ReviewResult;
         editedResult: ReviewResult | null;
@@ -537,9 +557,8 @@ function clearWorktree(state: ViewState): void {
 /**
  * Resolves the working directory for a review/chat against `pr`. Asks the engine for a detached git
  * worktree pinned to the PR's head commit so the CLI reads exactly the code under review — not the
- * branch tip, which can move mid-review — then caches it for reuse. Falls back to the open
- * workspace folder when a worktree can't be created (no git root, different repo, fork fetch fails,
- * etc.).
+ * branch tip, which can move mid-review — then caches it for reuse. The operation fails closed when
+ * a worktree cannot be created, preventing an AI provider from reading an unrelated open checkout.
  *
  * The git work lives in `review-engine`'s `GitWorktreeService` behind the `worktrees` capability,
  * so this host holds only the cache and the fallback decision. Mirrors
@@ -555,7 +574,7 @@ async function resolveWorkingDir(
     const fallback = workingDir();
     const key = worktreeKey(pr);
     if (state.worktreeDir && state.worktreeKey === key) return state.worktreeDir;
-    if (!fallback) return fallback;
+    if (!fallback) throw new Error('Open the pull request repository before starting a review or chat.');
 
     if (state.worktreeCreation?.key === key) return state.worktreeCreation.promise;
     const epoch = state.worktreeEpoch;
@@ -582,7 +601,9 @@ async function createWorkingDir(
     const currentRepo = await sidecarClient.detectRepo(fallback);
     const sameRepo = currentRepo !== null
         && currentRepo.toLowerCase() === `${pr.owner}/${pr.repo}`.toLowerCase();
-    if (!gitRoot || !sameRepo) return fallback;
+    if (!gitRoot || !sameRepo) {
+        throw new Error('Open the pull request repository before starting a review or chat.');
+    }
 
     if (emitStatus) {
         push(state, { type: 'reviewGenerating', prKey: bridgePrKey, message: 'Preparing PR branch…' });
@@ -592,7 +613,7 @@ async function createWorkingDir(
         const detailResult = await sidecarClient.getPullRequestDetail(githubBaseUrl(), pr.owner, pr.repo, pr.number);
         if (detailResult.status !== 'ok' || !detailResult.detail) throw new Error(detailResult.message);
         const head = detailResult.detail.head;
-        if (!head?.ref.trim()) return fallback;
+        if (!head?.ref.trim()) throw new Error('Unable to determine the pull request branch.');
         const isFork = !!head.repoFullName && head.repoFullName !== detailResult.detail.baseRepoFullName;
 
         const created = await sidecarClient.createWorktree(
@@ -603,17 +624,13 @@ async function createWorkingDir(
             isFork ? head.cloneUrl ?? '' : '',
         );
         if (created.status !== 'created') {
-            if (created.status === 'failed') {
-                console.warn(`[pr-pilot] Worktree creation for PR #${pr.number} failed; using workspace dir:`,
-                    created.message);
-            }
-            return fallback;
+            throw new Error(created.message || 'Unable to create an isolated pull request worktree.');
         }
 
         // The PR may have changed while we awaited git; discard the worktree if so.
         if (state.disposed || state.worktreeEpoch !== epoch || !isSameActivePR(state, pr)) {
             void sidecarClient.removeWorktree(gitRoot, created.worktreeDir);
-            return fallback;
+            throw new Error('The selected pull request changed while its worktree was being prepared.');
         }
 
         state.worktreeDir = created.worktreeDir;
@@ -621,9 +638,9 @@ async function createWorkingDir(
         state.worktreeKey = key;
         return created.worktreeDir;
     } catch (err) {
-        console.warn(`[pr-pilot] Worktree creation for PR #${pr.number} failed; using workspace dir:`,
+        console.warn(`[pr-pilot] Worktree creation for PR #${pr.number} failed:`,
             err instanceof Error ? err.message : String(err));
-        return fallback;
+        throw err;
     }
 }
 
@@ -776,7 +793,12 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
 
     state.generationRevision++;
     state.chatRevision++;
-    if (!await cancelForSelection(state, selectionRevision, cancelActiveProvider)) return;
+    const operationId = state.activeProviderOperation?.operationId;
+    if (!await cancelForSelection(
+        state,
+        selectionRevision,
+        operationId ? () => cancelActiveProvider(operationId) : () => Promise.resolve(),
+    )) return;
     clearWorktree(state);
     state.activePR = { number, owner, repo, title, body };
     state.activeDiff = '';
@@ -886,6 +908,8 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
         push(state, { type: 'reviewError', prKey: key, message: 'The selected pull request changed. Try again.' });
         return;
     }
+    const operationId = msg.operationId as string;
+    const previousOperationId = state.activeProviderOperation?.operationId;
     const selectionRevision = state.selectionRevision;
     const generationRevision = ++state.generationRevision;
     const activePr = state.activePR;
@@ -896,6 +920,15 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
         && prKey(state.activePR) === key
         && state.selectionRevision === selectionRevision
         && state.generationRevision === generationRevision;
+    const providerOperation = {
+        kind: 'review' as const,
+        revision: generationRevision,
+        operationId,
+    };
+    state.activeProviderOperation = providerOperation;
+    if (previousOperationId && previousOperationId !== operationId) {
+        await cancelActiveProvider(previousOperationId);
+    }
 
     // Provider preflight: fail fast with actionable guidance instead of a raw CLI spawn error
     // when the configured review provider's binary isn't installed/resolvable.
@@ -906,6 +939,7 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
             prKey: key,
             message: providerNotInstalledMessage(isCopilot ? 'copilot' : 'claude'),
         });
+        if (state.activeProviderOperation === providerOperation) state.activeProviderOperation = null;
         return;
     }
 
@@ -950,6 +984,7 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
             true,
             key,
         );
+        if (!isCurrentGeneration()) return;
 
         // Phase 1 prompt context. Fetched in parallel and best-effort: every one of these degrades
         // to an omitted prompt section rather than failing the review, so none is awaited
@@ -979,12 +1014,11 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
 
         // Prompt construction happens sidecar-side (shared review-engine ClaudeService/CopilotService);
         // the extension only supplies raw PR/diff/context fields.
-        const providerOperation = { kind: 'review' as const, revision: generationRevision };
-        state.activeProviderOperation = providerOperation;
         let result: ReviewResult | null;
         try {
             result = await sidecarClient.generateReview(
                 {
+                operationId,
                 provider: settings.provider,
                 projectDir: reviewDir,
                 model: settings.model,
@@ -1010,7 +1044,9 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
                 diff,
                 priorReview,
                 existingReviews,
-                repoGuidelines: await sidecarClient.readRepoGuidelines(reviewDir, guidance.guidanceGlobs),
+                // Guidance in the PR worktree is authored by the change under review. Do not treat
+                // it as provider instructions until the engine can resolve it from the base commit.
+                repoGuidelines: '',
                 focusAreas,
                 customInstructions,
                 ciStatus: checkStatus.summary,
@@ -1242,6 +1278,14 @@ async function handleAskClaude(state: ViewState, msg: Record<string, unknown>): 
         && state.chatRevision === chatRevision
         && state.selectionRevision === selectionRevision
         && prKey(state.activePR) === key;
+    const operationId = msg.operationId as string;
+    const previousOperationId = state.activeProviderOperation?.operationId;
+    const providerOperation = {
+        kind: 'chat' as const,
+        revision: chatRevision,
+        operationId,
+    };
+    state.activeProviderOperation = providerOperation;
 
     // Focused chat builds its (small) prompt client-side, matching IntelliJ's
     // IntellijClaudeService.chatFocused; regular chat sends raw context/history and lets the
@@ -1250,17 +1294,20 @@ async function handleAskClaude(state: ViewState, msg: Record<string, unknown>): 
     const rawPrompt = focused ? claude.buildFocusedChatPrompt(context, question) : undefined;
 
     try {
+        if (previousOperationId && previousOperationId !== operationId) {
+            await cancelActiveProvider(previousOperationId);
+        }
         // Reuse the PR-branch worktree if one was built for the active PR (e.g. during review) so
         // chat sees the same source.
         const chatDir = activePr
             ? await resolveWorkingDir(state, activePr, false)
             : workingDir();
-        const providerOperation = { kind: 'chat' as const, revision: chatRevision };
-        state.activeProviderOperation = providerOperation;
+        if (!isCurrentChat()) return;
         let response: string;
         try {
             response = await sidecarClient.chatReview(
                 {
+                operationId,
                 provider: selectedProvider,
                 projectDir: chatDir,
                 effort,

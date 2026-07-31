@@ -30,7 +30,6 @@ import com.jinloes.prpilot.model.ReviewResult;
 import com.jinloes.prpilot.review.ClaudeService;
 import com.jinloes.prpilot.review.CopilotService;
 import com.jinloes.prpilot.review.GitWorktreeService;
-import com.jinloes.prpilot.review.RepoGuidelinesReader;
 import com.jinloes.prpilot.review.ReviewOutcomeLog;
 import com.jinloes.prpilot.services.IntellijClaudeService;
 import com.jinloes.prpilot.services.IntellijGitHubService;
@@ -190,21 +189,20 @@ public class WebviewPanel implements Disposable {
             long selectionRevision,
             IntellijClaudeService reviewService,
             IntellijClaudeService chatService,
+            ReviewProvider reviewProvider,
+            ReviewProvider chatProvider,
+            String reviewOperationId,
+            String chatOperationId,
             PrWorktree worktree) {}
 
     record WorktreeLease<T>(long epoch, String key, CompletableFuture<T> future, boolean owner) {}
 
     static final class WorktreeCoordinator<T> {
-        private final T fallback;
         private long epoch;
         private String activeKey;
         private T activeValue;
         private String inFlightKey;
         private CompletableFuture<T> inFlight;
-
-        WorktreeCoordinator(T fallback) {
-            this.fallback = fallback;
-        }
 
         synchronized WorktreeLease<T> acquire(String key) {
             if (activeValue != null && StringUtils.equals(activeKey, key)) {
@@ -234,7 +232,9 @@ public class WebviewPanel implements Disposable {
                     inFlight = null;
                 }
             }
-            lease.future().complete(accepted ? value : fallback);
+            if (accepted) {
+                lease.future().complete(value);
+            }
             return accepted;
         }
 
@@ -245,7 +245,10 @@ public class WebviewPanel implements Disposable {
                     inFlight = null;
                 }
             }
-            lease.future().complete(fallback);
+            lease.future()
+                    .completeExceptionally(
+                            new IllegalStateException(
+                                    "Unable to create an isolated pull request worktree."));
         }
 
         synchronized T activeValue() {
@@ -265,7 +268,8 @@ public class WebviewPanel implements Disposable {
                 inFlight = null;
             }
             if (detached != null) {
-                detached.complete(fallback);
+                detached.completeExceptionally(
+                        new IllegalStateException("Pull request worktree creation was cancelled."));
             }
             return previous;
         }
@@ -293,6 +297,8 @@ public class WebviewPanel implements Disposable {
      */
     private volatile IntellijClaudeService activeReviewService;
 
+    private volatile ReviewProvider activeReviewProvider = ReviewProvider.CLAUDE;
+
     private volatile List<PullRequest> cachedPRs = List.of();
     private volatile PullRequest activePR = null;
     private volatile ReviewResult lastResult = null;
@@ -300,8 +306,10 @@ public class WebviewPanel implements Disposable {
     private final Map<String, GeneratedReview> generatedReviews = new ConcurrentHashMap<>();
     private final AtomicLong generationSequence = new AtomicLong();
     private volatile long activeGenerationId;
+    private volatile String activeReviewOperationId;
     private final AtomicLong chatSequence = new AtomicLong();
     private volatile long activeChatId;
+    private volatile String activeChatOperationId;
 
     private final ReviewOutcomeLog outcomeLog = new ReviewOutcomeLog();
     private volatile String pendingReviewId = null;
@@ -313,6 +321,7 @@ public class WebviewPanel implements Disposable {
     private volatile String prefetchedExistingReviews = null;
     private volatile List<ChatMessage> chatHistory = List.of();
     private volatile IntellijClaudeService activeChatService;
+    private volatile ReviewProvider activeChatProvider = ReviewProvider.CLAUDE;
     private final WorktreeCoordinator<PrWorktree> worktrees;
 
     private volatile String prStateFilter = "open";
@@ -326,7 +335,7 @@ public class WebviewPanel implements Disposable {
         this.claudeService = new IntellijClaudeService(project.getBasePath());
         this.activeReviewService = this.claudeService;
         this.activeChatService = this.claudeService;
-        this.worktrees = new WorktreeCoordinator<>(fallbackWorktree());
+        this.worktrees = new WorktreeCoordinator<>();
         browser = JBCefBrowser.createBuilder().setOffScreenRendering(true).build();
         browserPanel = createBrowserHostPanel(browser.getComponent());
         bridgeQuery = JBCefJSQuery.create((JBCefBrowserBase) browser);
@@ -568,8 +577,9 @@ public class WebviewPanel implements Disposable {
                                 repo,
                                 node.path("diff").asText(""),
                                 node.path("focusAreas").asText(""),
-                                node.path("customInstructions").asText(""));
-                case "cancelReview" -> cancelActiveReview();
+                                node.path("customInstructions").asText(""),
+                                node.path("operationId").asText());
+                case "cancelReview" -> cancelActiveReview(node.path("operationId").asText());
                 case "saveDraft" -> {
                     long saveId = node.path("saveId").asLong();
                     ReviewResult bridgeResult = null;
@@ -636,12 +646,14 @@ public class WebviewPanel implements Disposable {
                                                 handleDeleteDraft(number, owner, repo);
                                             }
                                         });
-                case "clearChat" -> clearChat();
+                case "clearChat" -> clearChat(node.path("operationId").asText());
                 case "askClaude" -> {
                     String question = node.path("question").asText();
                     String context = node.path("context").asText("");
+                    String operationId = node.path("operationId").asText();
                     getApplication()
-                            .executeOnPooledThread(() -> handleAskClaude(question, context));
+                            .executeOnPooledThread(
+                                    () -> handleAskClaude(question, context, operationId));
                 }
                 default -> log.warn("Unknown bridge message type: {}", type);
             }
@@ -914,8 +926,16 @@ public class WebviewPanel implements Disposable {
     private LifecycleTransition transitionToSelection(PullRequest pr) {
         IntellijClaudeService reviewService = activeReviewService;
         IntellijClaudeService chatService = activeChatService;
+        ReviewProvider reviewProvider = activeReviewProvider;
+        ReviewProvider chatProvider = activeChatProvider;
+        String reviewOperationId = activeReviewOperationId;
+        String chatOperationId = activeChatOperationId;
         activeReviewService = claudeService;
         activeChatService = claudeService;
+        activeReviewProvider = ReviewProvider.CLAUDE;
+        activeChatProvider = ReviewProvider.CLAUDE;
+        activeReviewOperationId = null;
+        activeChatOperationId = null;
         activeGenerationId = generationSequence.incrementAndGet();
         activeChatId = chatSequence.incrementAndGet();
         PrWorktree worktree = worktrees.clear();
@@ -928,25 +948,40 @@ public class WebviewPanel implements Disposable {
         prefetchedValidationDiff = null;
         prefetchedExistingReviews = null;
         chatHistory = List.of();
-        return new LifecycleTransition(++selectionRevision, reviewService, chatService, worktree);
+        return new LifecycleTransition(
+                ++selectionRevision,
+                reviewService,
+                chatService,
+                reviewProvider,
+                chatProvider,
+                reviewOperationId,
+                chatOperationId,
+                worktree);
     }
 
     private void finishLifecycleTransition(LifecycleTransition transition) {
-        transition.reviewService().cancelCurrentRequest();
-        if (transition.chatService() != transition.reviewService()) {
-            transition.chatService().cancelCurrentRequest();
+        if (transition.reviewOperationId() != null) {
+            transition.reviewService().cancelCurrentRequest(transition.reviewProvider());
+        }
+        if (transition.chatOperationId() != null) {
+            transition.chatService().cancelCurrentRequest(transition.chatProvider());
         }
         removeWorktreeAsync(transition.worktree());
     }
 
-    private void cancelActiveReview() {
+    private void cancelActiveReview(String operationId) {
         IntellijClaudeService service;
+        ReviewProvider provider;
         synchronized (this) {
+            if (!StringUtils.equals(activeReviewOperationId, operationId)) return;
             activeGenerationId = generationSequence.incrementAndGet();
             service = activeReviewService;
+            provider = activeReviewProvider;
             activeReviewService = claudeService;
+            activeReviewProvider = ReviewProvider.CLAUDE;
+            activeReviewOperationId = null;
         }
-        service.cancelCurrentRequest();
+        service.cancelCurrentRequest(provider);
     }
 
     // --- generateReview ---
@@ -957,7 +992,8 @@ public class WebviewPanel implements Disposable {
             String repo,
             String overrideDiff,
             String overrideFocusAreas,
-            String overrideCustomInstructions) {
+            String overrideCustomInstructions,
+            String operationId) {
         String key = bridgePrKey(number, owner, repo);
         final PullRequest pr;
         final long reviewRevision;
@@ -979,16 +1015,20 @@ public class WebviewPanel implements Disposable {
                         List.copyOf(settings.getResolvedReviewGuidanceGlobs()));
         long generationId;
         IntellijClaudeService previousReviewService;
+        ReviewProvider previousReviewProvider;
         synchronized (this) {
             if (!isCurrentSelectionLocked(key, reviewRevision)) {
                 return;
             }
             generationId = generationSequence.incrementAndGet();
             previousReviewService = activeReviewService;
+            previousReviewProvider = activeReviewProvider;
             activeGenerationId = generationId;
             activeReviewService = claudeService;
+            activeReviewProvider = generationSettings.runtime().provider();
+            activeReviewOperationId = operationId;
         }
-        previousReviewService.cancelCurrentRequest();
+        previousReviewService.cancelCurrentRequest(previousReviewProvider);
 
         // Provider preflight: fail fast with actionable guidance instead of a raw CLI spawn error
         // when the configured review provider's binary isn't installed/resolvable.
@@ -999,6 +1039,13 @@ public class WebviewPanel implements Disposable {
                             "reviewError",
                             key,
                             UserFacingErrors.forProviderNotInstalled(provider)));
+            synchronized (this) {
+                if (isCurrentGenerationLocked(key, reviewRevision, generationId)) {
+                    activeReviewService = claudeService;
+                    activeReviewProvider = ReviewProvider.CLAUDE;
+                    activeReviewOperationId = null;
+                }
+            }
             return;
         }
 
@@ -1122,16 +1169,32 @@ public class WebviewPanel implements Disposable {
                                     generationId,
                                     new ReviewGeneratingMsg(
                                             "reviewGenerating", key, "Preparing PR branch…"));
-                            IntellijClaudeService reviewService = claudeService;
+                            IntellijClaudeService reviewService;
                             try {
                                 reviewService = resolvePrClaudeService(promptPr);
                             } catch (Exception e) {
                                 log.warn(
-                                        "Worktree resolution for PR #{} failed; falling back to"
-                                                + " project dir: {}",
+                                        "Worktree resolution for PR #{} failed:",
                                         number,
                                         e.getMessage());
-                                reviewService = claudeService;
+                                synchronized (WebviewPanel.this) {
+                                    if (isCurrentGenerationLocked(
+                                            key, reviewRevision, generationId)) {
+                                        activeReviewService = claudeService;
+                                        activeReviewProvider = ReviewProvider.CLAUDE;
+                                        activeReviewOperationId = null;
+                                    }
+                                }
+                                publishIfCurrentGeneration(
+                                        key,
+                                        reviewRevision,
+                                        generationId,
+                                        new ErrorMsg(
+                                                "reviewError",
+                                                key,
+                                                "Unable to create an isolated pull request worktree."
+                                                        + " Open the PR repository and try again."));
+                                return;
                             }
 
                             final IntellijClaudeService finalReviewService = reviewService;
@@ -1147,6 +1210,7 @@ public class WebviewPanel implements Disposable {
                                     return;
                                 }
                                 activeReviewService = finalReviewService;
+                                activeReviewProvider = generationSettings.runtime().provider();
                                 PrWorktree activeWorktree = worktrees.activeValue();
                                 guidelinesDir =
                                         activeWorktree != null
@@ -1164,9 +1228,10 @@ public class WebviewPanel implements Disposable {
                                     generationId,
                                     new ReviewGeneratingMsg(
                                             "reviewGenerating", key, "Sending review request…"));
-                            final String finalGuidelines =
-                                    readRepoGuidelines(
-                                            guidelinesDir, generationSettings.guidanceGlobs());
+                            // Guidance in the PR worktree is authored by the change under review.
+                            // Do not treat it as provider instructions until the engine can resolve
+                            // it from the trusted base commit.
+                            final String finalGuidelines = "";
                             final String finalPriorReview = formatPriorReview(priorResult);
                             final String finalFocusAreas =
                                     StringUtils.isNotBlank(overrideFocusAreas)
@@ -1215,6 +1280,14 @@ public class WebviewPanel implements Disposable {
                                                             "reviewChunk", key, kind, chunk)),
                                     result -> {
                                         if (result == null) {
+                                            synchronized (WebviewPanel.this) {
+                                                if (isCurrentGenerationLocked(
+                                                        key, reviewRevision, generationId)) {
+                                                    activeReviewOperationId = null;
+                                                    activeReviewProvider = ReviewProvider.CLAUDE;
+                                                    activeReviewService = claudeService;
+                                                }
+                                            }
                                             publishIfCurrentGeneration(
                                                     key,
                                                     reviewRevision,
@@ -1235,6 +1308,8 @@ public class WebviewPanel implements Disposable {
                                                 return;
                                             }
                                             activeReviewService = claudeService;
+                                            activeReviewOperationId = null;
+                                            activeReviewProvider = ReviewProvider.CLAUDE;
                                             lastResult = result;
                                             generatedReviews.put(
                                                     key,
@@ -1266,6 +1341,8 @@ public class WebviewPanel implements Disposable {
                                                 return;
                                             }
                                             activeReviewService = claudeService;
+                                            activeReviewOperationId = null;
+                                            activeReviewProvider = ReviewProvider.CLAUDE;
                                         }
                                         // Cancellations are user-initiated — don't surface as
                                         // errors.
@@ -1500,7 +1577,7 @@ public class WebviewPanel implements Disposable {
 
     // --- askClaude ---
 
-    private void handleAskClaude(String question, String context) {
+    private void handleAskClaude(String question, String context, String operationId) {
         if (StringUtils.isBlank(question)) {
             return;
         }
@@ -1511,6 +1588,7 @@ public class WebviewPanel implements Disposable {
         final List<ChatMessage> history;
         final IntellijClaudeService.ReviewRuntimeSettings runtimeSettings;
         final IntellijClaudeService previousChatService;
+        final ReviewProvider previousChatProvider;
         synchronized (this) {
             pr = activePR;
             selectionRevisionSnapshot = selectionRevision;
@@ -1519,16 +1597,46 @@ public class WebviewPanel implements Disposable {
             history = List.copyOf(chatHistory);
             runtimeSettings = IntellijClaudeService.snapshotReviewRuntimeSettings();
             previousChatService = activeChatService;
+            previousChatProvider = activeChatProvider;
             activeChatService = claudeService;
+            activeChatProvider = runtimeSettings.provider();
+            activeChatOperationId = operationId;
         }
         if (pr == null) {
+            synchronized (this) {
+                if (activeChatId == chatId
+                        && StringUtils.equals(activeChatOperationId, operationId)) {
+                    activeChatService = claudeService;
+                    activeChatProvider = ReviewProvider.CLAUDE;
+                    activeChatOperationId = null;
+                }
+            }
             pushMessage(new ErrorMsg("chatError", null, "No PR selected."));
             return;
         }
         String key = bridgePrKey(pr.getNumber(), pr.getOwner(), pr.getRepo());
-        previousChatService.cancelCurrentRequest();
+        previousChatService.cancelCurrentRequest(previousChatProvider);
 
-        IntellijClaudeService chatService = resolvePrClaudeService(pr);
+        IntellijClaudeService chatService;
+        try {
+            chatService = resolvePrClaudeService(pr);
+        } catch (Exception e) {
+            log.warn("Worktree resolution for PR #{} failed: {}", pr.getNumber(), e.getMessage());
+            pushMessage(
+                    new ErrorMsg(
+                            "chatError",
+                            key,
+                            "Unable to create an isolated pull request worktree."
+                                    + " Open the PR repository and try again."));
+            synchronized (this) {
+                if (isCurrentChatLocked(key, selectionRevisionSnapshot, chatId)) {
+                    activeChatService = claudeService;
+                    activeChatProvider = ReviewProvider.CLAUDE;
+                    activeChatOperationId = null;
+                }
+            }
+            return;
+        }
         synchronized (this) {
             if (!isCurrentChatLocked(key, selectionRevisionSnapshot, chatId)) {
                 return;
@@ -1556,6 +1664,8 @@ public class WebviewPanel implements Disposable {
                                 return;
                             }
                             activeChatService = claudeService;
+                            activeChatProvider = ReviewProvider.CLAUDE;
+                            activeChatOperationId = null;
                         }
                         publishIfCurrentChat(
                                 key,
@@ -1569,6 +1679,8 @@ public class WebviewPanel implements Disposable {
                                 return;
                             }
                             activeChatService = claudeService;
+                            activeChatProvider = ReviewProvider.CLAUDE;
+                            activeChatOperationId = null;
                         }
                         publishIfCurrentChat(
                                 key,
@@ -1602,6 +1714,8 @@ public class WebviewPanel implements Disposable {
                         updated.add(new ChatMessage(ChatMessage.Role.ASSISTANT, response));
                         chatHistory = List.copyOf(updated);
                         activeChatService = claudeService;
+                        activeChatProvider = ReviewProvider.CLAUDE;
+                        activeChatOperationId = null;
                     }
                     publishIfCurrentChat(
                             key,
@@ -1615,6 +1729,8 @@ public class WebviewPanel implements Disposable {
                             return;
                         }
                         activeChatService = claudeService;
+                        activeChatProvider = ReviewProvider.CLAUDE;
+                        activeChatOperationId = null;
                     }
                     publishIfCurrentChat(
                             key,
@@ -1624,15 +1740,23 @@ public class WebviewPanel implements Disposable {
                 });
     }
 
-    private void clearChat() {
+    private void clearChat(String operationId) {
         IntellijClaudeService service;
+        ReviewProvider provider;
         synchronized (this) {
+            if (!StringUtils.equals(activeChatOperationId, operationId)) {
+                chatHistory = List.of();
+                return;
+            }
             activeChatId = chatSequence.incrementAndGet();
             chatHistory = List.of();
             service = activeChatService;
+            provider = activeChatProvider;
             activeChatService = claudeService;
+            activeChatProvider = ReviewProvider.CLAUDE;
+            activeChatOperationId = null;
         }
-        service.cancelCurrentRequest();
+        service.cancelCurrentRequest(provider);
     }
 
     static String worktreeKey(int number, String owner, String repo) {
@@ -1786,16 +1910,6 @@ public class WebviewPanel implements Disposable {
                         key, bridgePrKey(pr.getNumber(), pr.getOwner(), pr.getRepo()));
     }
 
-    /**
-     * Reads repo review-guidance docs from {@code dir} (the PR-branch worktree or project base dir)
-     * using the user-configured guidance globs, so the model can weight findings against the
-     * project's own review conventions. Returns an empty string when none are found. Delegates to
-     * the shared {@link RepoGuidelinesReader}; VS Code reaches the same reader through the sidecar.
-     */
-    private static String readRepoGuidelines(java.io.File dir, List<String> guidanceGlobs) {
-        return RepoGuidelinesReader.read(dir, guidanceGlobs);
-    }
-
     /** Formats a prior generated review as compact context for a re-generation prompt. */
     private static String formatPriorReview(ReviewResult result) {
         if (result == null) {
@@ -1825,12 +1939,13 @@ public class WebviewPanel implements Disposable {
         final WorktreeLease<PrWorktree> lease;
         synchronized (this) {
             if (pr == null || !isSamePr(activePR, pr)) {
-                return claudeService;
+                throw new IllegalStateException("The selected pull request changed.");
             }
             key = worktreeKey(pr.getNumber(), pr.getOwner(), pr.getRepo());
             String projectPath = project.getBasePath();
             if (projectPath == null) {
-                return claudeService;
+                throw new IllegalStateException(
+                        "Open the pull request repository before starting a review or chat.");
             }
             java.io.File root = worktreeService.findGitRoot(new java.io.File(projectPath));
             String currentRepo = ghSvc.detectCurrentRepo(projectPath);
@@ -1838,7 +1953,8 @@ public class WebviewPanel implements Disposable {
                     currentRepo != null
                             && currentRepo.equalsIgnoreCase(pr.getOwner() + "/" + pr.getRepo());
             if (root == null || !sameRepo) {
-                return claudeService;
+                throw new IllegalStateException(
+                        "Open the pull request repository before starting a review or chat.");
             }
             detectedRoot = root;
             lease = worktrees.acquire(key);
@@ -1854,7 +1970,7 @@ public class WebviewPanel implements Disposable {
                     ghSvc.getPRHeadInfo(pr.getOwner(), pr.getRepo(), pr.getNumber());
             if (headInfo.ref().isBlank()) {
                 worktrees.fail(lease);
-                return claudeService;
+                throw new IllegalStateException("Unable to determine the pull request branch.");
             }
 
             if (headInfo.isFork()) {
@@ -1872,22 +1988,16 @@ public class WebviewPanel implements Disposable {
                 return created.service();
             }
             worktreeService.removeWorktree(detectedRoot, wt);
-            return claudeService;
+            throw new IllegalStateException("The selected pull request changed.");
         } catch (Exception e) {
             worktrees.fail(lease);
             if (wt.exists()) {
                 worktreeService.removeWorktree(detectedRoot, wt);
             }
-            log.warn(
-                    "Worktree creation for PR #{} failed; falling back to project dir: {}",
-                    pr.getNumber(),
-                    e.getMessage());
-            return claudeService;
+            log.warn("Worktree creation for PR #{} failed:", pr.getNumber(), e.getMessage());
+            throw new IllegalStateException(
+                    "Unable to create an isolated pull request worktree.", e);
         }
-    }
-
-    private PrWorktree fallbackWorktree() {
-        return new PrWorktree(claudeService, null, null);
     }
 
     private void removeWorktreeAsync(PrWorktree worktree) {

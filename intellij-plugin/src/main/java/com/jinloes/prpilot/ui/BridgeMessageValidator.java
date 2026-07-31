@@ -10,6 +10,7 @@ final class BridgeMessageValidator {
     private static final int MAX_TEXT = 100_000;
     private static final int MAX_REVIEW_DIFF = 1_100_000;
     private static final int MAX_COMMENTS = 1_000;
+    private static final int MAX_OPERATION_ID_LENGTH = 128;
     private static final Set<String> TYPES =
             Set.of(
                     "refreshPRs",
@@ -51,15 +52,18 @@ final class BridgeMessageValidator {
                                             "reviewRequested"))
                             && optionalBoolean(node.get("assignedToMe"))
                             && optionalBoolean(node.get("reviewRequested"));
-            case "cancelReview", "openSettings", "clearChat", "runAuthLogin" -> true;
+            case "cancelReview", "clearChat" -> validOperationId(node.get("operationId"));
+            case "openSettings", "runAuthLogin" -> true;
             case "openUrl" -> boundedText(node.get("url"), 4_096);
             case "webviewLayoutChanged" -> boundedText(node.get("reason"), 4_096);
             case "askClaude" ->
-                    boundedText(node.get("question"), MAX_TEXT)
+                    validOperationId(node.get("operationId"))
+                            && boundedText(node.get("question"), MAX_TEXT)
                             && optionalText(node.get("context"), MAX_TEXT);
             case "selectPR", "deleteDraft" -> hasValidPrIdentity(node);
             case "generateReview" ->
-                    hasValidPrIdentity(node)
+                    validOperationId(node.get("operationId"))
+                            && hasValidPrIdentity(node)
                             && optionalText(node.get("diff"), MAX_REVIEW_DIFF)
                             && optionalText(node.get("focusAreas"), 10_000)
                             && optionalText(node.get("customInstructions"), 20_000);
@@ -88,6 +92,12 @@ final class BridgeMessageValidator {
                 && StringUtils.isNotBlank(node.path("owner").asText())
                 && boundedText(node.get("repo"), 256)
                 && StringUtils.isNotBlank(node.path("repo").asText());
+    }
+
+    private static boolean validOperationId(JsonNode node) {
+        return boundedText(node, MAX_OPERATION_ID_LENGTH)
+                && StringUtils.isNotBlank(node.asText())
+                && node.asText().chars().noneMatch(Character::isISOControl);
     }
 
     private static boolean validReview(JsonNode node) {

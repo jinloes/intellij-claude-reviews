@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.jinloes.prpilot.engine.GitHubEngine;
 import com.jinloes.prpilot.engine.ReviewSessionService;
 import com.jinloes.prpilot.review.ReviewOutcomeLog;
@@ -13,8 +14,10 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -404,24 +407,97 @@ class StdioJsonRpcServerTest {
     }
 
     @Test
+    void reviewsChatRejectsBothPromptForms() throws IOException {
+        ObjectNode request = rpcRequest(2, "reviews/chat");
+        request.putObject("params")
+                .put("operationId", "chat-1")
+                .put("provider", "claude")
+                .put("userMessage", "question")
+                .put("rawPrompt", "prompt");
+        JsonNode response = server.handle(objectMapper.writeValueAsBytes(request));
+
+        assertThat(response.path("error").path("code").asInt()).isEqualTo(-32602);
+    }
+
+    @Test
     void reviewsCancelIsSynchronousAndAlwaysSucceeds() {
         JsonNode response =
                 server.handle(
-                        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"reviews/cancel\"}"
+                        ("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"reviews/cancel\","
+                                        + "\"params\":{\"operationId\":\"review-1\"}}")
                                 .getBytes(StandardCharsets.UTF_8));
 
-        assertThat(response.path("result").path("ok").asBoolean()).isTrue();
+        assertThat(response.path("result").path("cancelled").asBoolean()).isFalse();
+    }
+
+    @Test
+    void reviewsCancelAcknowledgesAnOperationStillQueuedInTheExecutor() throws Exception {
+        CountDownLatch workerStarted = new CountDownLatch(1);
+        CountDownLatch releaseWorker = new CountDownLatch(1);
+        reviewExecutor.submit(
+                () -> {
+                    workerStarted.countDown();
+                    try {
+                        releaseWorker.await();
+                    } catch (InterruptedException exception) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+        assertThat(workerStarted.await(1, TimeUnit.SECONDS)).isTrue();
+
+        JsonNode queued = invokeGenerateDirectly();
+        JsonNode cancelled =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"reviews/cancel\","
+                                        + "\"params\":{\"operationId\":\"review-1\"}}")
+                                .getBytes(StandardCharsets.UTF_8));
+        releaseWorker.countDown();
+
+        assertThat(queued).isNull();
+        assertThat(cancelled.path("result").path("cancelled").asBoolean()).isTrue();
+    }
+
+    @Test
+    void reviewsCancelRejectsMissingOperationId() {
+        JsonNode response =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"reviews/cancel\","
+                                        + "\"params\":{}}")
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(response.path("error").path("code").asInt()).isEqualTo(-32602);
+    }
+
+    @Test
+    void reviewsCancelRejectsBlankOrControlCharacterOperationIds() throws IOException {
+        ObjectNode blankRequest = rpcRequest(5, "reviews/cancel");
+        blankRequest.putObject("params").put("operationId", " ");
+        ObjectNode controlRequest = rpcRequest(6, "reviews/cancel");
+        controlRequest.putObject("params").put("operationId", "\n");
+        JsonNode blank = server.handle(objectMapper.writeValueAsBytes(blankRequest));
+        JsonNode control = server.handle(objectMapper.writeValueAsBytes(controlRequest));
+
+        assertThat(blank.path("error").path("code").asInt()).isEqualTo(-32602);
+        assertThat(control.path("error").path("code").asInt()).isEqualTo(-32602);
     }
 
     /** Re-runs the request with a fresh id (43) against a server whose output is captured. */
     private JsonNode invokeGenerateDirectly() {
         return server.handle(
                 ("{\"jsonrpc\":\"2.0\",\"id\":43,\"method\":\"reviews/generate\",\"params\":{"
-                                + "\"provider\":\"claude\",\"model\":\"\",\"effort\":\"\",\"inheritMcp\":false,"
+                                + "\"operationId\":\"review-1\",\"provider\":\"claude\",\"model\":\"\",\"effort\":\"\",\"inheritMcp\":false,"
                                 + "\"pr\":{\"title\":\"T\",\"htmlUrl\":\"\",\"owner\":\"o\",\"repo\":\"r\","
                                 + "\"number\":1,\"body\":\"\",\"author\":\"a\",\"createdAt\":\"2024-01-01\","
                                 + "\"isDraft\":false},\"diff\":\"\",\"ciStatus\":\"\"}}")
                         .getBytes(StandardCharsets.UTF_8));
+    }
+
+    private ObjectNode rpcRequest(int id, String method) {
+        ObjectNode request = objectMapper.createObjectNode();
+        request.put("jsonrpc", "2.0");
+        request.put("id", id);
+        request.put("method", method);
+        return request;
     }
 
     private StdioJsonRpcServer serverWithOutput(ByteArrayOutputStream output) {

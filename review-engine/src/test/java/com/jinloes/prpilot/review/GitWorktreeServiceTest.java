@@ -45,6 +45,14 @@ class GitWorktreeServiceTest {
         return output;
     }
 
+    private static String headShaUnchecked(File dir) {
+        try {
+            return headSha(dir);
+        } catch (IOException | InterruptedException exception) {
+            throw new AssertionError(exception);
+        }
+    }
+
     /** Initializes a minimal git repository with one commit on `main`. */
     private static void initBareRepo(File dir) throws IOException, InterruptedException {
         git(dir, "init", "-b", "main");
@@ -121,7 +129,7 @@ class GitWorktreeServiceTest {
 
         @Test
         void createsAWorktreeOnAnExistingBranch() throws IOException {
-            service.createWorktree(repoDir, "main", "", worktreeDir);
+            service.createWorktree(repoDir, "main", headShaUnchecked(repoDir), worktreeDir);
             assertThat(worktreeDir).exists();
             assertThat(new File(worktreeDir, "hello.txt")).exists();
         }
@@ -131,7 +139,10 @@ class GitWorktreeServiceTest {
             assertThatThrownBy(
                             () ->
                                     service.createWorktree(
-                                            repoDir, "does-not-exist", "", worktreeDir))
+                                            repoDir,
+                                            "does-not-exist",
+                                            headShaUnchecked(repoDir),
+                                            worktreeDir))
                     .isInstanceOf(IOException.class)
                     .hasMessageContaining("git fetch");
         }
@@ -155,24 +166,23 @@ class GitWorktreeServiceTest {
         }
 
         @Test
-        void fallsBackToTheBranchTipWhenTheReviewedCommitIsNotAvailable() throws Exception {
-            git(repoDir, "commit", "--allow-empty", "-m", "tip");
-            String tip = headSha(repoDir);
-
-            service.createWorktree(
-                    repoDir, "main", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", worktreeDir);
-
-            assertThat(headSha(worktreeDir)).isEqualTo(tip);
+        void failsWhenTheReviewedCommitIsNotAvailable() {
+            assertThatThrownBy(
+                            () ->
+                                    service.createWorktree(
+                                            repoDir,
+                                            "main",
+                                            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                            worktreeDir))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("unavailable");
         }
 
         @Test
-        void fallsBackToTheBranchTipWhenNoShaIsSupplied() throws Exception {
-            git(repoDir, "commit", "--allow-empty", "-m", "tip");
-            String tip = headSha(repoDir);
-
-            service.createWorktree(repoDir, "main", "  ", worktreeDir);
-
-            assertThat(headSha(worktreeDir)).isEqualTo(tip);
+        void failsWhenNoShaIsSupplied() {
+            assertThatThrownBy(() -> service.createWorktree(repoDir, "main", "  ", worktreeDir))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("missing");
         }
     }
 
@@ -195,32 +205,33 @@ class GitWorktreeServiceTest {
         @Test
         void returnsTheShaWhenTheCommitIsPresent() throws Exception {
             String sha = headSha(repoDir);
-            assertThat(service.pinnedCommitish(repoDir, sha, "origin/main")).isEqualTo(sha);
+            assertThat(service.pinnedCommitish(repoDir, sha)).isEqualTo(sha);
         }
 
         @Test
         void acceptsAnAbbreviatedSha() throws Exception {
             String abbreviated = headSha(repoDir).substring(0, 8);
-            assertThat(service.pinnedCommitish(repoDir, abbreviated, "origin/main"))
-                    .isEqualTo(abbreviated);
+            assertThat(service.pinnedCommitish(repoDir, abbreviated)).isEqualTo(abbreviated);
         }
 
         @Test
-        void fallsBackWhenTheShaIsBlank() {
-            assertThat(service.pinnedCommitish(repoDir, "", "origin/main"))
-                    .isEqualTo("origin/main");
-            assertThat(service.pinnedCommitish(repoDir, null, "FETCH_HEAD"))
-                    .isEqualTo("FETCH_HEAD");
+        void failsWhenTheShaIsBlank() {
+            assertThatThrownBy(() -> service.pinnedCommitish(repoDir, ""))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("missing");
+            assertThatThrownBy(() -> service.pinnedCommitish(repoDir, null))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("missing");
         }
 
         @Test
-        void fallsBackWhenTheCommitIsUnknownLocally() {
-            assertThat(
-                            service.pinnedCommitish(
-                                    repoDir,
-                                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                                    "origin/main"))
-                    .isEqualTo("origin/main");
+        void failsWhenTheCommitIsUnknownLocally() {
+            assertThatThrownBy(
+                            () ->
+                                    service.pinnedCommitish(
+                                            repoDir, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("unavailable");
         }
 
         /**
@@ -230,16 +241,18 @@ class GitWorktreeServiceTest {
         @Test
         void refusesRevisionsThatAreNotHexObjectNames() throws Exception {
             // A real ref that resolves, but is not an object name — must still be rejected.
-            assertThat(service.pinnedCommitish(repoDir, "main", "origin/main"))
-                    .isEqualTo("origin/main");
-            assertThat(
-                            service.pinnedCommitish(
-                                    repoDir, "--upload-pack=touch /tmp/x", "origin/main"))
-                    .isEqualTo("origin/main");
-            assertThat(service.pinnedCommitish(repoDir, "HEAD", "origin/main"))
-                    .isEqualTo("origin/main");
-            assertThat(service.pinnedCommitish(repoDir, "abc", "origin/main"))
-                    .isEqualTo("origin/main");
+            assertThatThrownBy(() -> service.pinnedCommitish(repoDir, "main"))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("invalid");
+            assertThatThrownBy(() -> service.pinnedCommitish(repoDir, "--upload-pack=touch /tmp/x"))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("invalid");
+            assertThatThrownBy(() -> service.pinnedCommitish(repoDir, "HEAD"))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("invalid");
+            assertThatThrownBy(() -> service.pinnedCommitish(repoDir, "abc"))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("invalid");
         }
     }
 
@@ -265,7 +278,7 @@ class GitWorktreeServiceTest {
 
         @Test
         void removesAWorktreeThatWasCreated() throws IOException {
-            service.createWorktree(repoDir, "main", "", worktreeDir);
+            service.createWorktree(repoDir, "main", headShaUnchecked(repoDir), worktreeDir);
             assertThat(worktreeDir).exists();
             service.removeWorktree(repoDir, worktreeDir);
             assertThat(worktreeDir).doesNotExist();

@@ -230,6 +230,15 @@ public class IntellijClaudeService {
         copilot.cancelCurrentRequest();
     }
 
+    /** Cancels only the backend selected by the operation being retired. */
+    public void cancelCurrentRequest(ReviewProvider provider) {
+        if (provider == ReviewProvider.COPILOT) {
+            copilot.cancelCurrentRequest();
+        } else {
+            claude.cancelCurrentRequest();
+        }
+    }
+
     private static void invokeLater(Runnable r) {
         ApplicationManager.getApplication().invokeLater(r);
     }

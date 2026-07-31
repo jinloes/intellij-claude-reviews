@@ -22,7 +22,7 @@ Remember the answer for phase 4. The other phases run the same either way.
 
 Kick off these four Bash calls in a single message:
 
-1. `./gradlew spotlessCheck :core:jvmTest :intellij-plugin:unitTest` — Java formatting + all JVM tests
+1. `./gradlew spotlessCheck :core:test :intellij-plugin:unitTest` — Java formatting + all JVM tests
 2. `(cd webview && npm run lint && npx tsc --noEmit)` — webview ESLint + TypeScript
 3. `(cd vscode-extension && npm run lint && npx tsc --noEmit)` — VS Code extension ESLint + TypeScript
 4. `git status --short && git diff --stat origin/main...HEAD` — what's changed since main (informs phases 3 and 4)
@@ -49,7 +49,7 @@ AGENTS.md lists pairs of files that must stay in lockstep. Spawn an Explore agen
 
 AGENTS.md requires tests for new/modified non-UI methods. Using the diff from phase 1:
 
-- For each modified `.java` / `.kt` file outside `intellij-plugin/src/main/java/com/jinloes/prpilot/ui/` and outside the webview/vscode-extension TypeScript trees, check whether a corresponding test file under `core/src/jvmTest/` or `intellij-plugin/src/test/` was modified in the same diff.
+- For each modified `.java` / `.kt` file outside `intellij-plugin/src/main/java/com/jinloes/prpilot/ui/` and outside the webview/vscode-extension TypeScript trees, check whether a corresponding test file under `core/src/test/` or `intellij-plugin/src/test/` was modified in the same diff.
 - Flag any non-UI source file changed without a matching test change.
 
 This is a heuristic — a pure refactor with no behavior change is fine. Note it in the report so the user can decide.
@@ -89,7 +89,7 @@ Output one consolidated punch list, grouped:
 
 ### Mechanical
 - [PASS|FAIL] spotlessCheck
-- [PASS|FAIL] :core:jvmTest
+- [PASS|FAIL] :core:test
 - [PASS|FAIL] :intellij-plugin:unitTest
 - [PASS|FAIL] webview lint
 - [PASS|FAIL] webview tsc

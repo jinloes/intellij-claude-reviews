@@ -145,6 +145,7 @@ public final class DraftReviewMutationService {
                                     session.token(),
                                     reviewsUrl + "/" + reviewId,
                                     writeJson(updatePayload));
+                    requireSuccess(updateResponse);
                 }
             } else {
                 requireSuccess(createResponse);

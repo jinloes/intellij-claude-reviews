@@ -137,6 +137,7 @@ interface DiffPreflight {
 
 interface ChunkSession {
   prKey: string
+  operationId: string
   startedAtMs: number
   batches: DiffBatch[]
   nextBatchIndex: number
@@ -151,6 +152,11 @@ interface ChunkSession {
   validationDiff: string
   focusAreas: string
   customInstructions: string
+}
+
+function newOperationId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
 function sortedComments(comments: LineComment[]): LineComment[] {
@@ -340,6 +346,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   const submitInFlightRef = useRef(false)
   const currentPrRef = useRef(pr)
   const chunkSessionRef = useRef<ChunkSession | null>(null)
+  const activeReviewOperationIdRef = useRef<string | null>(null)
   // Autosave bookkeeping. The draft IS the autosave target: a generated review
   // is saved to GitHub immediately, and subsequent edits are flushed on a 30s
   // debounce (and on hide / PR-switch). No separate local store.
@@ -398,6 +405,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     setQualityExpanded(false)
     setChunkedProgress(null)
     chunkSessionRef.current = null
+    activeReviewOperationIdRef.current = null
     lastSavedSnapshotRef.current = null
     generatedBaselineRef.current = null
     inFlightSaveRef.current = null
@@ -534,6 +542,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
               }
               sendToHost({
                 type: 'generateReview',
+                operationId: chunkSession.operationId,
                 number: activePr.number,
                 owner: activePr.owner,
                 repo: activePr.repo,
@@ -554,6 +563,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
             const finalized = withSortedComments(withValidatedComments(merged, chunkSession.validationDiff))
             generatedBaselineRef.current = finalized
             chunkSessionRef.current = null
+            activeReviewOperationIdRef.current = null
             setChunkedProgress({
               running: false,
               currentBatch: chunkSession.batches.length,
@@ -574,6 +584,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
           }
 
           setFocusedCommentIdx(0)
+          activeReviewOperationIdRef.current = null
           generatedBaselineRef.current = result
           setState((prev) => {
             const elapsedSec =
@@ -592,6 +603,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
         }
 
         case 'reviewError':
+          activeReviewOperationIdRef.current = null
           if (chunkSessionRef.current) {
             const session = chunkSessionRef.current
             chunkSessionRef.current = null
@@ -1038,6 +1050,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     })
     sendToHost({
       type: 'generateReview',
+      operationId: session.operationId,
       number: currentPr.number,
       owner: currentPr.owner,
       repo: currentPr.repo,
@@ -1068,6 +1081,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
       } else {
         const session: ChunkSession = {
           prKey: prKey(currentPr),
+          operationId: newOperationId(),
           startedAtMs: Date.now(),
           batches,
           nextBatchIndex: 0,
@@ -1079,16 +1093,20 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
           customInstructions,
         }
         chunkSessionRef.current = session
+        activeReviewOperationIdRef.current = session.operationId
         sendChunkBatchRequest(session, 0)
         return
       }
     }
 
     chunkSessionRef.current = null
+    const operationId = newOperationId()
+    activeReviewOperationIdRef.current = operationId
     setChunkedProgress(null)
     setState({ kind: 'generating', messages: ['Starting review…'], chunks: [], startedAtMs: Date.now() })
     sendToHost({
       type: 'generateReview',
+      operationId,
       number: currentPr.number,
       owner: currentPr.owner,
       repo: currentPr.repo,
@@ -1098,7 +1116,10 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   }
 
   function handleCancel() {
-    sendToHost({ type: 'cancelReview' })
+    const operationId = activeReviewOperationIdRef.current
+    if (!operationId) return
+    sendToHost({ type: 'cancelReview', operationId })
+    activeReviewOperationIdRef.current = null
     chunkSessionRef.current = null
     setChunkedProgress((prev) => (prev ? { ...prev, running: false, activeLabel: 'Cancelled' } : null))
     setState({ kind: 'draftLoading' })

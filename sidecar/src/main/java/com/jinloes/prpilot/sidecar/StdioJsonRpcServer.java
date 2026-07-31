@@ -22,10 +22,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicReference;
 
 final class StdioJsonRpcServer {
     private static final String JSON_RPC_VERSION = "2.0";
+    private static final int MAX_OPERATION_ID_LENGTH = 128;
 
     /** Handles one decoded request; returns {@code null} when the reply is sent asynchronously. */
     @FunctionalInterface
@@ -41,6 +46,8 @@ final class StdioJsonRpcServer {
     private final ExecutorService reviewExecutor;
     private final Map<String, MethodHandler> handlers = new LinkedHashMap<>();
     private final Object writeLock = new Object();
+    private final Object operationLock = new Object();
+    private final ConcurrentMap<String, Future<?>> scheduledOperations = new ConcurrentHashMap<>();
     private volatile OutputStream currentOutput;
 
     StdioJsonRpcServer(
@@ -159,12 +166,14 @@ final class StdioJsonRpcServer {
             return error(id, -32602, "Invalid params");
         }
         if (params == null
+                || !validOperationId(params.operationId())
                 || params.pr() == null
                 || params.provider() == null
                 || params.diff() == null) {
             return error(id, -32602, "Invalid params");
         }
-        reviewExecutor.submit(
+        if (!submitReviewOperation(
+                params.operationId(),
                 () -> {
                     try {
                         var result =
@@ -184,7 +193,9 @@ final class StdioJsonRpcServer {
                     } catch (Exception exception) {
                         send(error(id, -32000, safeMessage(exception)));
                     }
-                });
+                })) {
+            return error(id, -32602, "Duplicate operation ID");
+        }
         return null;
     }
 
@@ -199,13 +210,16 @@ final class StdioJsonRpcServer {
         } catch (Exception exception) {
             return error(id, -32602, "Invalid params");
         }
-        if (params == null || params.provider() == null) {
+        if (params == null
+                || !validOperationId(params.operationId())
+                || params.provider() == null) {
             return error(id, -32602, "Invalid params");
         }
-        if (params.rawPrompt() == null && params.userMessage() == null) {
+        if ((params.rawPrompt() == null) == (params.userMessage() == null)) {
             return error(id, -32602, "Invalid params");
         }
-        reviewExecutor.submit(
+        if (!submitReviewOperation(
+                params.operationId(),
                 () -> {
                     try {
                         var result =
@@ -222,14 +236,70 @@ final class StdioJsonRpcServer {
                     } catch (Exception exception) {
                         send(error(id, -32000, safeMessage(exception)));
                     }
-                });
+                })) {
+            return error(id, -32602, "Duplicate operation ID");
+        }
         return null;
     }
 
     /** Synchronous: cancelling only touches a flag/process reference, no CLI I/O. */
-    private ObjectNode cancelReview(JsonNode request) {
-        review.cancel();
-        return result(requestId(request), Map.of("ok", true));
+    private JsonNode cancelReview(JsonNode request) {
+        ReviewEngineApi.CancelParams params;
+        try {
+            params =
+                    objectMapper.treeToValue(
+                            request.get("params"), ReviewEngineApi.CancelParams.class);
+        } catch (Exception exception) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        if (params == null || !validOperationId(params.operationId())) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        boolean cancelled = cancelScheduledOperation(params.operationId());
+        ReviewEngineApi.CancelResult engineResult = review.cancel(params);
+        return result(
+                requestId(request),
+                new ReviewEngineApi.CancelResult(cancelled || engineResult.cancelled()));
+    }
+
+    private boolean submitReviewOperation(String operationId, Runnable operation) {
+        synchronized (operationLock) {
+            if (scheduledOperations.containsKey(operationId)) {
+                return false;
+            }
+            AtomicReference<Future<?>> futureReference = new AtomicReference<>();
+            Future<?> future =
+                    reviewExecutor.submit(
+                            () -> {
+                                synchronized (operationLock) {
+                                    // Wait for the submitting thread to publish this future before
+                                    // cancellation or completion can remove it.
+                                }
+                                try {
+                                    operation.run();
+                                } finally {
+                                    scheduledOperations.remove(operationId, futureReference.get());
+                                }
+                            });
+            futureReference.set(future);
+            scheduledOperations.put(operationId, future);
+            return true;
+        }
+    }
+
+    private boolean cancelScheduledOperation(String operationId) {
+        Future<?> future;
+        synchronized (operationLock) {
+            future = scheduledOperations.remove(operationId);
+        }
+        return future != null && future.cancel(true);
+    }
+
+    private static boolean validOperationId(String operationId) {
+        return operationId != null
+                && !operationId.isBlank()
+                && operationId.length() <= MAX_OPERATION_ID_LENGTH
+                && operationId.chars().noneMatch(Character::isISOControl);
     }
 
     private String safeMessage(Exception exception) {

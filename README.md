@@ -96,7 +96,7 @@ These are the repository's required checks from `AGENTS.md`:
 ./gradlew spotlessApply
 ./gradlew spotlessCheck
 ./gradlew check
-./gradlew :core:jvmTest :intellij-plugin:unitTest
+./gradlew :core:test :intellij-plugin:unitTest
 ```
 
 ```bash
@@ -113,7 +113,7 @@ Continuous integration runs via `.github/workflows/ci.yml` on pushes to `main`, 
 
 CI checks:
 
-- Gradle Spotless + JVM checks (`spotlessCheck`, `check`, `:core:jvmTest`, `:intellij-plugin:unitTest`)
+- Gradle Spotless + JVM checks (`spotlessCheck`, `check`, `:core:test`, `:intellij-plugin:unitTest`)
 - Webview lint/typecheck/build
 - VS Code extension lint/typecheck/unit tests/build
 - Java 17 sidecar protocol smoke test and packaged `.vsix` JAR assertion

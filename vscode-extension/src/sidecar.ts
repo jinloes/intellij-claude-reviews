@@ -255,6 +255,7 @@ export interface SidecarPrInput {
 }
 
 export interface SidecarGenerateReviewParams {
+    operationId: string;
     provider: ReviewProvider;
     projectDir?: string;
     model: string;
@@ -290,6 +291,7 @@ export interface SidecarChatMessage {
 }
 
 export interface SidecarChatParams {
+    operationId: string;
     provider: ReviewProvider;
     projectDir?: string;
     effort: string;
@@ -961,10 +963,14 @@ export class SidecarClient {
         return result;
     }
 
-    /** Cancels whichever review/chat request is currently in flight on the sidecar; a no-op if none is active. */
-    async cancelReview(): Promise<void> {
-        if (!this.child) return;
-        await this.request('reviews/cancel', {});
+    /** Cancels only the matching review/chat operation on the sidecar. */
+    async cancelReview(operationId: string): Promise<boolean> {
+        if (!this.child) return false;
+        const value = await this.request('reviews/cancel', { operationId });
+        if (!value || typeof value !== 'object' || typeof (value as { cancelled?: unknown }).cancelled !== 'boolean') {
+            throw this.invalidResponse('cancellation response');
+        }
+        return (value as { cancelled: boolean }).cancelled;
     }
 
     /**

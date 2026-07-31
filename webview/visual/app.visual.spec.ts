@@ -111,7 +111,13 @@ test('Verify with AI keeps review, chat, and footer usable in a constrained view
       __hostFixture: { outgoing: Array<Record<string, unknown>> }
     }).__hostFixture
     return fixture.outgoing.filter((message) => message.type === 'askClaude')
-  })).toEqual([{ protocolVersion: 1, type: 'askClaude', context: expectedContext, question: expectedQuestion }])
+  })).toEqual([expect.objectContaining({
+    protocolVersion: 1,
+    type: 'askClaude',
+    operationId: expect.any(String),
+    context: expectedContext,
+    question: expectedQuestion,
+  })])
 
   const chat = page.getByRole('region', { name: 'Chat' })
   const body = page.getByTestId('review-scroll-body')
@@ -196,7 +202,13 @@ test('Suggest fix with AI sends an example-fix prompt with focused diff context'
       __hostFixture: { outgoing: Array<Record<string, unknown>> }
     }).__hostFixture
     return fixture.outgoing.filter((message) => message.type === 'askClaude')
-  })).toEqual([{ protocolVersion: 1, type: 'askClaude', context: expectedContext, question: expectedQuestion }])
+  })).toEqual([expect.objectContaining({
+    protocolVersion: 1,
+    type: 'askClaude',
+    operationId: expect.any(String),
+    context: expectedContext,
+    question: expectedQuestion,
+  })])
 })
 
 test('clicking the gutter + button adds a new inline comment', async ({ page }) => {

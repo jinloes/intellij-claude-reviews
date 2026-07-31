@@ -241,6 +241,7 @@ export type PRSearchScope = 'currentRepo' | 'authored' | 'assigned' | 'reviewReq
 
 export interface GenerateReviewRequest {
   type: 'generateReview'
+  operationId: string
   number: number
   owner: string
   repo: string
@@ -254,6 +255,7 @@ export interface GenerateReviewRequest {
 
 export interface AskClaudeRequest {
   type: 'askClaude'
+  operationId: string
   context: string
   question: string
 }
@@ -293,6 +295,7 @@ export interface DeleteDraftRequest {
 
 export interface CancelReviewRequest {
   type: 'cancelReview'
+  operationId: string
 }
 
 export interface OpenUrlRequest {
@@ -310,6 +313,7 @@ export interface RunAuthLoginRequest {
 
 export interface ClearChatRequest {
   type: 'clearChat'
+  operationId: string
 }
 
 export interface WebviewLayoutChangedRequest {

@@ -1,6 +1,8 @@
 package com.jinloes.prpilot.engine;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 
 import com.jinloes.prpilot.review.ClaudeService;
 import com.jinloes.prpilot.review.ReviewOutcomeLog;
@@ -16,6 +18,86 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 class ReviewSessionServiceTest {
+
+    @Nested
+    class OperationRegistry {
+
+        private final ReviewSessionService.OperationRegistry registry =
+                new ReviewSessionService.OperationRegistry();
+
+        @Test
+        void cancelsOnlyTheOperationWithTheMatchingId() {
+            java.util.concurrent.atomic.AtomicInteger firstCancelled =
+                    new java.util.concurrent.atomic.AtomicInteger();
+            java.util.concurrent.atomic.AtomicInteger secondCancelled =
+                    new java.util.concurrent.atomic.AtomicInteger();
+            registry.start("first", firstCancelled::incrementAndGet);
+            registry.start("second", secondCancelled::incrementAndGet);
+
+            ReviewEngineApi.CancelResult result =
+                    registry.cancel(new ReviewEngineApi.CancelParams("first"));
+
+            assertThat(result.cancelled()).isTrue();
+            assertThat(firstCancelled).hasValue(1);
+            assertThat(secondCancelled).hasValue(0);
+            assertThat(registry.cancel(new ReviewEngineApi.CancelParams("second")).cancelled())
+                    .isTrue();
+            assertThat(secondCancelled).hasValue(1);
+        }
+
+        @Test
+        void ignoresUnknownOrMalformedOperationIds() {
+            java.util.concurrent.atomic.AtomicInteger cancelled =
+                    new java.util.concurrent.atomic.AtomicInteger();
+            registry.start("active", cancelled::incrementAndGet);
+
+            assertThat(registry.cancel(new ReviewEngineApi.CancelParams("unknown")).cancelled())
+                    .isFalse();
+            assertThat(registry.cancel(new ReviewEngineApi.CancelParams(" \n")).cancelled())
+                    .isFalse();
+            assertThat(cancelled).hasValue(0);
+        }
+
+        @Test
+        void rejectsDuplicateOrInvalidActiveIds() {
+            registry.start("active", () -> {});
+
+            assertThatIllegalStateException().isThrownBy(() -> registry.start("active", () -> {}));
+            assertThatIllegalArgumentException()
+                    .isThrownBy(() -> registry.start("\u0000", () -> {}));
+        }
+    }
+
+    @Nested
+    class RequestValidation {
+
+        private final ReviewSessionService service = new ReviewSessionService();
+
+        @Test
+        void rejectsInvalidGenerationParamsBeforeStartingAProvider() {
+            assertThatIllegalArgumentException()
+                    .isThrownBy(() -> service.generate(null, ignored -> {}, (kind, text) -> {}));
+        }
+
+        @Test
+        void requiresExactlyOneChatPromptFormBeforeStartingAProvider() {
+            ReviewEngineApi.ChatParams bothForms =
+                    new ReviewEngineApi.ChatParams(
+                            "chat-1",
+                            "claude",
+                            "",
+                            "",
+                            false,
+                            "",
+                            "",
+                            List.of(),
+                            "question",
+                            "prompt");
+
+            assertThatIllegalArgumentException()
+                    .isThrownBy(() -> service.chat(bothForms, ignored -> {}));
+        }
+    }
 
     @Nested
     class RecordOutcome {

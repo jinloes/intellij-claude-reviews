@@ -11,7 +11,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.regex.Pattern;
 import org.apache.commons.io.IOUtils;
-import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -60,12 +59,12 @@ public class GitWorktreeService {
      * reviewed diff was rendered at.
      *
      * <p>Runs {@code git fetch origin <branch>} first so the commit is available, then {@code git
-     * worktree add --detach <worktreeDir> <headSha>}, falling back to {@code origin/<branch>} when
-     * the SHA is unusable (see {@link #pinnedCommitish}).
+     * worktree add --detach <worktreeDir> <headSha>}. The reviewed SHA must be available locally; a
+     * moving branch tip is never substituted for it.
      *
      * @param repoDir git repository root (must contain {@code .git})
      * @param branch branch name on the origin remote (without the {@code origin/} prefix)
-     * @param headSha PR head commit the diff was rendered at; blank falls back to the branch tip
+     * @param headSha PR head commit the diff was rendered at
      * @param worktreeDir destination path for the worktree; must not exist
      * @throws IOException if a git command fails or times out
      */
@@ -73,7 +72,7 @@ public class GitWorktreeService {
             throws IOException {
         log.info("Fetching branch {} from origin in {}", branch, repoDir);
         runGit(repoDir, 60, "fetch", "origin", branch);
-        String commitish = pinnedCommitish(repoDir, headSha, "origin/" + branch);
+        String commitish = pinnedCommitish(repoDir, headSha);
         log.info("Creating worktree at {} for {}", worktreeDir, commitish);
         runGit(
                 repoDir,
@@ -89,15 +88,14 @@ public class GitWorktreeService {
      * Creates a git worktree at {@code worktreeDir} by fetching a branch from a fork's remote URL.
      * Use this for fork PRs where the branch is not available on {@code origin}.
      *
-     * <p>Runs {@code git fetch <forkCloneUrl> <branch>} then pins to {@code headSha}, falling back
-     * to {@code FETCH_HEAD}. Forks need the same pinning as origin branches: {@code FETCH_HEAD} is
-     * the fork branch's tip at fetch time, which is exactly the moving target being avoided.
+     * <p>Runs {@code git fetch <forkCloneUrl> <branch>} then pins to {@code headSha}. Forks need
+     * the same exact pinning as origin branches: {@code FETCH_HEAD} is a moving branch tip and is
+     * never substituted for the reviewed commit.
      *
      * @param repoDir git repository root
      * @param forkCloneUrl HTTPS or SSH clone URL of the fork
      * @param branch branch name on the fork
-     * @param headSha PR head commit the diff was rendered at; blank falls back to {@code
-     *     FETCH_HEAD}
+     * @param headSha PR head commit the diff was rendered at
      * @param worktreeDir destination path for the worktree; must not exist
      * @throws IOException if a git command fails or times out
      */
@@ -106,7 +104,7 @@ public class GitWorktreeService {
             throws IOException {
         log.info("Fetching branch {} from fork {} in {}", branch, forkCloneUrl, repoDir);
         runGit(repoDir, 120, "fetch", forkCloneUrl, branch);
-        String commitish = pinnedCommitish(repoDir, headSha, "FETCH_HEAD");
+        String commitish = pinnedCommitish(repoDir, headSha);
         log.info("Creating worktree at {} from {}", worktreeDir, commitish);
         runGit(
                 repoDir,
@@ -119,32 +117,28 @@ public class GitWorktreeService {
     }
 
     /**
-     * Returns {@code headSha} when the fetch made that exact commit available locally, otherwise
-     * {@code branchTipRef}.
+     * Returns {@code headSha} only when the fetch made that exact commit available locally.
      *
      * <p>The reviewed diff was rendered at {@code headSha}, but a branch tip is a *moving* target:
      * a push between rendering the diff and building the worktree would otherwise leave the agent
      * grepping code that is not under review. Normally the tip is a descendant of the reviewed
      * commit, so the fetch brings the commit along and pinning succeeds.
      *
-     * <p>Falls back rather than failing. A force-push can orphan the reviewed commit, and a
-     * slightly-stale worktree is still far better than the alternative — callers treat worktree
-     * creation failure as "use the user's own checkout", which is a much worse tree to read.
+     * <p>A missing, malformed, or force-pushed SHA fails the operation. A provider must never read
+     * a branch tip or an arbitrary open checkout while reviewing a different diff.
      */
-    String pinnedCommitish(File repoDir, String headSha, String branchTipRef) {
-        if (StringUtils.isBlank(headSha)) return branchTipRef;
+    String pinnedCommitish(File repoDir, String headSha) {
+        if (headSha == null || headSha.isBlank()) {
+            throw new IllegalStateException("Pull request head commit is missing.");
+        }
         if (!HEX_OBJECT_NAME.matcher(headSha).matches()) {
             // headSha comes from the GitHub API response; never hand git an argument that could
             // be read as an option or a different revision.
-            log.warn("Ignoring malformed head SHA '{}'; using {}", headSha, branchTipRef);
-            return branchTipRef;
+            throw new IllegalStateException("Pull request head commit is invalid.");
         }
         if (commitExists(repoDir, headSha)) return headSha;
-        log.warn(
-                "Head commit {} unavailable after fetch (force-push?); using {} instead",
-                headSha,
-                branchTipRef);
-        return branchTipRef;
+        throw new IllegalStateException(
+                "Pull request head commit is unavailable after fetch (it may have been force-pushed).");
     }
 
     private boolean commitExists(File repoDir, String sha) {

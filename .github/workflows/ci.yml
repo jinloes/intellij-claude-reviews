@@ -42,7 +42,7 @@ jobs:
         run: ./gradlew check
 
       - name: Explicit JVM test suites
-        run: ./gradlew :core:jvmTest :intellij-plugin:unitTest
+        run: ./gradlew :core:test :intellij-plugin:unitTest
 
   web-and-extension-checks:
     name: Web And Extension Checks

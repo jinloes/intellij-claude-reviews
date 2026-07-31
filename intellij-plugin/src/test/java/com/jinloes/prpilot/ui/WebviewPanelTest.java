@@ -108,7 +108,7 @@ class WebviewPanelTest {
         @Test
         void concurrentSameKeyAcquiresShareOneCreation() {
             WebviewPanel.WorktreeCoordinator<String> coordinator =
-                    new WebviewPanel.WorktreeCoordinator<>("fallback");
+                    new WebviewPanel.WorktreeCoordinator<>();
 
             WebviewPanel.WorktreeLease<String> owner = coordinator.acquire("acme/repo#7");
             WebviewPanel.WorktreeLease<String> waiter = coordinator.acquire("acme/repo#7");
@@ -122,24 +122,24 @@ class WebviewPanelTest {
         }
 
         @Test
-        void clearDuringCreationRejectsLateInstallAndCompletesWaitersWithFallback() {
+        void clearDuringCreationRejectsLateInstallAndFailsWaiters() {
             WebviewPanel.WorktreeCoordinator<String> coordinator =
-                    new WebviewPanel.WorktreeCoordinator<>("fallback");
+                    new WebviewPanel.WorktreeCoordinator<>();
             WebviewPanel.WorktreeLease<String> owner = coordinator.acquire("acme/repo#7");
             WebviewPanel.WorktreeLease<String> waiter = coordinator.acquire("acme/repo#7");
 
             assertThat(coordinator.clear()).isNull();
-            assertThat(waiter.future()).isCompletedWithValue("fallback");
+            assertThat(waiter.future()).isCompletedExceptionally();
 
             assertThat(coordinator.install(owner, "stale-worktree")).isFalse();
-            assertThat(waiter.future()).isCompletedWithValue("fallback");
+            assertThat(waiter.future()).isCompletedExceptionally();
             assertThat(coordinator.activeValue()).isNull();
         }
 
         @Test
         void clearReturnsInstalledValueAndStartsNewEpoch() {
             WebviewPanel.WorktreeCoordinator<String> coordinator =
-                    new WebviewPanel.WorktreeCoordinator<>("fallback");
+                    new WebviewPanel.WorktreeCoordinator<>();
             WebviewPanel.WorktreeLease<String> first = coordinator.acquire("acme/repo#7");
             coordinator.install(first, "worktree");
 
@@ -152,12 +152,12 @@ class WebviewPanelTest {
         @Test
         void failedCreationReleasesKeyForRetry() {
             WebviewPanel.WorktreeCoordinator<String> coordinator =
-                    new WebviewPanel.WorktreeCoordinator<>("fallback");
+                    new WebviewPanel.WorktreeCoordinator<>();
             WebviewPanel.WorktreeLease<String> failed = coordinator.acquire("acme/repo#7");
 
             coordinator.fail(failed);
 
-            assertThat(failed.future()).isCompletedWithValue("fallback");
+            assertThat(failed.future()).isCompletedExceptionally();
             assertThat(coordinator.acquire("acme/repo#7").owner()).isTrue();
         }
     }
@@ -297,7 +297,7 @@ class WebviewPanelTest {
         void acceptsKnownMessageWithValidPrIdentity() throws Exception {
             var node =
                     MAPPER.readTree(
-                            "{\"protocolVersion\":1,\"type\":\"generateReview\",\"number\":7,\"owner\":\"acme\",\"repo\":\"platform\",\"diff\":\"diff --git a/a b/a\"}");
+                            "{\"protocolVersion\":1,\"type\":\"generateReview\",\"operationId\":\"review-1\",\"number\":7,\"owner\":\"acme\",\"repo\":\"platform\",\"diff\":\"diff --git a/a b/a\"}");
 
             assertThat(WebviewPanel.isValidIncomingMessage(node)).isTrue();
         }
@@ -306,11 +306,12 @@ class WebviewPanelTest {
         void rejectsInvalidOrOversizedReviewDiff() throws Exception {
             var nonText =
                     MAPPER.readTree(
-                            "{\"protocolVersion\":1,\"type\":\"generateReview\",\"number\":7,\"owner\":\"acme\",\"repo\":\"platform\",\"diff\":42}");
+                            "{\"protocolVersion\":1,\"type\":\"generateReview\",\"operationId\":\"review-1\",\"number\":7,\"owner\":\"acme\",\"repo\":\"platform\",\"diff\":42}");
             var oversized =
                     MAPPER.createObjectNode()
                             .put("protocolVersion", 1)
                             .put("type", "generateReview")
+                            .put("operationId", "review-1")
                             .put("number", 7)
                             .put("owner", "acme")
                             .put("repo", "platform")

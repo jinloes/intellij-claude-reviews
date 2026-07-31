@@ -10,6 +10,7 @@ test('accepts valid PR-scoped request', () => {
     isValidBridgeRequest({
       ...version,
       type: 'generateReview',
+      operationId: 'review-1',
       number: 42,
       owner: 'acme',
       repo: 'platform',
@@ -20,7 +21,7 @@ test('accepts valid PR-scoped request', () => {
 });
 
 test('rejects invalid or oversized batch diffs', () => {
-  const base = { ...version, type: 'generateReview', number: 42, owner: 'acme', repo: 'platform' };
+  const base = { ...version, type: 'generateReview', operationId: 'review-1', number: 42, owner: 'acme', repo: 'platform' };
   assert.equal(isValidBridgeRequest({ ...base, diff: 42 }), false);
   assert.equal(isValidBridgeRequest({ ...base, diff: 'x'.repeat(1_100_001) }), false);
 });
@@ -101,8 +102,15 @@ test('rejects oversized identities and payloads', () => {
     ...version, type: 'selectPR', number: 42, owner: 'x'.repeat(257), repo: 'platform',
   }), false);
   assert.equal(isValidBridgeRequest({
-    ...version, type: 'askClaude', question: 'x'.repeat(100_001), context: '',
+    ...version, type: 'askClaude', operationId: 'chat-1', question: 'x'.repeat(100_001), context: '',
   }), false);
+});
+
+test('requires bounded operation IDs for cancellable requests', () => {
+  assert.equal(isValidBridgeRequest({ ...version, type: 'cancelReview' }), false);
+  assert.equal(isValidBridgeRequest({ ...version, type: 'cancelReview', operationId: '  ' }), false);
+  assert.equal(isValidBridgeRequest({ ...version, type: 'cancelReview', operationId: 'review-1' }), true);
+  assert.equal(isValidBridgeRequest({ ...version, type: 'askClaude', operationId: 'chat-1', question: 'x' }), true);
 });
 
 test('rejects invalid rich comment metadata', () => {

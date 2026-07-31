@@ -61,6 +61,7 @@ public interface ReviewEngineApi {
      * asking the model nicely.
      */
     record GenerateReviewParams(
+            String operationId,
             String provider,
             String projectDir,
             String model,
@@ -89,6 +90,7 @@ public interface ReviewEngineApi {
      * {@code userMessage} (ordinary chat, wrapped with persona and context) is expected.
      */
     record ChatParams(
+            String operationId,
             String provider,
             String projectDir,
             String effort,
@@ -101,6 +103,12 @@ public interface ReviewEngineApi {
 
     /** Result of {@link #chat}: the complete assistant response text. */
     record ChatResult(String content) {}
+
+    /** Request to cancel one specific review or chat operation. */
+    record CancelParams(String operationId) {}
+
+    /** Result of {@link #cancel}: whether the requested operation was still active. */
+    record CancelResult(boolean cancelled) {}
 
     /**
      * One comment, in either the generated or the submitted set. Carries only what classification
@@ -162,9 +170,8 @@ public interface ReviewEngineApi {
      * Result of {@link #createWorktree}.
      *
      * <p>{@code status} is {@code created}, {@code skipped} (nothing to check out — a blank
-     * branch), or {@code failed}. Failure is a normal domain result rather than an exception
-     * because every caller degrades to the user's own checkout; a worktree is an optimization, not
-     * a precondition.
+     * branch), or {@code failed}. Failure is a normal domain result rather than an exception; hosts
+     * must surface it and must not substitute their open checkout for the exact PR worktree.
      */
     record WorktreeResult(String status, String worktreeDir, String message) {}
 
@@ -191,8 +198,8 @@ public interface ReviewEngineApi {
     ChatResult chat(ChatParams params, Consumer<String> onChunk)
             throws IOException, InterruptedException;
 
-    /** Cancels whichever provider currently has an active request; a no-op if none is active. */
-    void cancel();
+    /** Cancels only the active request identified by {@code params.operationId()}. */
+    CancelResult cancel(CancelParams params);
 
     /**
      * Records what the reviewer did with each generated comment. Instrumentation only — never
@@ -223,7 +230,7 @@ public interface ReviewEngineApi {
      * code the diff was rendered from rather than a branch tip that can move mid-review.
      *
      * <p>Owns the whole policy — destination naming, the fork-versus-origin fetch decision, and the
-     * pin-with-fallback in {@code GitWorktreeService.pinnedCommitish}. Hosts keep only the
+     * exact-head pinning in {@code GitWorktreeService.pinnedCommitish}. Hosts keep only the
      * lifecycle: caching the returned directory and removing it when the active PR changes.
      */
     WorktreeResult createWorktree(CreateWorktreeParams params);
