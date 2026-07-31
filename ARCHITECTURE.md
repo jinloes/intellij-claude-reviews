@@ -140,6 +140,7 @@ webview/                               – Vite + React + TypeScript webview
     components/DiffViewer/fileNavigation.ts – Pure changed-file tree + active-file tracking helpers for diff navigation
     components/layout/AccessibleResizer.tsx – Pointer and keyboard-accessible pane separator
     components/ReviewPane/chatHeight.ts – Validates persisted chat-panel heights against its usable layout range
+    components/ReviewPane/commentNavigation.ts – Determines the next focused inline comment after deletion
     components/ReviewPane/verifyPrompt.ts – Builds focused Verify-with-AI prompts from comment metadata plus the nearest diff excerpt
     i18n/                            – Typed English catalog plus test-only pseudo-localization
     theme/hostTheme.ts               – Applies host light/dark/high-contrast state to the document

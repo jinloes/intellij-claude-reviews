@@ -80,6 +80,7 @@ import {
   MIN_CHAT_HEIGHT,
   loadChatHeight,
 } from './chatHeight'
+import { focusedIndexAfterCommentDeletion } from './commentNavigation'
 import { buildExampleFixPrompt, buildVerifyCommentPrompt, resolveVerifyTarget } from './verifyPrompt'
 
 interface Props {
@@ -1218,8 +1219,13 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     if (index < 0) return
 
     if (verify.action === 'delete') {
+      const inlineIndex = inlineComments.indexOf(result.lineComments[index])
       mutateAtOriginal(index, () => null)
-      setFocusedCommentIdx((f) => (f > 0 ? f - 1 : 0))
+      if (inlineIndex >= 0) {
+        setFocusedCommentIdx((focusedIndex) =>
+          focusedIndexAfterCommentDeletion(focusedIndex, inlineIndex, inlineComments.length),
+        )
+      }
       return
     }
     const replacement = verify.replacementComment?.trim()
@@ -1291,7 +1297,9 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
       mutateAtOriginal(inlineToOriginal(idx), (c) => ({ ...c, body }))
     },
     onDeleteComment: (idx: number) => {
-      setFocusedCommentIdx((f) => (f > 0 && f >= idx ? f - 1 : f))
+      setFocusedCommentIdx((focusedIndex) =>
+        focusedIndexAfterCommentDeletion(focusedIndex, idx, inlineComments.length),
+      )
       mutateAtOriginal(inlineToOriginal(idx), () => null)
     },
     onAddComment: (comment: LineComment) => {
@@ -1470,7 +1478,6 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
               <PaneContent
                 state={state}
                 focusedCommentIdx={focusedCommentIdx}
-                setFocusedCommentIdx={setFocusedCommentIdx}
                 onGenerate={handleGenerate}
                 onVerifyComment={hasReview ? handleVerifyComment : undefined}
                 onSuggestFixComment={hasReview ? handleSuggestFixComment : undefined}
@@ -1789,7 +1796,6 @@ function ChunkedProgressCard({ progress }: { progress: ChunkedProgress }) {
 interface ContentProps {
   state: PaneState
   focusedCommentIdx: number
-  setFocusedCommentIdx: React.Dispatch<React.SetStateAction<number>>
   onGenerate: () => void
   onVerifyComment?: (comment: LineComment) => void
   onSuggestFixComment?: (comment: LineComment) => void
@@ -1853,7 +1859,6 @@ function ReviewAndDiff({
   diff,
   generationElapsedSec,
   focusedCommentIdx,
-  setFocusedCommentIdx,
   editCommentHandlers,
   onVerifyComment,
   onSuggestFixComment,
@@ -1869,7 +1874,6 @@ function ReviewAndDiff({
   diff?: string
   generationElapsedSec?: number
   focusedCommentIdx: number
-  setFocusedCommentIdx: React.Dispatch<React.SetStateAction<number>>
   editCommentHandlers: ContentProps['editCommentHandlers']
   onVerifyComment?: (comment: LineComment) => void
   onSuggestFixComment?: (comment: LineComment) => void
@@ -1946,10 +1950,7 @@ function ReviewAndDiff({
             comments={inlineComments}
             focusedCommentIdx={focusedCommentIdx}
             onEditComment={editCommentHandlers.onEditComment}
-            onDeleteComment={(idx) => {
-              setFocusedCommentIdx((f) => (f > 0 && f >= idx ? f - 1 : f))
-              editCommentHandlers.onDeleteComment(idx)
-            }}
+            onDeleteComment={editCommentHandlers.onDeleteComment}
             onAddComment={editCommentHandlers.onAddComment}
             onVerifyComment={onVerifyComment}
             onSuggestFixComment={onSuggestFixComment}
@@ -1965,7 +1966,6 @@ function ErrorWithReview({
   result,
   diff,
   focusedCommentIdx,
-  setFocusedCommentIdx,
   editCommentHandlers,
   inlineComments,
   orphanComments,
@@ -1976,7 +1976,6 @@ function ErrorWithReview({
   result: ReviewResult | null
   diff: string
   focusedCommentIdx: number
-  setFocusedCommentIdx: React.Dispatch<React.SetStateAction<number>>
   editCommentHandlers: ContentProps['editCommentHandlers']
   inlineComments: LineComment[]
   orphanComments: LineComment[]
@@ -1990,7 +1989,6 @@ function ErrorWithReview({
           result={result}
           diff={diff || undefined}
           focusedCommentIdx={focusedCommentIdx}
-          setFocusedCommentIdx={setFocusedCommentIdx}
           editCommentHandlers={editCommentHandlers}
           inlineComments={inlineComments}
           orphanComments={orphanComments}
@@ -2010,7 +2008,6 @@ function ErrorWithReview({
 function PaneContent({
   state,
   focusedCommentIdx,
-  setFocusedCommentIdx,
   onGenerate,
   onVerifyComment,
   onSuggestFixComment,
@@ -2131,7 +2128,6 @@ function PaneContent({
           diff={state.diff}
           generationElapsedSec={state.generationElapsedSec}
           focusedCommentIdx={focusedCommentIdx}
-          setFocusedCommentIdx={setFocusedCommentIdx}
           editCommentHandlers={editCommentHandlers}
           onVerifyComment={onVerifyComment}
           onSuggestFixComment={onSuggestFixComment}
@@ -2152,7 +2148,6 @@ function PaneContent({
           diff={state.diff}
           generationElapsedSec={state.generationElapsedSec}
           focusedCommentIdx={focusedCommentIdx}
-          setFocusedCommentIdx={setFocusedCommentIdx}
           editCommentHandlers={editCommentHandlers}
           onVerifyComment={onVerifyComment}
           onSuggestFixComment={onSuggestFixComment}
@@ -2204,7 +2199,6 @@ function PaneContent({
           result={state.result}
           diff={state.diff}
           focusedCommentIdx={focusedCommentIdx}
-          setFocusedCommentIdx={setFocusedCommentIdx}
           editCommentHandlers={editCommentHandlers}
           inlineComments={inlineComments}
           orphanComments={orphanComments}
@@ -2220,7 +2214,6 @@ function PaneContent({
           result={state.result}
           diff={state.diff}
           focusedCommentIdx={focusedCommentIdx}
-          setFocusedCommentIdx={setFocusedCommentIdx}
           editCommentHandlers={editCommentHandlers}
           inlineComments={inlineComments}
           orphanComments={orphanComments}

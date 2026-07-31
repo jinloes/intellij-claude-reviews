@@ -70,6 +70,27 @@ describe('DiffViewer', () => {
     expect(scrollIntoViewSpy).toHaveBeenCalled()
   })
 
+  it('scrolls to the replacement comment when deletion keeps the focused index', async () => {
+    const firstComment = { file: 'src/auth.ts', line: 2, type: 'issue' as const, body: 'First comment.' }
+    const nextComment = { file: 'src/ui/button.tsx', line: 4, type: 'issue' as const, body: 'Next comment.' }
+    const { rerender } = render(
+      <div data-testid="review-scroll-body" style={{ overflowY: 'auto', maxHeight: '400px' }}>
+        <DiffViewer diff={diff} comments={[firstComment, nextComment]} focusedCommentIdx={0} />
+      </div>,
+    )
+
+    scrollIntoViewSpy.mockClear()
+    rerender(
+      <div data-testid="review-scroll-body" style={{ overflowY: 'auto', maxHeight: '400px' }}>
+        <DiffViewer diff={diff} comments={[nextComment]} focusedCommentIdx={0} />
+      </div>,
+    )
+
+    await waitFor(() =>
+      expect(scrollIntoViewSpy).toHaveBeenCalledWith(expect.objectContaining({ block: 'nearest' })),
+    )
+  })
+
   it('updates the current-file indicator while the diff scroll position changes', async () => {
     render(
       <div data-testid="review-scroll-body" style={{ overflowY: 'auto', maxHeight: '400px' }}>

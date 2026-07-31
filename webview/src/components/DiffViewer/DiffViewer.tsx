@@ -339,7 +339,7 @@ export function DiffViewer({
       return
     }
     target?.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest' })
-  }, [focusedCommentIdx, truncating])
+  }, [comments, focusedCommentIdx, truncating])
 
   if (files.length === 0) return null
 
