@@ -189,14 +189,108 @@ class ClaudeServiceTest {
             assertThat(result.getVerdict()).isEqualTo("APPROVE");
         }
 
+        /**
+         * Builds a one-comment review from the supplied fields. Omitting a key leaves the field
+         * absent, which is how "no rationale supplied" is expressed.
+         */
+        private String reviewWithComment(Map<String, String> fields) throws Exception {
+            ObjectNode review =
+                    JSON.createObjectNode().put("summary", "s").put("verdict", "REQUEST_CHANGES");
+            ObjectNode comment = review.putArray("lineComments").addObject();
+            comment.put("file", "a").put("line", 1);
+            fields.forEach(comment::put);
+            return JSON.writeValueAsString(review);
+        }
+
+        /**
+         * The prompt forbids a low-confidence "issue". Downgrading it to "suggestion" made that
+         * rule free to break — the violation became an accepted comment — so it is now dropped.
+         */
         @Test
-        void lowConfidenceIssueDowngradedToSuggestionInsteadOfRejected() throws Exception {
+        void lowConfidenceIssueDroppedRatherThanDowngradedToSuggestion() throws Exception {
             String json =
-                    "{\"summary\":\"s\",\"verdict\":\"REQUEST_CHANGES\",\"lineComments\":[{\"file\":\"a\",\"line\":1,\"type\":\"issue\",\"severity\":\"major\",\"category\":\"correctness\",\"confidence\":\"low\",\"rationale\":\"The line returns null.\",\"body\":\"Handle the null return value.\"}]}";
+                    reviewWithComment(
+                            Map.of(
+                                    "type", "issue",
+                                    "severity", "major",
+                                    "category", "correctness",
+                                    "confidence", "low",
+                                    "rationale", "The line returns null.",
+                                    "body", "Handle the null return value."));
+
             ReviewResult result = ClaudeService.parseReview(json);
-            assertThat(result.getLineComments()).hasSize(1);
-            assertThat(result.getLineComments().get(0).getType()).isEqualTo("suggestion");
+
+            assertThat(result.getLineComments()).isEmpty();
+            // The only comment backing REQUEST_CHANGES is gone, so the verdict degrades with it.
             assertThat(result.getVerdict()).isEqualTo("COMMENT");
+        }
+
+        /**
+         * A bare low-confidence "note" was the cheapest comment the model could emit: the parser
+         * exempted notes from the rationale requirement and the webview quality check exempts
+         * low-confidence comments from its own, so nothing removed it.
+         */
+        @Test
+        void lowConfidenceNoteWithoutRationaleDropped() throws Exception {
+            String json =
+                    reviewWithComment(
+                            Map.of(
+                                    "type", "note",
+                                    "severity", "minor",
+                                    "category", "correctness",
+                                    "confidence", "low",
+                                    "body", "This might be a problem."));
+
+            assertThat(ClaudeService.parseReview(json).getLineComments()).isEmpty();
+        }
+
+        @Test
+        void lowConfidenceNoteWithRationaleKept() throws Exception {
+            String json =
+                    reviewWithComment(
+                            Map.of(
+                                    "type", "note",
+                                    "severity", "minor",
+                                    "category", "correctness",
+                                    "confidence", "low",
+                                    "rationale", "Line 1 reassigns the parameter.",
+                                    "body", "Confirm the reassignment is intended."));
+
+            assertThat(ClaudeService.parseReview(json).getLineComments())
+                    .singleElement()
+                    .extracting(LineComment::getType)
+                    .isEqualTo("note");
+        }
+
+        /** The rationale requirement is tightened only for low confidence, not for every note. */
+        @Test
+        void mediumConfidenceNoteWithoutRationaleStillKept() throws Exception {
+            String json =
+                    reviewWithComment(
+                            Map.of(
+                                    "type", "note",
+                                    "severity", "minor",
+                                    "category", "correctness",
+                                    "confidence", "medium",
+                                    "body", "Worth a second look before merge."));
+
+            assertThat(ClaudeService.parseReview(json).getLineComments()).hasSize(1);
+        }
+
+        /** Only "issue" is gated on confidence; a justified low-confidence suggestion survives. */
+        @Test
+        void lowConfidenceSuggestionWithRationaleKept() throws Exception {
+            String json =
+                    reviewWithComment(
+                            Map.of(
+                                    "type", "suggestion",
+                                    "severity", "minor",
+                                    "category", "maintainability",
+                                    "confidence", "low",
+                                    "rationale", "The literal 900 appears twice.",
+                                    "body", "Extract the TTL into a named constant."));
+
+            assertThat(ClaudeService.parseReview(json).getLineComments()).hasSize(1);
         }
 
         @Test
@@ -373,6 +467,29 @@ class ClaudeServiceTest {
         void instructsConfidenceGatedEvidenceBackedFindings() {
             String prompt = ClaudeService.buildPrompt(fakeRequest());
             assertThat(prompt).contains("Never report a low-confidence").contains("confidence");
+        }
+
+        /**
+         * The prompt used to offer "omit it or use a note with confidence: low" — presenting a
+         * downgrade as a peer of omission. Given that choice a model produces the comment, because
+         * emitting something compliant beats emitting nothing. Omission must be the only option.
+         */
+        @Test
+        void doesNotOfferLowConfidenceAsAnAlternativeToOmittingAnUnconfirmedFinding() {
+            String prompt = ClaudeService.buildPrompt(fakeRequest());
+            assertThat(prompt)
+                    .doesNotContain("omit it or use a")
+                    .doesNotContain("drop to \"confidence\": \"low\"")
+                    .contains("Lowering \"confidence\" is not a substitute for confirming a")
+                    .contains("Returning few comments, or none, is a correct outcome");
+        }
+
+        /** Tells the model the true cost of a low-confidence issue: the parser discards it. */
+        @Test
+        void statesThatALowConfidenceIssueIsDiscardedNotDowngraded() {
+            assertThat(ClaudeService.buildPrompt(fakeRequest()))
+                    .contains("discarded, not downgraded")
+                    .contains("Every low-confidence comment must still state its \"rationale\"");
         }
 
         @Test
@@ -920,6 +1037,42 @@ class ClaudeServiceTest {
                                     + " or custom instruction is supported");
         }
 
+        /**
+         * The old rule said to drop "a low-confidence issue", which could never fire: the critique
+         * input is {@code draftReviewJson} over an already-parsed draft, and the parser has by then
+         * dropped every low-confidence "issue". Keying the rule on confidence is what makes it
+         * reach the low-confidence "suggestion" and "note" comments that actually survive.
+         */
+        @Test
+        void buildCritiquePromptGatesOnConfidenceRatherThanTheUnreachableLowConfidenceIssue() {
+            String prompt = ClaudeService.buildCritiquePrompt(req(), draft());
+            assertThat(prompt)
+                    .doesNotContain("that is a low-confidence \"issue\"")
+                    .contains("\"confidence\": \"low\" must be resolved, never passed through")
+                    .contains("or drop it");
+        }
+
+        /** The shape the critique rule must be able to act on survives the first-pass parser. */
+        @Test
+        void lowConfidenceNonIssueCommentsReachTheCritiqueDraft() throws Exception {
+            ObjectNode review =
+                    JSON.createObjectNode().put("summary", "s").put("verdict", "COMMENT");
+            review.putArray("lineComments")
+                    .addObject()
+                    .put("file", "a")
+                    .put("line", 1)
+                    .put("type", "note")
+                    .put("severity", "minor")
+                    .put("category", "correctness")
+                    .put("confidence", "low")
+                    .put("rationale", "Line 1 reassigns the parameter.")
+                    .put("body", "Confirm the reassignment is intended.");
+
+            ReviewResult parsed = ClaudeService.parseReview(JSON.writeValueAsString(review));
+
+            assertThat(ClaudeService.draftReviewJson(parsed)).contains("\"confidence\":\"low\"");
+        }
+
         @Test
         void buildCritiquePromptEscapesAClosingTagInjectedThroughContext() {
             PullRequest p = new PullRequest("t", "", "org", "repo", 7, "", "alice", "2024-01-01");
@@ -1225,6 +1378,18 @@ class ClaudeServiceTest {
                     .contains("A contract change with unupdated callers is a confirmed \"issue\"")
                     .contains("already updates every caller is usually not worth reporting")
                     .contains("If the search is inconclusive");
+        }
+
+        /**
+         * An inconclusive search must produce no comment. Telling the model to report it at
+         * "confidence": "low" instead turned every failed lookup into a finding, which is the
+         * opposite of what this directive was added to do.
+         */
+        @Test
+        void inconclusiveSearchProducesNoFindingRatherThanALowConfidenceOne() {
+            assertThat(ClaudeService.buildPrompt(fakeRequest()))
+                    .contains("If the search is inconclusive, do not report the finding")
+                    .doesNotContain("say so rather than assuming either way");
         }
 
         @Test
