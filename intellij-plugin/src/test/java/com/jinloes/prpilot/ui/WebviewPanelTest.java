@@ -6,9 +6,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.jinloes.prpilot.model.PullRequest;
 import com.jinloes.prpilot.model.ReviewProvider;
+import com.jinloes.prpilot.services.IntellijClaudeService;
 import com.jinloes.prpilot.sidecar.pr.PrDetail;
 import java.awt.BorderLayout;
 import java.awt.Rectangle;
+import java.io.File;
 import javax.swing.JPanel;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -159,6 +161,20 @@ class WebviewPanelTest {
 
             assertThat(failed.future()).isCompletedExceptionally();
             assertThat(coordinator.acquire("acme/repo#7").owner()).isTrue();
+        }
+    }
+
+    @Nested
+    class OperationServiceOwnership {
+
+        @Test
+        void createsDistinctProviderOwnersForTheSameWorktree() {
+            File worktree = new File("/tmp/pr-pilot-test-worktree");
+
+            IntellijClaudeService first = WebviewPanel.serviceForWorktree(worktree);
+            IntellijClaudeService second = WebviewPanel.serviceForWorktree(worktree);
+
+            assertThat(second).isNotSameAs(first);
         }
     }
 

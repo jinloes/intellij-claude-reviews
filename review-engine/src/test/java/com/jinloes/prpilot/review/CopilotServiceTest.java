@@ -15,6 +15,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -67,6 +68,7 @@ class CopilotServiceTest {
         private final AtomicReference<Integer> forceStopCount = new AtomicReference<>(0);
         private volatile CopilotService.SessionRequest lastSessionRequest;
         private volatile FakeRuntimeSession lastSession;
+        volatile Runnable startAction = () -> {};
 
         FakeRuntimeClient(
                 java.util.function.Function<CopilotService.SessionRequest, FakeRuntimeSession>
@@ -81,6 +83,7 @@ class CopilotServiceTest {
         @Override
         public void start() {
             started = true;
+            startAction.run();
         }
 
         @Override
@@ -612,6 +615,26 @@ class CopilotServiceTest {
     class CancelCurrentRequest {
 
         @Test
+        void cancellationBeforeClientPublicationPreventsRuntimeStartup() {
+            CancellationToken token = new CancellationToken();
+            token.cancel();
+            AtomicInteger created = new AtomicInteger();
+            CopilotService service =
+                    new CopilotService(
+                            null,
+                            factoryFor(
+                                    () -> {
+                                        created.incrementAndGet();
+                                        return new FakeRuntimeSession();
+                                    }),
+                            token);
+
+            assertThatThrownBy(() -> service.chatWithPrompt("prompt", "medium", ignored -> {}))
+                    .isInstanceOf(InterruptedException.class);
+            assertThat(created).hasValue(0);
+        }
+
+        @Test
         void noActiveRunDoesNotThrow() {
             new CopilotService().cancelCurrentRequest();
         }
@@ -665,6 +688,53 @@ class CopilotServiceTest {
             assertThat(failure.get())
                     .isInstanceOf(InterruptedException.class)
                     .hasMessage("copilot request cancelled");
+        }
+
+        @Test
+        void cancellationDuringRuntimeStartupCancelsThePublishedRun() throws Exception {
+            CountDownLatch startupEntered = new CountDownLatch(1);
+            CountDownLatch releaseStartup = new CountDownLatch(1);
+            FakeRuntimeFactory factory =
+                    new FakeRuntimeFactory(
+                            () -> {
+                                FakeRuntimeClient client = new FakeRuntimeClient();
+                                client.startAction =
+                                        () -> {
+                                            startupEntered.countDown();
+                                            try {
+                                                releaseStartup.await(5, TimeUnit.SECONDS);
+                                            } catch (InterruptedException exception) {
+                                                Thread.currentThread().interrupt();
+                                            }
+                                        };
+                                return client;
+                            });
+            CopilotService service = new CopilotService(null, factory);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            Thread worker =
+                    new Thread(
+                            () -> {
+                                try {
+                                    service.chatWithPrompt("prompt", "medium", ignored -> {});
+                                } catch (Throwable throwable) {
+                                    failure.set(throwable);
+                                }
+                            });
+
+            worker.start();
+            try {
+                assertThat(startupEntered.await(5, TimeUnit.SECONDS)).isTrue();
+                service.cancelCurrentRequest();
+            } finally {
+                releaseStartup.countDown();
+            }
+            worker.join(5_000);
+
+            assertThat(worker.isAlive()).isFalse();
+            assertThat(factory.lastClient.forceStopCount.get()).isEqualTo(1);
+            assertThat(failure.get())
+                    .isInstanceOf(InterruptedException.class)
+                    .hasMessage("Review request cancelled.");
         }
     }
 

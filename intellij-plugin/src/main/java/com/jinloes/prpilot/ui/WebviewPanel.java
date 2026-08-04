@@ -182,8 +182,7 @@ public class WebviewPanel implements Disposable {
     record GeneratedReview(
             long generationId, ReviewResult result, ReviewOutcomeLog.Metadata metadata) {}
 
-    private record PrWorktree(
-            IntellijClaudeService service, java.io.File directory, java.io.File gitRoot) {}
+    private record PrWorktree(java.io.File directory, java.io.File gitRoot) {}
 
     private record LifecycleTransition(
             long selectionRevision,
@@ -1214,8 +1213,6 @@ public class WebviewPanel implements Disposable {
                                 PrWorktree activeWorktree = worktrees.activeValue();
                                 guidelinesDir =
                                         activeWorktree != null
-                                                        && activeWorktree.service()
-                                                                == finalReviewService
                                                 ? activeWorktree.directory()
                                                 : (project.getBasePath() != null
                                                         ? new java.io.File(project.getBasePath())
@@ -1961,7 +1958,7 @@ public class WebviewPanel implements Disposable {
         }
 
         if (!lease.owner()) {
-            return lease.future().join().service();
+            return serviceForWorktree(lease.future().join().directory());
         }
 
         java.io.File wt = worktreeService.newWorktreePath(pr.getNumber());
@@ -1980,12 +1977,10 @@ public class WebviewPanel implements Disposable {
                 worktreeService.createWorktree(detectedRoot, headInfo.ref(), headInfo.sha(), wt);
             }
 
-            PrWorktree created =
-                    new PrWorktree(
-                            new IntellijClaudeService(wt.getAbsolutePath()), wt, detectedRoot);
+            PrWorktree created = new PrWorktree(wt, detectedRoot);
             if (worktrees.install(lease, created)) {
                 log.info("Using worktree {} for PR #{}", wt, pr.getNumber());
-                return created.service();
+                return serviceForWorktree(created.directory());
             }
             worktreeService.removeWorktree(detectedRoot, wt);
             throw new IllegalStateException("The selected pull request changed.");
@@ -1998,6 +1993,10 @@ public class WebviewPanel implements Disposable {
             throw new IllegalStateException(
                     "Unable to create an isolated pull request worktree.", e);
         }
+    }
+
+    static IntellijClaudeService serviceForWorktree(java.io.File directory) {
+        return new IntellijClaudeService(directory.getAbsolutePath());
     }
 
     private void removeWorktreeAsync(PrWorktree worktree) {

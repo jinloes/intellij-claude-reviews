@@ -96,6 +96,20 @@ class ClaudeServiceTest {
     }
 
     @Nested
+    class Cancellation {
+
+        @Test
+        void cancellationBeforeProcessPublicationPreventsCliStartup() {
+            CancellationToken token = new CancellationToken();
+            token.cancel();
+            ClaudeService service = new ClaudeService(null, token);
+
+            assertThatThrownBy(() -> service.chatWithPrompt("question", ignored -> {}))
+                    .isInstanceOf(InterruptedException.class);
+        }
+    }
+
+    @Nested
     class ProcessTimeouts {
 
         @Test

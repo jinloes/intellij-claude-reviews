@@ -26,7 +26,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 final class StdioJsonRpcServer {
     private static final String JSON_RPC_VERSION = "2.0";
@@ -47,7 +47,8 @@ final class StdioJsonRpcServer {
     private final Map<String, MethodHandler> handlers = new LinkedHashMap<>();
     private final Object writeLock = new Object();
     private final Object operationLock = new Object();
-    private final ConcurrentMap<String, Future<?>> scheduledOperations = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, ScheduledOperation> scheduledOperations =
+            new ConcurrentHashMap<>();
     private volatile OutputStream currentOutput;
 
     StdioJsonRpcServer(
@@ -174,24 +175,29 @@ final class StdioJsonRpcServer {
         }
         if (!submitReviewOperation(
                 params.operationId(),
-                () -> {
+                id,
+                "Review interrupted.",
+                operation -> {
                     try {
                         var result =
                                 review.generate(
                                         params,
                                         status ->
-                                                sendNotification(
+                                                operation.sendNotification(
                                                         "reviews/status", statusParams(id, status)),
                                         (kind, text) ->
-                                                sendNotification(
+                                                operation.sendNotification(
                                                         "reviews/chunk",
                                                         chunkParams(id, kind, text)));
-                        send(result(id, result));
+                        operation.complete(result(id, result));
                     } catch (InterruptedException interrupted) {
                         Thread.currentThread().interrupt();
-                        send(error(id, -32000, "Review interrupted."));
+                        operation.completeCancellation();
                     } catch (Exception exception) {
-                        send(error(id, -32000, safeMessage(exception)));
+                        operation.complete(
+                                operation.isCancelled()
+                                        ? error(id, -32000, "Review interrupted.")
+                                        : error(id, -32000, safeMessage(exception)));
                     }
                 })) {
             return error(id, -32602, "Duplicate operation ID");
@@ -220,21 +226,26 @@ final class StdioJsonRpcServer {
         }
         if (!submitReviewOperation(
                 params.operationId(),
-                () -> {
+                id,
+                "Chat interrupted.",
+                operation -> {
                     try {
                         var result =
                                 review.chat(
                                         params,
                                         text ->
-                                                sendNotification(
+                                                operation.sendNotification(
                                                         "reviews/chatChunk",
                                                         chatChunkParams(id, text)));
-                        send(result(id, result));
+                        operation.complete(result(id, result));
                     } catch (InterruptedException interrupted) {
                         Thread.currentThread().interrupt();
-                        send(error(id, -32000, "Chat interrupted."));
+                        operation.completeCancellation();
                     } catch (Exception exception) {
-                        send(error(id, -32000, safeMessage(exception)));
+                        operation.complete(
+                                operation.isCancelled()
+                                        ? error(id, -32000, "Chat interrupted.")
+                                        : error(id, -32000, safeMessage(exception)));
                     }
                 })) {
             return error(id, -32602, "Duplicate operation ID");
@@ -262,37 +273,104 @@ final class StdioJsonRpcServer {
                 new ReviewEngineApi.CancelResult(cancelled || engineResult.cancelled()));
     }
 
-    private boolean submitReviewOperation(String operationId, Runnable operation) {
+    private boolean submitReviewOperation(
+            String operationId,
+            JsonNode requestId,
+            String cancellationMessage,
+            java.util.function.Consumer<ScheduledOperation> operation) {
         synchronized (operationLock) {
             if (scheduledOperations.containsKey(operationId)) {
                 return false;
             }
-            AtomicReference<Future<?>> futureReference = new AtomicReference<>();
+            ScheduledOperation scheduled =
+                    new ScheduledOperation(requestId, cancellationMessage, operation);
             Future<?> future =
                     reviewExecutor.submit(
                             () -> {
                                 synchronized (operationLock) {
                                     // Wait for the submitting thread to publish this future before
                                     // cancellation or completion can remove it.
+                                    if (scheduled.cancelled) {
+                                        scheduled.completeCancellation();
+                                        return;
+                                    }
+                                    scheduled.started = true;
+                                }
+                                if (scheduled.isCancelled()) {
+                                    scheduled.completeCancellation();
+                                    scheduledOperations.remove(operationId, scheduled);
+                                    return;
                                 }
                                 try {
-                                    operation.run();
+                                    scheduled.operation.accept(scheduled);
                                 } finally {
-                                    scheduledOperations.remove(operationId, futureReference.get());
+                                    scheduledOperations.remove(operationId, scheduled);
                                 }
                             });
-            futureReference.set(future);
-            scheduledOperations.put(operationId, future);
+            scheduled.future = future;
+            scheduledOperations.put(operationId, scheduled);
             return true;
         }
     }
 
     private boolean cancelScheduledOperation(String operationId) {
-        Future<?> future;
+        ScheduledOperation operation;
+        boolean queued;
         synchronized (operationLock) {
-            future = scheduledOperations.remove(operationId);
+            operation = scheduledOperations.get(operationId);
+            if (operation == null) return false;
+            if (operation.completed.get()) {
+                scheduledOperations.remove(operationId, operation);
+                return false;
+            }
+            queued = !operation.started;
+            operation.cancelled = true;
+            if (queued) scheduledOperations.remove(operationId, operation);
         }
-        return future != null && future.cancel(true);
+        operation.future.cancel(true);
+        if (queued) operation.completeCancellation();
+        return true;
+    }
+
+    private final class ScheduledOperation {
+        private final JsonNode requestId;
+        private final String cancellationMessage;
+        private final java.util.function.Consumer<ScheduledOperation> operation;
+        private final AtomicBoolean completed = new AtomicBoolean();
+        private volatile Future<?> future;
+        private volatile boolean started;
+        private volatile boolean cancelled;
+
+        private ScheduledOperation(
+                JsonNode requestId,
+                String cancellationMessage,
+                java.util.function.Consumer<ScheduledOperation> operation) {
+            this.requestId = requestId;
+            this.cancellationMessage = cancellationMessage;
+            this.operation = operation;
+        }
+
+        private boolean isCancelled() {
+            return cancelled;
+        }
+
+        private void sendNotification(String method, ObjectNode params) {
+            if (!isCancelled()) StdioJsonRpcServer.this.sendNotification(method, params);
+        }
+
+        private void complete(JsonNode response) {
+            JsonNode terminalResponse;
+            synchronized (operationLock) {
+                if (!completed.compareAndSet(false, true)) return;
+                terminalResponse =
+                        isCancelled() ? error(requestId, -32000, cancellationMessage) : response;
+            }
+            send(terminalResponse);
+        }
+
+        private void completeCancellation() {
+            complete(error(requestId, -32000, cancellationMessage));
+        }
     }
 
     private static boolean validOperationId(String operationId) {

@@ -194,6 +194,45 @@ public final class DraftReviewCodec {
                 .toList();
     }
 
+    List<LineComment> acceptedComments(
+            List<LineComment> lineComments,
+            List<LineComment> orphans,
+            ArrayNode postedComments,
+            List<JsonNode> droppedComments) {
+        Set<String> orphanKeys = new HashSet<>();
+        for (LineComment orphan : orphans) orphanKeys.add(orphanKey(orphan));
+        Set<String> droppedKeys = new HashSet<>();
+        for (JsonNode dropped : droppedComments) {
+            droppedKeys.add(
+                    payloadKey(
+                            dropped.path("path").asText(""),
+                            dropped.path("line").asInt(0),
+                            dropped.path("body").asText("")));
+        }
+        Set<String> acceptedKeys = new LinkedHashSet<>();
+        for (JsonNode posted : postedComments) {
+            String key =
+                    payloadKey(
+                            posted.path("path").asText(""),
+                            posted.path("line").asInt(0),
+                            posted.path("body").asText(""));
+            if (!droppedKeys.contains(key)) acceptedKeys.add(key);
+        }
+
+        Set<String> emitted = new LinkedHashSet<>();
+        List<LineComment> accepted = new ArrayList<>();
+        for (LineComment comment : lineComments) {
+            String key = payloadKey(comment.file(), comment.line(), comment.body());
+            if (orphanKeys.contains(orphanKey(comment))
+                    || !acceptedKeys.contains(key)
+                    || !emitted.add(key)) {
+                continue;
+            }
+            accepted.add(comment);
+        }
+        return accepted;
+    }
+
     private static boolean validEncodedComment(EncodedComment comment) {
         return comment != null
                 && comment.l() >= 0

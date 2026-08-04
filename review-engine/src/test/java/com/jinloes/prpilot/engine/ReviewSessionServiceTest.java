@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 
+import com.jinloes.prpilot.review.CancellationToken;
 import com.jinloes.prpilot.review.ClaudeService;
 import com.jinloes.prpilot.review.ReviewOutcomeLog;
 import java.io.IOException;
@@ -65,6 +66,16 @@ class ReviewSessionServiceTest {
             assertThatIllegalStateException().isThrownBy(() -> registry.start("active", () -> {}));
             assertThatIllegalArgumentException()
                     .isThrownBy(() -> registry.start("\u0000", () -> {}));
+        }
+
+        @Test
+        void cancellationMarksTheOperationBeforeCallingItsProvider() {
+            CancellationToken token = new CancellationToken();
+            registry.start("active", token, () -> assertThat(token.isCancelled()).isTrue());
+
+            assertThat(registry.cancel(new ReviewEngineApi.CancelParams("active")).cancelled())
+                    .isTrue();
+            assertThat(token.isCancelled()).isTrue();
         }
     }
 

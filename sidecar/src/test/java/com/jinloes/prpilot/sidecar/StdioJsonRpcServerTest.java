@@ -434,6 +434,8 @@ class StdioJsonRpcServerTest {
     void reviewsCancelAcknowledgesAnOperationStillQueuedInTheExecutor() throws Exception {
         CountDownLatch workerStarted = new CountDownLatch(1);
         CountDownLatch releaseWorker = new CountDownLatch(1);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        server.run(new ByteArrayInputStream(new byte[0]), output);
         reviewExecutor.submit(
                 () -> {
                     workerStarted.countDown();
@@ -455,6 +457,12 @@ class StdioJsonRpcServerTest {
 
         assertThat(queued).isNull();
         assertThat(cancelled.path("result").path("cancelled").asBoolean()).isTrue();
+        ByteArrayInputStream frames = new ByteArrayInputStream(output.toByteArray());
+        JsonNode originalResponse = objectMapper.readTree(frameCodec.readFrame(frames));
+        assertThat(originalResponse.path("id").asInt()).isEqualTo(43);
+        assertThat(originalResponse.path("error").path("message").asText())
+                .isEqualTo("Review interrupted.");
+        assertThat(frameCodec.readFrame(frames)).isNull();
     }
 
     @Test

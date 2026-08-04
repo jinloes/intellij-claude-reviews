@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -292,19 +293,25 @@ public class ClaudeService {
             Set.of("APPROVE", "REQUEST_CHANGES", "COMMENT");
 
     private final File workingDir;
+    private final CancellationToken cancellationToken;
 
     /** The process currently executing a review or chat request; null when idle. */
     private final AtomicReference<Process> activeProcess = new AtomicReference<>();
 
     public ClaudeService() {
-        this(null);
+        this(null, new CancellationToken());
     }
 
     public ClaudeService(String projectDir) {
+        this(projectDir, new CancellationToken());
+    }
+
+    public ClaudeService(String projectDir, CancellationToken cancellationToken) {
         this.workingDir =
                 StringUtils.isNotBlank(projectDir)
                         ? new File(projectDir)
                         : new File(System.getProperty("user.home", "/"));
+        this.cancellationToken = Objects.requireNonNull(cancellationToken);
     }
 
     /** Holds the subtype and session ID from an error result event in the stream output. */
@@ -371,6 +378,7 @@ public class ClaudeService {
             Consumer<String> onStatus,
             BiConsumer<String, String> onChunk)
             throws IOException, InterruptedException {
+        cancellationToken.throwIfCancelled();
         Process process = null;
         File stdoutFile = createOutputFile("claude-review-");
         try {
@@ -382,6 +390,10 @@ public class ClaudeService {
             }
             process = buildProcess(stdoutFile, DEFAULT_MAX_TURNS, args.toArray(new String[0]));
             activeProcess.set(process);
+            if (cancellationToken.isCancelled()) {
+                cancelCurrentRequest();
+                cancellationToken.throwIfCancelled();
+            }
 
             // Write stdin and drain stderr concurrently so a large prompt does not fill the OS
             // stdin pipe buffer and stall until claude finishes startup.
@@ -396,6 +408,7 @@ public class ClaudeService {
                 throw new IOException(
                         "Review timed out — claude did not finish within 30 minutes.");
             }
+            cancellationToken.throwIfCancelled();
             awaitIo(stdinFuture, "write the review prompt");
             int exitCode = process.exitValue();
             String stderr = awaitIo(stderrFuture, "read review stderr");
@@ -421,7 +434,7 @@ public class ClaudeService {
                     stdoutFile.length());
             return parseStdoutFileToResult(stdoutFile, stderr, onStatus, onChunk);
         } finally {
-            activeProcess.set(null);
+            activeProcess.compareAndSet(process, null);
             if (process != null) {
                 process.destroy();
             }
@@ -435,6 +448,7 @@ public class ClaudeService {
             Consumer<String> onStatus,
             BiConsumer<String, String> onChunk)
             throws IOException, InterruptedException {
+        cancellationToken.throwIfCancelled();
         Process process = null;
         File stdoutFile = createOutputFile("claude-resume-");
         try {
@@ -452,6 +466,10 @@ public class ClaudeService {
             }
             process = buildProcess(stdoutFile, RESUME_MAX_TURNS, args.toArray(new String[0]));
             activeProcess.set(process);
+            if (cancellationToken.isCancelled()) {
+                cancelCurrentRequest();
+                cancellationToken.throwIfCancelled();
+            }
 
             Process finalProcess = process;
             CompletableFuture<String> stderrFuture = drainStderr(process);
@@ -464,6 +482,7 @@ public class ClaudeService {
                 throw new IOException(
                         "Resume timed out — claude did not finish within 10 minutes.");
             }
+            cancellationToken.throwIfCancelled();
             awaitIo(stdinFuture, "write the resume prompt");
             int exitCode = process.exitValue();
             String stderr = awaitIo(stderrFuture, "read resume stderr");
@@ -481,7 +500,7 @@ public class ClaudeService {
 
             return parseStdoutFileToResult(stdoutFile, stderr, onStatus, onChunk);
         } finally {
-            activeProcess.set(null);
+            activeProcess.compareAndSet(process, null);
             if (process != null) {
                 process.destroy();
             }
@@ -705,10 +724,15 @@ public class ClaudeService {
 
     private String runChat(String prompt, Consumer<String> onChunk)
             throws IOException, InterruptedException {
+        cancellationToken.throwIfCancelled();
         Process process = null;
         try {
             process = buildProcess();
             activeProcess.set(process);
+            if (cancellationToken.isCancelled()) {
+                cancelCurrentRequest();
+                cancellationToken.throwIfCancelled();
+            }
             Process finalProcess = process;
             CompletableFuture<Void> stdinFuture =
                     CompletableFuture.runAsync(() -> writeStdin(finalProcess, prompt));
@@ -721,6 +745,7 @@ public class ClaudeService {
                 terminateProcess(process, stdinFuture, stdoutFuture, stderrFuture);
                 throw new IOException("Chat timed out — claude did not finish within 10 minutes.");
             }
+            cancellationToken.throwIfCancelled();
             awaitIo(stdinFuture, "write the chat prompt");
             int exitCode = process.exitValue();
             String response = awaitIo(stdoutFuture, "read chat stdout");
@@ -733,7 +758,7 @@ public class ClaudeService {
             }
             return response;
         } finally {
-            activeProcess.set(null);
+            activeProcess.compareAndSet(process, null);
             if (process != null) {
                 process.destroy();
             }
@@ -745,6 +770,7 @@ public class ClaudeService {
      * receive an IOException.
      */
     public void cancelCurrentRequest() {
+        cancellationToken.cancel();
         Process process = activeProcess.getAndSet(null);
         if (process != null) {
             process.destroyForcibly();

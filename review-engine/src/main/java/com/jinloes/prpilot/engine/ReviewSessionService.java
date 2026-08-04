@@ -6,6 +6,7 @@ import com.jinloes.prpilot.model.LineComment;
 import com.jinloes.prpilot.model.PRReviewRequest;
 import com.jinloes.prpilot.model.PullRequest;
 import com.jinloes.prpilot.model.ReviewResult;
+import com.jinloes.prpilot.review.CancellationToken;
 import com.jinloes.prpilot.review.ClaudeService;
 import com.jinloes.prpilot.review.CopilotService;
 import com.jinloes.prpilot.review.GitWorktreeService;
@@ -85,9 +86,11 @@ public class ReviewSessionService implements ReviewEngineApi {
                         .ciAnnotations(toCiAnnotations(params.ciAnnotations()))
                         .build();
         if (copilot) {
-            CopilotService service = new CopilotService(params.projectDir());
+            CancellationToken cancellationToken = new CancellationToken();
+            CopilotService service = new CopilotService(params.projectDir(), cancellationToken);
             ActiveOperation operation =
-                    startOperation(params.operationId(), service::cancelCurrentRequest);
+                    startOperation(
+                            params.operationId(), cancellationToken, service::cancelCurrentRequest);
             try {
                 return service.reviewPR(
                         request,
@@ -102,9 +105,11 @@ public class ReviewSessionService implements ReviewEngineApi {
                 activeOperations.finish(operation);
             }
         }
-        ClaudeService service = new ClaudeService(params.projectDir());
+        CancellationToken cancellationToken = new CancellationToken();
+        ClaudeService service = new ClaudeService(params.projectDir(), cancellationToken);
         ActiveOperation operation =
-                startOperation(params.operationId(), service::cancelCurrentRequest);
+                startOperation(
+                        params.operationId(), cancellationToken, service::cancelCurrentRequest);
         try {
             return service.reviewPR(
                     request, params.model(), params.selfCritique(), onStatus, onChunk);
@@ -132,9 +137,11 @@ public class ReviewSessionService implements ReviewEngineApi {
                                                         m.content()))
                                 .toList();
         if ("copilot".equals(params.provider())) {
-            CopilotService service = new CopilotService(params.projectDir());
+            CancellationToken cancellationToken = new CancellationToken();
+            CopilotService service = new CopilotService(params.projectDir(), cancellationToken);
             ActiveOperation operation =
-                    startOperation(params.operationId(), service::cancelCurrentRequest);
+                    startOperation(
+                            params.operationId(), cancellationToken, service::cancelCurrentRequest);
             try {
                 String content =
                         focused
@@ -157,9 +164,11 @@ public class ReviewSessionService implements ReviewEngineApi {
                 activeOperations.finish(operation);
             }
         }
-        ClaudeService service = new ClaudeService(params.projectDir());
+        CancellationToken cancellationToken = new CancellationToken();
+        ClaudeService service = new ClaudeService(params.projectDir(), cancellationToken);
         ActiveOperation operation =
-                startOperation(params.operationId(), service::cancelCurrentRequest);
+                startOperation(
+                        params.operationId(), cancellationToken, service::cancelCurrentRequest);
         try {
             String content =
                     focused
@@ -177,13 +186,16 @@ public class ReviewSessionService implements ReviewEngineApi {
         return activeOperations.cancel(params);
     }
 
-    private ActiveOperation startOperation(String operationId, Runnable cancel)
+    private ActiveOperation startOperation(
+            String operationId, CancellationToken cancellationToken, Runnable cancel)
             throws InterruptedException {
-        ActiveOperation operation = activeOperations.start(operationId, cancel);
+        ActiveOperation operation = activeOperations.start(operationId, cancellationToken, cancel);
         try {
+            cancellationToken.throwIfCancelled();
             throwIfInterrupted();
             return operation;
         } catch (InterruptedException exception) {
+            cancellationToken.cancel();
             activeOperations.finish(operation);
             throw exception;
         }
@@ -202,17 +214,23 @@ public class ReviewSessionService implements ReviewEngineApi {
                 && operationId.chars().noneMatch(Character::isISOControl);
     }
 
-    private record ActiveOperation(String operationId, Runnable cancel) {}
+    record ActiveOperation(
+            String operationId, CancellationToken cancellationToken, Runnable cancel) {}
 
     static final class OperationRegistry {
         private final ConcurrentMap<String, ActiveOperation> operations = new ConcurrentHashMap<>();
 
         ActiveOperation start(String operationId, Runnable cancel) {
+            return start(operationId, new CancellationToken(), cancel);
+        }
+
+        ActiveOperation start(
+                String operationId, CancellationToken cancellationToken, Runnable cancel) {
             if (!validOperationId(operationId)) {
                 throw new IllegalArgumentException(
                         "Operation ID is required and must be at most 128 characters.");
             }
-            ActiveOperation operation = new ActiveOperation(operationId, cancel);
+            ActiveOperation operation = new ActiveOperation(operationId, cancellationToken, cancel);
             if (operations.putIfAbsent(operationId, operation) != null) {
                 throw new IllegalStateException("An operation with this ID is already active.");
             }
@@ -225,6 +243,7 @@ public class ReviewSessionService implements ReviewEngineApi {
             }
             ActiveOperation operation = operations.remove(params.operationId());
             if (operation == null) return new CancelResult(false);
+            operation.cancellationToken().cancel();
             operation.cancel().run();
             return new CancelResult(true);
         }

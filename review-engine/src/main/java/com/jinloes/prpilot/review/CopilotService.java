@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
@@ -64,20 +65,31 @@ public class CopilotService {
     private final File workingDir;
     private RuntimeFactory runtimeFactory = new SdkRuntimeFactory();
     private final AtomicReference<ActiveRun> activeRun = new AtomicReference<>();
+    private final CancellationToken cancellationToken;
 
     public CopilotService() {
-        this((String) null);
+        this(null, new CancellationToken());
     }
 
     public CopilotService(String projectDir) {
+        this(projectDir, new CancellationToken());
+    }
+
+    public CopilotService(String projectDir, CancellationToken cancellationToken) {
         this.workingDir =
                 StringUtils.isNotBlank(projectDir)
                         ? new File(projectDir)
                         : new File(System.getProperty("user.home", "/"));
+        this.cancellationToken = Objects.requireNonNull(cancellationToken);
     }
 
     CopilotService(String projectDir, RuntimeFactory runtimeFactory) {
-        this(projectDir);
+        this(projectDir, runtimeFactory, new CancellationToken());
+    }
+
+    CopilotService(
+            String projectDir, RuntimeFactory runtimeFactory, CancellationToken cancellationToken) {
+        this(projectDir, cancellationToken);
         this.runtimeFactory = runtimeFactory;
     }
 
@@ -245,17 +257,25 @@ public class CopilotService {
             Consumer<String> onStatus,
             BiConsumer<String, String> onChunk)
             throws IOException, InterruptedException {
+        cancellationToken.throwIfCancelled();
         ActiveRun currentRun = null;
         List<Closeable> subscriptions = new ArrayList<>();
         try {
             RuntimeClient client = runtimeFactory.createClient(buildClientRequest());
             currentRun = new ActiveRun(client);
+            cancellationToken.throwIfCancelled();
             this.activeRun.set(currentRun);
+            if (cancellationToken.isCancelled()) {
+                cancelCurrentRequest();
+                cancellationToken.throwIfCancelled();
+            }
 
             client.start();
+            cancellationToken.throwIfCancelled();
             RuntimeSession session =
                     client.createSession(buildSessionRequest(model, effort, inheritMcp, configDir));
             currentRun.attachSession(session);
+            cancellationToken.throwIfCancelled();
 
             StringBuilder deltaBuffer = new StringBuilder();
             AtomicReference<String> finalMessage = new AtomicReference<>();
@@ -292,6 +312,7 @@ public class CopilotService {
                             }));
 
             String responseMessage = session.sendAndWait(prompt, REQUEST_TIMEOUT_MS);
+            cancellationToken.throwIfCancelled();
 
             String raw =
                     StringUtils.defaultIfBlank(
@@ -317,6 +338,7 @@ public class CopilotService {
     }
 
     public void cancelCurrentRequest() {
+        cancellationToken.cancel();
         ActiveRun run = activeRun.getAndSet(null);
         if (run != null) run.cancel();
     }
@@ -553,6 +575,13 @@ public class CopilotService {
 
         void attachSession(RuntimeSession session) {
             sessionRef.set(session);
+            if (cancelled.get()) {
+                try {
+                    session.abort();
+                } catch (Exception e) {
+                    // Best effort only.
+                }
+            }
         }
 
         void cancel() {

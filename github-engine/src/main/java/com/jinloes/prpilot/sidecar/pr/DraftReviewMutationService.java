@@ -54,7 +54,10 @@ public final class DraftReviewMutationService {
     }
 
     public DraftReviewMutationResult save(SaveParams params) {
-        if (!valid(params.owner()) || !valid(params.repo()) || params.number() <= 0) {
+        if (params == null
+                || !valid(params.owner())
+                || !valid(params.repo())
+                || params.number() <= 0) {
             return DraftReviewMutationResult.failure(
                     "invalid_request", "Pull request identity is invalid.");
         }
@@ -66,6 +69,8 @@ public final class DraftReviewMutationService {
         if (session.failure() != null) return session.failure();
 
         String basePath = pullPath(params.owner(), params.repo(), params.number());
+        String reviewsUrl = basePath + "/reviews";
+        String provisionalReviewId = null;
         try {
             String existingId = findPendingReviewId(session, basePath);
             if (existingId != null) {
@@ -96,7 +101,6 @@ public final class DraftReviewMutationService {
             // Omitting "event" creates a PENDING (draft) review; event:"PENDING" is invalid (422).
             payload.set("comments", comments);
 
-            String reviewsUrl = basePath + "/reviews";
             RestResponse createResponse =
                     client.post(session.apiBase(), session.token(), reviewsUrl, writeJson(payload));
             boolean commentsDropped = false;
@@ -106,6 +110,11 @@ public final class DraftReviewMutationService {
                 // review body-only first (guaranteed to succeed), then add each comment
                 // individually so only the bad ones are dropped.
                 ObjectNode bodyOnlyPayload = payload.deepCopy();
+                String bodyOnly = codec.encodeBody(params.summary(), params.verdict(), List.of());
+                if (!orphans.isEmpty()) {
+                    bodyOnly += "\n\n" + codec.buildOrphanSection(orphans);
+                }
+                bodyOnlyPayload.put("body", bodyOnly);
                 bodyOnlyPayload.set("comments", mapper.createArrayNode());
                 RestResponse bodyOnlyResponse =
                         client.post(
@@ -116,6 +125,10 @@ public final class DraftReviewMutationService {
                 requireSuccess(bodyOnlyResponse);
                 created = readJson(bodyOnlyResponse.body());
                 String reviewId = created.path("id").asText("");
+                if (reviewId.isBlank()) {
+                    throw new MutationException("api_failed", "GitHub API request failed.");
+                }
+                provisionalReviewId = reviewId;
                 String commentsUrl = reviewsUrl + "/" + reviewId + "/comments";
                 List<JsonNode> dropped = new ArrayList<>();
                 for (JsonNode comment : comments) {
@@ -125,28 +138,32 @@ public final class DraftReviewMutationService {
                                     session.token(),
                                     commentsUrl,
                                     comment.toString());
-                    if (!isSuccess(commentResponse)) dropped.add(comment);
+                    if (commentResponse.statusCode() == 422) {
+                        dropped.add(comment);
+                    } else {
+                        requireSuccess(commentResponse);
+                    }
+                }
+                commentsDropped = !dropped.isEmpty();
+                List<DraftReviewCodec.LineComment> acceptedComments =
+                        codec.acceptedComments(lineComments, orphans, comments, dropped);
+                String updatedBody =
+                        codec.encodeBody(params.summary(), params.verdict(), acceptedComments);
+                if (!orphans.isEmpty()) {
+                    updatedBody += "\n\n" + codec.buildOrphanSection(orphans);
                 }
                 if (!dropped.isEmpty()) {
-                    commentsDropped = true;
-                    List<DraftReviewCodec.LineComment> acceptedComments =
-                            codec.withoutDroppedComments(lineComments, dropped);
-                    String updatedBody =
-                            codec.encodeBody(params.summary(), params.verdict(), acceptedComments);
-                    if (!orphans.isEmpty()) {
-                        updatedBody += "\n\n" + codec.buildOrphanSection(orphans);
-                    }
                     updatedBody += "\n\n" + codec.buildDroppedSection(dropped);
-                    ObjectNode updatePayload = mapper.createObjectNode();
-                    updatePayload.put("body", updatedBody);
-                    RestResponse updateResponse =
-                            client.put(
-                                    session.apiBase(),
-                                    session.token(),
-                                    reviewsUrl + "/" + reviewId,
-                                    writeJson(updatePayload));
-                    requireSuccess(updateResponse);
                 }
+                ObjectNode updatePayload = mapper.createObjectNode();
+                updatePayload.put("body", updatedBody);
+                RestResponse updateResponse =
+                        client.put(
+                                session.apiBase(),
+                                session.token(),
+                                reviewsUrl + "/" + reviewId,
+                                writeJson(updatePayload));
+                requireSuccess(updateResponse);
             } else {
                 requireSuccess(createResponse);
                 created = readJson(createResponse.body());
@@ -158,7 +175,11 @@ public final class DraftReviewMutationService {
             }
             return DraftReviewMutationResult.saved(reviewId, commentsDropped);
         } catch (MutationException exception) {
+            deleteProvisionalReview(session, reviewsUrl, provisionalReviewId);
             return DraftReviewMutationResult.failure(exception.status(), exception.getMessage());
+        } catch (RuntimeException exception) {
+            deleteProvisionalReview(session, reviewsUrl, provisionalReviewId);
+            return DraftReviewMutationResult.failure("api_failed", "GitHub API request failed.");
         }
     }
 
@@ -286,6 +307,15 @@ public final class DraftReviewMutationService {
                 + URLEncoder.encode(repo, StandardCharsets.UTF_8)
                 + "/pulls/"
                 + number;
+    }
+
+    private void deleteProvisionalReview(Session session, String reviewsUrl, String reviewId) {
+        if (reviewId == null) return;
+        try {
+            client.delete(session.apiBase(), session.token(), reviewsUrl + "/" + reviewId);
+        } catch (RuntimeException ignored) {
+            // Best effort: the original API failure remains the user-visible result.
+        }
     }
 
     private void requireSuccess(RestResponse response) {
