@@ -65,24 +65,56 @@ public final class PendingReviewIndex {
         }
     }
 
-    private synchronized List<Entry> loadEntries() {
-        if (!Files.exists(indexFile)) return new ArrayList<>();
-        try {
-            String json = Files.readString(indexFile, StandardCharsets.UTF_8);
-            Entry[] entries = MAPPER.readValue(json, Entry[].class);
-            return new ArrayList<>(List.of(entries));
-        } catch (Exception e) {
-            return new ArrayList<>();
+    public record LoadResult(List<Entry> entries, String error) {
+        public LoadResult {
+            entries = List.copyOf(entries);
+        }
+
+        public boolean healthy() {
+            return error == null;
         }
     }
 
-    public synchronized List<Entry> list() {
+    public enum MutationResult {
+        UPDATED,
+        BLOCKED_CORRUPT,
+        FAILED
+    }
+
+    public enum DraftState {
+        PRESENT,
+        ABSENT,
+        UNAVAILABLE
+    }
+
+    private synchronized LoadResult loadEntries() {
+        if (!Files.exists(indexFile)) return new LoadResult(List.of(), null);
+        try {
+            String json = Files.readString(indexFile, StandardCharsets.UTF_8);
+            Entry[] entries = MAPPER.readValue(json, Entry[].class);
+            return new LoadResult(List.of(entries), null);
+        } catch (Exception e) {
+            log.warn(
+                    "Pending review index at {} is corrupt or unreadable; preserving it and blocking mutations until it is repaired or removed.",
+                    indexFile,
+                    e);
+            return new LoadResult(List.of(), "Pending review index is corrupt or unreadable.");
+        }
+    }
+
+    public synchronized LoadResult listResult() {
         return loadEntries();
     }
 
-    public synchronized void add(
+    public synchronized List<Entry> list() {
+        return loadEntries().entries();
+    }
+
+    public synchronized MutationResult add(
             String owner, String repo, int number, String title, String headSha) {
-        List<Entry> entries = loadEntries();
+        LoadResult loaded = loadEntries();
+        if (!loaded.healthy()) return MutationResult.BLOCKED_CORRUPT;
+        List<Entry> entries = new ArrayList<>(loaded.entries());
         entries.removeIf(
                 e -> e.owner().equals(owner) && e.repo().equals(repo) && e.number() == number);
         entries.add(
@@ -94,26 +126,36 @@ public final class PendingReviewIndex {
                         title,
                         LocalDateTime.now().format(SAVED_AT_FMT),
                         headSha == null ? "" : headSha));
-        save(entries);
+        return save(entries) ? MutationResult.UPDATED : MutationResult.FAILED;
     }
 
     public synchronized boolean hasDraft(String owner, String repo, int number) {
-        return loadEntries().stream()
-                .anyMatch(
-                        e ->
-                                e.owner().equals(owner)
-                                        && e.repo().equals(repo)
-                                        && e.number() == number);
+        return draftState(owner, repo, number) == DraftState.PRESENT;
     }
 
-    public synchronized void remove(String owner, String repo, int number) {
-        List<Entry> entries = loadEntries();
+    public synchronized DraftState draftState(String owner, String repo, int number) {
+        LoadResult loaded = loadEntries();
+        if (!loaded.healthy()) return DraftState.UNAVAILABLE;
+        boolean present =
+                loaded.entries().stream()
+                        .anyMatch(
+                                e ->
+                                        e.owner().equals(owner)
+                                                && e.repo().equals(repo)
+                                                && e.number() == number);
+        return present ? DraftState.PRESENT : DraftState.ABSENT;
+    }
+
+    public synchronized MutationResult remove(String owner, String repo, int number) {
+        LoadResult loaded = loadEntries();
+        if (!loaded.healthy()) return MutationResult.BLOCKED_CORRUPT;
+        List<Entry> entries = new ArrayList<>(loaded.entries());
         entries.removeIf(
                 e -> e.owner().equals(owner) && e.repo().equals(repo) && e.number() == number);
-        save(entries);
+        return save(entries) ? MutationResult.UPDATED : MutationResult.FAILED;
     }
 
-    private void save(List<Entry> entries) {
+    private boolean save(List<Entry> entries) {
         try {
             Files.createDirectories(indexFile.getParent());
             Path tmp = indexFile.resolveSibling(indexFile.getFileName().toString() + ".tmp");
@@ -123,8 +165,10 @@ public final class PendingReviewIndex {
                     indexFile,
                     StandardCopyOption.ATOMIC_MOVE,
                     StandardCopyOption.REPLACE_EXISTING);
+            return true;
         } catch (IOException e) {
             log.warn("Failed to save pending review index", e);
+            return false;
         }
     }
 }

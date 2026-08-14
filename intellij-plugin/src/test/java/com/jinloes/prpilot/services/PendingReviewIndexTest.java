@@ -2,6 +2,9 @@ package com.jinloes.prpilot.services;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -30,7 +33,8 @@ class PendingReviewIndexTest {
         @Test
         void createsEntryWithCorrectFields() {
             PendingReviewIndex idx = index();
-            idx.add("owner", "repo", 1, "My PR", "");
+            assertThat(idx.add("owner", "repo", 1, "My PR", ""))
+                    .isEqualTo(PendingReviewIndex.MutationResult.UPDATED);
 
             var entries = idx.list();
             assertThat(entries).hasSize(1);
@@ -163,6 +167,43 @@ class PendingReviewIndexTest {
             PendingReviewIndex second = new PendingReviewIndex(file);
             assertThat(second.list()).hasSize(1);
             assertThat(second.list().get(0).number()).isEqualTo(7);
+        }
+    }
+
+    @Nested
+    class Corruption {
+
+        @Test
+        void malformedJsonIsPreservedAndBlocksMutations() throws IOException {
+            Path file = tempDir.resolve("pending-prs.json");
+            String malformed = "{not-json";
+            Files.writeString(file, malformed, StandardCharsets.UTF_8);
+            PendingReviewIndex idx = new PendingReviewIndex(file);
+
+            PendingReviewIndex.LoadResult loadResult = idx.listResult();
+
+            assertThat(loadResult.healthy()).isFalse();
+            assertThat(loadResult.entries()).isEmpty();
+            assertThat(idx.draftState("owner", "repo", 1))
+                    .isEqualTo(PendingReviewIndex.DraftState.UNAVAILABLE);
+            assertThat(idx.add("owner", "repo", 1, "Title", "sha"))
+                    .isEqualTo(PendingReviewIndex.MutationResult.BLOCKED_CORRUPT);
+            assertThat(idx.remove("owner", "repo", 1))
+                    .isEqualTo(PendingReviewIndex.MutationResult.BLOCKED_CORRUPT);
+            assertThat(Files.readString(file, StandardCharsets.UTF_8)).isEqualTo(malformed);
+        }
+
+        @Test
+        void truncatedJsonIsNotOverwrittenByTheNextMutation() throws IOException {
+            Path file = tempDir.resolve("pending-prs.json");
+            String truncated = "[{\"owner\":\"acme\"";
+            Files.writeString(file, truncated, StandardCharsets.UTF_8);
+            PendingReviewIndex idx = new PendingReviewIndex(file);
+
+            assertThat(idx.add("owner", "repo", 2, "Title", "sha"))
+                    .isEqualTo(PendingReviewIndex.MutationResult.BLOCKED_CORRUPT);
+
+            assertThat(Files.readString(file, StandardCharsets.UTF_8)).isEqualTo(truncated);
         }
     }
 

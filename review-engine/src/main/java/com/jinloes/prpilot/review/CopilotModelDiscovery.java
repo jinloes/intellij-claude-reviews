@@ -5,7 +5,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -61,6 +64,12 @@ public final class CopilotModelDiscovery {
     }
 
     private static List<String> probe() {
+        return probe(ProcessBuilder::start, 10);
+    }
+
+    static List<String> probe(ProcessStarter processStarter, long timeoutSeconds) {
+        Process process = null;
+        CompletableFuture<String> outputFuture = null;
         try {
             ProcessBuilder pb =
                     new ProcessBuilder(CopilotService.findCopilotBinary(), "help", "config");
@@ -68,14 +77,32 @@ public final class CopilotModelDiscovery {
             String existingPath = pb.environment().getOrDefault("PATH", "");
             pb.environment().put("PATH", "/opt/homebrew/bin:/usr/local/bin:" + existingPath);
             pb.redirectErrorStream(true);
-            Process process = pb.start();
-            String output = IOUtils.toString(process.getInputStream(), StandardCharsets.UTF_8);
-            boolean finished = process.waitFor(10, TimeUnit.SECONDS);
+            process = processStarter.start(pb);
+            Process runningProcess = process;
+            long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+            outputFuture =
+                    CompletableFuture.supplyAsync(
+                            () -> {
+                                try {
+                                    return IOUtils.toString(
+                                            runningProcess.getInputStream(),
+                                            StandardCharsets.UTF_8);
+                                } catch (IOException exception) {
+                                    throw new java.io.UncheckedIOException(exception);
+                                }
+                            });
+            boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
             if (!finished) {
                 process.destroyForcibly();
-                log.warn("copilot help config timed out after 10s — skipping model discovery.");
+                closeOutput(process);
+                outputFuture.cancel(true);
+                log.warn(
+                        "copilot help config timed out after {}s — skipping model discovery.",
+                        timeoutSeconds);
                 return List.of();
             }
+            long remainingNanos = Math.max(1, deadlineNanos - System.nanoTime());
+            String output = outputFuture.get(remainingNanos, TimeUnit.NANOSECONDS);
             if (process.exitValue() != 0) {
                 String[] lines = output.split("\n", 4);
                 StringBuilder preview = new StringBuilder();
@@ -104,11 +131,43 @@ public final class CopilotModelDiscovery {
         } catch (IOException e) {
             log.warn("Failed to probe copilot models: {}", e.getMessage());
             return List.of();
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            String message =
+                    cause instanceof java.io.UncheckedIOException unchecked
+                            ? unchecked.getCause().getMessage()
+                            : cause.getMessage();
+            log.warn("Failed to read copilot model output: {}", message);
+            return List.of();
+        } catch (TimeoutException e) {
+            log.warn("Timed out reading copilot model output");
+            return List.of();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            if (process != null) process.destroyForcibly();
+            if (process != null) closeOutput(process);
+            if (outputFuture != null) outputFuture.cancel(true);
             log.warn("Interrupted while probing copilot models");
             return List.of();
+        } finally {
+            if (process != null && process.isAlive()) process.destroyForcibly();
+            if (process != null) closeOutput(process);
+            if (outputFuture != null && !outputFuture.isDone()) outputFuture.cancel(true);
         }
+    }
+
+    private static void closeOutput(Process process) {
+        try {
+            process.getInputStream().close();
+        } catch (IOException ignored) {
+            // Best effort: closing the process stream only prevents a timed-out reader from
+            // leaking.
+        }
+    }
+
+    @FunctionalInterface
+    interface ProcessStarter {
+        Process start(ProcessBuilder processBuilder) throws IOException;
     }
 
     /**

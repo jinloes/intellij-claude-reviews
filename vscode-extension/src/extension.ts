@@ -20,7 +20,7 @@ import {
 } from './notifications';
 import { BRIDGE_PROTOCOL_VERSION, isValidBridgeRequest } from './bridgeValidation';
 import { classifySetupAuthError } from './authError';
-import { toUserFacingError, providerNotInstalledMessage } from './userFacingError';
+import { GitHubOperationError, toUserFacingError, providerNotInstalledMessage } from './userFacingError';
 import { resolveWebviewDistPath } from './webviewAssets';
 import { buildErrorHtml, buildLauncherHtml, buildMainWebviewHtml } from './webviewHtml';
 import { classifyHostTheme, type HostTheme } from './hostTheme';
@@ -870,7 +870,9 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
             sidecarClient.getPullRequestDetail(base, owner, repo, number),
             sidecarClient.getDraftReview(base, owner, repo, number),
         ]);
-        if (diffResult.status !== 'ok' || diffResult.diff === null) throw new Error(diffResult.message);
+        if (diffResult.status !== 'ok' || diffResult.diff === null) {
+            throw new GitHubOperationError(diffResult.status, diffResult.message);
+        }
         if (detailResult.status !== 'ok' || !detailResult.detail) throw new Error(detailResult.message);
         if (draftResult.status !== 'ok' && draftResult.status !== 'none') throw new Error(draftResult.message);
         const diff = diffResult.diff;
@@ -1005,7 +1007,12 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
         let diff = requestedDiff ?? state.activeDiff;
         if (!diff) {
             const result = await sidecarClient.getPullRequestDiff(base, owner, repo, number, 'review');
-            if (!result || result.status !== 'ok' || result.diff === null) throw new Error(result?.message ?? 'Invalid sidecar diff response.');
+            if (!result || result.status !== 'ok' || result.diff === null) {
+                throw new GitHubOperationError(
+                    result?.status ?? 'invalid_response',
+                    result?.message ?? 'Invalid sidecar diff response.',
+                );
+            }
             diff = result.diff;
             if (!isCurrentGeneration()) return;
             state.activeDiff = diff;

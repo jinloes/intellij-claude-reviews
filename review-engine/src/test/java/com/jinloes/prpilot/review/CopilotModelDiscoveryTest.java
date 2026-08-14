@@ -2,7 +2,14 @@ package com.jinloes.prpilot.review;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
@@ -114,6 +121,158 @@ class CopilotModelDiscoveryTest {
             List<String> first = CopilotModelDiscovery.listModels();
             assertThat(first).isNotNull();
             CopilotModelDiscovery.invalidate();
+        }
+    }
+
+    @Nested
+    class Probe {
+
+        @Test
+        void hangingProcessIsTerminatedAtTheConfiguredTimeout() {
+            StubProcess process = StubProcess.hanging();
+            long started = System.nanoTime();
+
+            List<String> result = CopilotModelDiscovery.probe(ignored -> process, 1);
+
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+            assertThat(result).isEmpty();
+            assertThat(elapsedMs).isLessThan(3_000);
+            assertThat(process.isAlive()).isFalse();
+        }
+
+        @Test
+        void finiteLargeOutputIsDrainedBeforeParsing() {
+            String help =
+                    "`model`: AI model to use for Copilot CLI.\n"
+                            + "x".repeat(100_000)
+                            + "\n  - \"model-a\"\n";
+
+            List<String> result =
+                    CopilotModelDiscovery.probe(ignored -> StubProcess.completed(help, 0), 1);
+
+            assertThat(result).containsExactly("model-a");
+        }
+
+        @Test
+        void interruptionRestoresTheThreadFlagAndTerminatesTheProcess() {
+            StubProcess process = StubProcess.interrupting();
+            try {
+                List<String> result = CopilotModelDiscovery.probe(ignored -> process, 1);
+
+                assertThat(result).isEmpty();
+                assertThat(Thread.currentThread().isInterrupted()).isTrue();
+                assertThat(process.isAlive()).isFalse();
+            } finally {
+                Thread.interrupted();
+            }
+        }
+    }
+
+    private static final class StubProcess extends Process {
+        private final InputStream input;
+        private final int exitCode;
+        private final boolean interruptWait;
+        private volatile boolean alive;
+
+        private StubProcess(InputStream input, int exitCode, boolean alive, boolean interruptWait) {
+            this.input = input;
+            this.exitCode = exitCode;
+            this.alive = alive;
+            this.interruptWait = interruptWait;
+        }
+
+        static StubProcess completed(String output, int exitCode) {
+            return new StubProcess(
+                    new ByteArrayInputStream(output.getBytes(StandardCharsets.UTF_8)),
+                    exitCode,
+                    false,
+                    false);
+        }
+
+        static StubProcess hanging() {
+            return new StubProcess(new BlockingInputStream(), 0, true, false);
+        }
+
+        static StubProcess interrupting() {
+            return new StubProcess(new BlockingInputStream(), 0, true, true);
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return new ByteArrayOutputStream();
+        }
+
+        @Override
+        public InputStream getInputStream() {
+            return input;
+        }
+
+        @Override
+        public InputStream getErrorStream() {
+            return InputStream.nullInputStream();
+        }
+
+        @Override
+        public int waitFor() throws InterruptedException {
+            if (interruptWait) throw new InterruptedException("interrupted");
+            return exitCode;
+        }
+
+        @Override
+        public boolean waitFor(long timeout, TimeUnit unit) throws InterruptedException {
+            if (interruptWait) throw new InterruptedException("interrupted");
+            if (alive) unit.sleep(timeout);
+            return !alive;
+        }
+
+        @Override
+        public int exitValue() {
+            if (alive) throw new IllegalThreadStateException("still running");
+            return exitCode;
+        }
+
+        @Override
+        public void destroy() {
+            alive = false;
+            try {
+                input.close();
+            } catch (IOException ignored) {
+                // Test process only.
+            }
+        }
+
+        @Override
+        public Process destroyForcibly() {
+            destroy();
+            return this;
+        }
+
+        @Override
+        public boolean isAlive() {
+            return alive;
+        }
+    }
+
+    private static final class BlockingInputStream extends InputStream {
+        private boolean closed;
+
+        @Override
+        public synchronized int read() throws IOException {
+            while (!closed) {
+                try {
+                    wait();
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("interrupted", exception);
+                }
+            }
+            return -1;
+        }
+
+        @Override
+        public synchronized void close() {
+            closed = true;
+            notifyAll();
         }
     }
 }

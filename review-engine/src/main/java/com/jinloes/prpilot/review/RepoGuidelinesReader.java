@@ -96,17 +96,24 @@ public final class RepoGuidelinesReader {
                 if (content.isEmpty()) {
                     continue;
                 }
+                String separator = sb.length() == 0 ? "" : "\n\n";
+                String header = "## " + rel + "\n";
                 int remaining = MAX_GUIDELINES_BYTES - total;
+                int framingBytes = utf8Length(separator) + utf8Length(header);
+                if (framingBytes >= remaining) {
+                    break;
+                }
+                int contentLimit = remaining - framingBytes;
                 int contentBytes = utf8Length(content);
-                if (contentBytes > remaining) {
-                    content = truncateUtf8(content, remaining);
+                if (contentBytes > contentLimit) {
+                    content = truncateUtf8(content, contentLimit);
                     contentBytes = utf8Length(content);
                 }
-                if (sb.length() > 0) {
-                    sb.append("\n\n");
+                if (content.isEmpty()) {
+                    break;
                 }
-                sb.append("## ").append(rel).append("\n").append(content);
-                total += contentBytes;
+                sb.append(separator).append(header).append(content);
+                total += framingBytes + contentBytes;
             } catch (IOException e) {
                 // unreadable — skip
             }

@@ -226,12 +226,32 @@ class RepoGuidelinesReaderTest {
         void capsTotalBytes() throws IOException {
             write("AGENTS.md", "😀".repeat(RepoGuidelinesReader.MAX_GUIDELINES_BYTES));
             String result = RepoGuidelinesReader.read(tempDir.toFile(), List.of("AGENTS.md"));
-            String guidance = result.substring(result.indexOf('\n') + 1);
 
             assertThat(result).contains("...(truncated)");
-            assertThat(guidance).doesNotContain("�");
-            assertThat(guidance.getBytes(StandardCharsets.UTF_8).length)
+            assertThat(result).doesNotContain("�");
+            assertThat(result.getBytes(StandardCharsets.UTF_8).length)
                     .isLessThanOrEqualTo(RepoGuidelinesReader.MAX_GUIDELINES_BYTES);
+        }
+
+        @Test
+        void capIncludesHeadersAndSeparatorsAcrossManyFiles() throws IOException {
+            for (int i = 0; i < 80; i++) {
+                write(
+                        "docs/"
+                                + "long-directory-name-".repeat(4)
+                                + i
+                                + "/"
+                                + "long-guidance-file-name-".repeat(3)
+                                + i
+                                + ".md",
+                        "x");
+            }
+
+            String result = RepoGuidelinesReader.read(tempDir.toFile(), List.of("**/*.md"));
+
+            assertThat(result.getBytes(StandardCharsets.UTF_8).length)
+                    .isLessThanOrEqualTo(RepoGuidelinesReader.MAX_GUIDELINES_BYTES);
+            assertThat(result).doesNotEndWith("\n## ");
         }
 
         @Test

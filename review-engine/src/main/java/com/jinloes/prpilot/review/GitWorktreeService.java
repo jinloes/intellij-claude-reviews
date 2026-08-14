@@ -11,6 +11,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.regex.Pattern;
 import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -71,7 +72,7 @@ public class GitWorktreeService {
     public void createWorktree(File repoDir, String branch, String headSha, File worktreeDir)
             throws IOException {
         log.info("Fetching branch {} from origin in {}", branch, repoDir);
-        runGit(repoDir, 60, "fetch", "origin", branch);
+        fetch(repoDir, 60, "origin", branch);
         String commitish = pinnedCommitish(repoDir, headSha);
         log.info("Creating worktree at {} for {}", worktreeDir, commitish);
         runGit(
@@ -103,7 +104,7 @@ public class GitWorktreeService {
             File repoDir, String forkCloneUrl, String branch, String headSha, File worktreeDir)
             throws IOException {
         log.info("Fetching branch {} from fork {} in {}", branch, forkCloneUrl, repoDir);
-        runGit(repoDir, 120, "fetch", forkCloneUrl, branch);
+        fetch(repoDir, 120, forkCloneUrl, branch);
         String commitish = pinnedCommitish(repoDir, headSha);
         log.info("Creating worktree at {} from {}", worktreeDir, commitish);
         runGit(
@@ -114,6 +115,13 @@ public class GitWorktreeService {
                 "--detach",
                 worktreeDir.getAbsolutePath(),
                 commitish);
+    }
+
+    void fetch(File repoDir, long timeoutSeconds, String remote, String branch) throws IOException {
+        if (StringUtils.isBlank(branch) || branch.chars().anyMatch(Character::isISOControl)) {
+            throw new IllegalArgumentException("Pull request branch is invalid.");
+        }
+        runGit(repoDir, timeoutSeconds, "fetch", remote, "--", branch);
     }
 
     /**
@@ -168,19 +176,53 @@ public class GitWorktreeService {
     }
 
     /**
-     * Removes a previously created worktree. Uses {@code --force} to tolerate a missing directory.
-     * Logs a warning on failure but does not rethrow — cleanup failures are non-fatal.
+     * Removes a previously created worktree. An already-absent directory is considered removed.
+     * Cleanup failures are returned rather than thrown so hosts can log or retry without blocking
+     * disposal.
      *
      * @param repoDir git repository root
      * @param worktreeDir the worktree directory to remove
      */
-    public void removeWorktree(File repoDir, File worktreeDir) {
+    public boolean removeWorktree(File repoDir, File worktreeDir) {
         try {
             runGit(repoDir, 30, "worktree", "remove", "--force", worktreeDir.getAbsolutePath());
             log.info("Removed worktree at {}", worktreeDir);
-        } catch (Exception e) {
-            log.warn("Failed to remove worktree at {}: {}", worktreeDir, e.getMessage());
+            return true;
+        } catch (IOException exception) {
+            if (!worktreeDir.exists()) {
+                try {
+                    if (!isRegisteredWorktree(repoDir, worktreeDir)) {
+                        log.info("Worktree at {} is already absent and unregistered", worktreeDir);
+                        return true;
+                    }
+                } catch (IOException registrationException) {
+                    exception.addSuppressed(registrationException);
+                }
+            }
+            log.warn("Failed to remove worktree at {}", worktreeDir, exception);
+            return false;
         }
+    }
+
+    private boolean isRegisteredWorktree(File repoDir, File worktreeDir) throws IOException {
+        GitResult result = execGit(repoDir, 15, "worktree", "list", "--porcelain");
+        if (result.exitCode() != 0) {
+            throw new IOException(
+                    "git worktree list failed (exit "
+                            + result.exitCode()
+                            + "): "
+                            + result.output().trim());
+        }
+        File target = worktreeDir.getCanonicalFile();
+        for (String line : result.output().split("\\R")) {
+            if (line.startsWith("worktree ")
+                    && new File(line.substring("worktree ".length()))
+                            .getCanonicalFile()
+                            .equals(target)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     void runGit(File dir, long timeoutSeconds, String... args) throws IOException {

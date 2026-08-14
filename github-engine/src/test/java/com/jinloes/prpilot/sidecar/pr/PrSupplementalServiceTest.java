@@ -3,6 +3,8 @@ package com.jinloes.prpilot.sidecar.pr;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
 import com.jinloes.prpilot.sidecar.github.GitHubResponse;
 import java.util.ArrayDeque;
@@ -12,6 +14,8 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class PrSupplementalServiceTest {
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     @Test
     void searchesWithABoundedEncodedQuery() {
         FakeClient client = new FakeClient();
@@ -111,7 +115,9 @@ class PrSupplementalServiceTest {
                                 + "{\"id\":2,\"state\":\"APPROVED\",\"body\":\"Looks good\","
                                 + "\"submitted_at\":\"2026-07-22T01:00:00Z\",\"user\":{\"login\":\"sam\"}}]"));
         client.responses.add(
-                ok("[{\"path\":\"src/App.java\",\"line\":12,\"body\":\"Nice change\"}]"));
+                ok(
+                        "[{\"pull_request_review_id\":2,\"path\":\"src/App.java\","
+                                + "\"line\":12,\"body\":\"Nice change\"}]"));
 
         ExistingReviewsResult result =
                 service(client)
@@ -124,7 +130,92 @@ class PrSupplementalServiceTest {
                 .contains("Review by @sam (APPROVED, 2026-07-22):")
                 .contains("Overall: \"Looks good\"")
                 .contains("src/App.java:12: \"Nice change\"");
+        assertThat(client.paths)
+                .containsExactly(
+                        "/repos/acme/widgets/pulls/42/reviews?per_page=100&page=1",
+                        "/repos/acme/widgets/pulls/42/comments?per_page=100&page=1");
+    }
+
+    @Test
+    void paginatesReviewsAndFetchesCommentsOnceForThePullRequest() {
+        FakeClient client = new FakeClient();
+        ArrayNode firstReviewPage = MAPPER.createArrayNode();
+        for (int i = 0; i < 99; i++) {
+            firstReviewPage.add(review(1_000 + i, "PENDING", "pending-" + i));
+        }
+        firstReviewPage.add(review(2, "APPROVED", "sam"));
+        client.responses.add(ok(firstReviewPage.toString()));
+        client.responses.add(
+                ok(MAPPER.createArrayNode().add(review(3, "COMMENTED", "lee")).toString()));
+        client.responses.add(
+                ok(
+                        MAPPER.createArrayNode()
+                                .add(comment(2, "src/A.java", 10, "First"))
+                                .add(comment(3, "src/B.java", 20, "Second"))
+                                .toString()));
+
+        ExistingReviewsResult result =
+                service(client)
+                        .existingReviews(
+                                new PrSupplementalService.IdentityParams(
+                                        "https://github.com", "acme", "widgets", 42));
+
+        assertThat(result.status()).isEqualTo("ok");
+        assertThat(result.summary())
+                .contains("Review by @sam")
+                .contains("src/A.java:10: \"First\"")
+                .contains("Review by @lee")
+                .contains("src/B.java:20: \"Second\"");
+        assertThat(client.paths)
+                .containsExactly(
+                        "/repos/acme/widgets/pulls/42/reviews?per_page=100&page=1",
+                        "/repos/acme/widgets/pulls/42/reviews?per_page=100&page=2",
+                        "/repos/acme/widgets/pulls/42/comments?per_page=100&page=1");
+    }
+
+    @Test
+    void failedLaterPageReturnsAnExplicitFailureWithoutPartialContext() {
+        FakeClient client = new FakeClient();
+        ArrayNode fullReviewPage = MAPPER.createArrayNode();
+        for (int i = 0; i < 100; i++) {
+            fullReviewPage.add(review(i + 1, "COMMENTED", "reviewer-" + i));
+        }
+        client.responses.add(ok(fullReviewPage.toString()));
+        client.responses.add(new GitHubResponse(500, ""));
+
+        ExistingReviewsResult result =
+                service(client)
+                        .existingReviews(
+                                new PrSupplementalService.IdentityParams(
+                                        "https://github.com", "acme", "widgets", 42));
+
+        assertThat(result.status()).isEqualTo("api_failed");
+        assertThat(result.summary()).isEmpty();
         assertThat(client.paths).hasSize(2);
+    }
+
+    @Test
+    void capsRenderedExistingReviewContext() {
+        FakeClient client = new FakeClient();
+        client.responses.add(
+                ok(MAPPER.createArrayNode().add(review(2, "COMMENTED", "sam")).toString()));
+        ArrayNode comments = MAPPER.createArrayNode();
+        for (int i = 0; i < 100; i++) {
+            comments.add(comment(2, "src/File" + i + ".java", i + 1, "x".repeat(500)));
+        }
+        client.responses.add(ok(comments.toString()));
+        client.responses.add(ok("[]"));
+
+        ExistingReviewsResult result =
+                service(client)
+                        .existingReviews(
+                                new PrSupplementalService.IdentityParams(
+                                        "https://github.com", "acme", "widgets", 42));
+
+        assertThat(result.status()).isEqualTo("ok");
+        assertThat(result.summary().length())
+                .isLessThanOrEqualTo(PrSupplementalService.MAX_EXISTING_REVIEWS_CHARS);
+        assertThat(result.summary()).endsWith("...(existing review context truncated)");
     }
 
     private static PrSupplementalService service(FakeClient client) {
@@ -136,6 +227,25 @@ class PrSupplementalServiceTest {
 
     private static GitHubResponse ok(String body) {
         return new GitHubResponse(200, body);
+    }
+
+    private static ObjectNode review(long id, String state, String reviewer) {
+        ObjectNode review = MAPPER.createObjectNode();
+        review.put("id", id);
+        review.put("state", state);
+        review.put("body", "Overall");
+        review.put("submitted_at", "2026-07-22T01:00:00Z");
+        review.putObject("user").put("login", reviewer);
+        return review;
+    }
+
+    private static ObjectNode comment(long reviewId, String path, int line, String body) {
+        ObjectNode comment = MAPPER.createObjectNode();
+        comment.put("pull_request_review_id", reviewId);
+        comment.put("path", path);
+        comment.put("line", line);
+        comment.put("body", body);
+        return comment;
     }
 
     private static final class FakeClient implements PrSupplementalService.ApiClient {

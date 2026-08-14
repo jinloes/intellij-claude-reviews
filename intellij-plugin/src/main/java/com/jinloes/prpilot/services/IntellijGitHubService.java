@@ -320,7 +320,20 @@ public final class IntellijGitHubService {
     }
 
     private static void requireOk(String status, String message) throws IOException {
-        if (!"ok".equals(status)) throw new IOException(message);
+        if (!"ok".equals(status)) throw new GitHubOperationException(status, message);
+    }
+
+    static final class GitHubOperationException extends IOException {
+        private final String status;
+
+        GitHubOperationException(String status, String message) {
+            super(message);
+            this.status = status;
+        }
+
+        String status() {
+            return status;
+        }
     }
 
     public record SaveDraftResult(String reviewId, boolean commentsDropped) {}

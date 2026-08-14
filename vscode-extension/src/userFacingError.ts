@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { parse as parseYaml } from 'yaml';
+import type { SidecarPrDiffResult } from './sidecar';
 
 type ErrorContext =
     | 'load pull requests'
@@ -13,7 +14,7 @@ type ErrorContext =
 
 type TemplateKey =
     | 'github_auth_failed'
-    | 'github_access_failed'
+    | 'github_not_found_or_inaccessible'
     | 'provider_binary_missing'
     | 'provider_not_installed'
     | 'request_timed_out'
@@ -22,6 +23,16 @@ type TemplateKey =
     | 'generic_failure';
 
 const TEMPLATES = loadTemplates();
+
+export class GitHubOperationError extends Error {
+    constructor(
+        readonly status: SidecarPrDiffResult['status'] | 'invalid_response',
+        message: string,
+    ) {
+        super(message);
+        this.name = 'GitHubOperationError';
+    }
+}
 
 function messageOf(err: unknown): string {
     return (err instanceof Error ? err.message : String(err)).trim().toLowerCase();
@@ -81,8 +92,8 @@ export function providerNotInstalledMessage(provider: 'claude' | 'copilot'): str
 export function toUserFacingError(err: unknown, context: ErrorContext): string {
     const msg = messageOf(err);
 
-    if (includesAny(msg, ['not found or inaccessible', 'active gh account'])) {
-        return template('github_access_failed', {});
+    if (err instanceof GitHubOperationError && err.status === 'not_found_or_inaccessible') {
+        return template('github_not_found_or_inaccessible', {});
     }
     if (includesAny(msg, ['no github token configured', 'gh auth', 'authentication', 'unauthorized', 'forbidden'])) {
         return template('github_auth_failed', { auth_command: 'gh auth login' });

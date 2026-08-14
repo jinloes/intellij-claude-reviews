@@ -45,6 +45,20 @@ class GitWorktreeServiceTest {
         return output;
     }
 
+    private static String worktreeList(File dir) throws IOException, InterruptedException {
+        Process process =
+                new ProcessBuilder("git", "worktree", "list", "--porcelain")
+                        .directory(dir)
+                        .redirectErrorStream(true)
+                        .start();
+        String output =
+                new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+        if (process.waitFor() != 0) {
+            throw new IllegalStateException("git worktree list failed in " + dir + ": " + output);
+        }
+        return output;
+    }
+
     private static String headShaUnchecked(File dir) {
         try {
             return headSha(dir);
@@ -184,6 +198,37 @@ class GitWorktreeServiceTest {
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("missing");
         }
+
+        @Test
+        void passesOptionShapedBranchesAfterTheOptionTerminator() throws IOException {
+            class CapturingGitService extends GitWorktreeService {
+                private List<String> arguments;
+
+                @Override
+                void runGit(File dir, long timeoutSeconds, String... args) {
+                    arguments = List.of(args);
+                }
+            }
+            CapturingGitService capturingService = new CapturingGitService();
+
+            capturingService.fetch(repoDir, 60, "origin", "--upload-pack=/bin/false");
+            assertThat(capturingService.arguments)
+                    .containsExactly("fetch", "origin", "--", "--upload-pack=/bin/false");
+
+            capturingService.fetch(repoDir, 60, "origin", "--depth=1");
+            assertThat(capturingService.arguments)
+                    .containsExactly("fetch", "origin", "--", "--depth=1");
+        }
+
+        @Test
+        void rejectsBlankOrControlCharacterBranchesBeforeInvokingGit() {
+            assertThatThrownBy(() -> service.fetch(repoDir, 60, "origin", " "))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("branch is invalid");
+            assertThatThrownBy(() -> service.fetch(repoDir, 60, "origin", "feature\nmain"))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("branch is invalid");
+        }
     }
 
     @Nested
@@ -280,14 +325,38 @@ class GitWorktreeServiceTest {
         void removesAWorktreeThatWasCreated() throws IOException {
             service.createWorktree(repoDir, "main", headShaUnchecked(repoDir), worktreeDir);
             assertThat(worktreeDir).exists();
-            service.removeWorktree(repoDir, worktreeDir);
+            assertThat(service.removeWorktree(repoDir, worktreeDir)).isTrue();
             assertThat(worktreeDir).doesNotExist();
         }
 
         @Test
-        void doesNotThrowWhenWorktreeDirectoryDoesNotExist() {
+        void reportsAnAlreadyAbsentWorktreeAsRemoved() {
             File nonExistent = new File(repoDir, "no-such-wt");
-            service.removeWorktree(repoDir, nonExistent);
+            assertThat(service.removeWorktree(repoDir, nonExistent)).isTrue();
+        }
+
+        @Test
+        void removesRegistrationWhenTheWorktreeDirectoryWasDeleted() throws Exception {
+            service.createWorktree(repoDir, "main", headSha(repoDir), worktreeDir);
+            assertThat(worktreeList(repoDir)).contains(worktreeDir.getCanonicalPath());
+            FileUtils.deleteDirectory(worktreeDir);
+
+            assertThat(service.removeWorktree(repoDir, worktreeDir)).isTrue();
+
+            assertThat(worktreeList(repoDir)).doesNotContain(worktreeDir.getCanonicalPath());
+        }
+
+        @Test
+        void reportsGitRemovalFailure() {
+            class FailingGitService extends GitWorktreeService {
+                @Override
+                void runGit(File dir, long timeoutSeconds, String... args) throws IOException {
+                    throw new IOException("removal failed");
+                }
+            }
+            assertThat(worktreeDir.mkdir()).isTrue();
+
+            assertThat(new FailingGitService().removeWorktree(repoDir, worktreeDir)).isFalse();
         }
     }
 

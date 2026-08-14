@@ -4,13 +4,22 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.jinloes.prpilot.model.PullRequest;
 import com.jinloes.prpilot.services.PRNotificationService.Candidate;
+import com.jinloes.prpilot.services.PRNotificationService.NotificationSettings;
 import com.jinloes.prpilot.services.PRNotificationService.NotificationSource;
+import com.jinloes.prpilot.services.PRNotificationService.NotificationSourceClient;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class PRNotificationServiceTest {
+
+    @TempDir Path tempDir;
 
     private static PullRequest pr(String owner, String repo, int number) {
         return new PullRequest(
@@ -142,6 +151,115 @@ class PRNotificationServiceTest {
         void blankMessageFallsBackToUnknownError() {
             String result = PRNotificationService.sanitizeError(new IOException("   "));
             assertThat(result).isEqualTo("unknown error");
+        }
+    }
+
+    @Nested
+    class Poll {
+
+        @Test
+        void failedOrPartialFirstPollDoesNotSeedAndRecoveryStaysSilent() {
+            PullRequest reviewPr = pr("acme", "review", 1);
+            PullRequest starredPr = pr("acme", "starred", 2);
+            PullRequest newPr = pr("acme", "review", 3);
+            FakeSourceClient source = new FakeSourceClient();
+            source.reviewRequested = List.of(reviewPr);
+            source.starredRepos = List.of("acme/starred");
+            source.starred = List.of(starredPr);
+            source.reviewFailure = new IOException("network down");
+            SeenPRSet seenSet = new SeenPRSet(tempDir.resolve("seen-prs.json"));
+            List<PullRequest> notified = new ArrayList<>();
+            PRNotificationService service =
+                    new PRNotificationService(
+                            () -> new NotificationSettings(true, true, true),
+                            source,
+                            seenSet,
+                            new PendingReviewIndex(tempDir.resolve("pending-prs.json")),
+                            (pullRequest, ignored) -> notified.add(pullRequest));
+
+            service.poll();
+
+            assertThat(seenSet.isSeeded()).isFalse();
+            assertThat(notified).isEmpty();
+
+            source.reviewFailure = null;
+            service.poll();
+
+            assertThat(seenSet.isSeeded()).isTrue();
+            assertThat(notified).isEmpty();
+
+            source.reviewRequested = List.of(reviewPr, newPr);
+            service.poll();
+
+            assertThat(notified).containsExactly(newPr);
+        }
+
+        @Test
+        void successfulEmptyFirstPollSeedsTheSnapshot() {
+            SeenPRSet seenSet = new SeenPRSet(tempDir.resolve("empty-seen-prs.json"));
+            PRNotificationService service =
+                    new PRNotificationService(
+                            () -> new NotificationSettings(true, true, false),
+                            new FakeSourceClient(),
+                            seenSet,
+                            new PendingReviewIndex(tempDir.resolve("empty-pending-prs.json")),
+                            (pullRequest, source) -> {});
+
+            service.poll();
+
+            assertThat(seenSet.isSeeded()).isTrue();
+        }
+
+        @Test
+        void corruptPendingIndexSuppressesNotificationsUntilStateIsRecoverable()
+                throws IOException {
+            PullRequest candidate = pr("acme", "review", 4);
+            FakeSourceClient source = new FakeSourceClient();
+            source.reviewRequested = List.of(candidate);
+            SeenPRSet seenSet = new SeenPRSet(tempDir.resolve("corrupt-seen-prs.json"));
+            seenSet.markSeeded();
+            seenSet.save();
+            Path pendingFile = tempDir.resolve("corrupt-pending-prs.json");
+            Files.writeString(pendingFile, "{broken", StandardCharsets.UTF_8);
+            List<PullRequest> notified = new ArrayList<>();
+            PRNotificationService service =
+                    new PRNotificationService(
+                            () -> new NotificationSettings(true, true, false),
+                            source,
+                            seenSet,
+                            new PendingReviewIndex(pendingFile),
+                            (pullRequest, ignored) -> notified.add(pullRequest));
+
+            service.poll();
+
+            assertThat(notified).isEmpty();
+            assertThat(Files.readString(pendingFile, StandardCharsets.UTF_8)).isEqualTo("{broken");
+
+            Files.delete(pendingFile);
+            service.poll();
+
+            assertThat(notified).containsExactly(candidate);
+        }
+    }
+
+    private static final class FakeSourceClient implements NotificationSourceClient {
+        private List<PullRequest> reviewRequested = List.of();
+        private List<PullRequest> starred = List.of();
+        private List<String> starredRepos = List.of();
+        private Exception reviewFailure;
+
+        @Override
+        public List<PullRequest> searchPRs(String query) throws Exception {
+            if (PRNotificationService.REVIEW_REQUESTED_QUERY.equals(query)) {
+                if (reviewFailure != null) throw reviewFailure;
+                return reviewRequested;
+            }
+            return starred;
+        }
+
+        @Override
+        public List<String> getStarredRepos() {
+            return starredRepos;
         }
     }
 }

@@ -1,21 +1,31 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { toUserFacingError } from '../src/userFacingError';
+import { GitHubOperationError, toUserFacingError } from '../src/userFacingError';
 
 test('maps GitHub auth failures to gh auth guidance', () => {
   const msg = toUserFacingError(new Error('401 Unauthorized: bad credentials'), 'save draft review');
   assert.match(msg, /gh auth login/i);
 });
 
-test('maps inaccessible pull requests to account-switch guidance', () => {
+test('preserves both possible causes for ambiguous GitHub 404 results', () => {
+  const msg = toUserFacingError(
+    new GitHubOperationError('not_found_or_inaccessible', 'Pull request not found or inaccessible.'),
+    'load PR details',
+  );
+  assert.match(msg, /may not exist/i);
+  assert.match(msg, /may not have access/i);
+  assert.match(msg, /verify the PR URL/i);
+  assert.match(msg, /active gh account/i);
+  assert.match(msg, /gh auth status/i);
+});
+
+test('does not classify an ambiguous GitHub 404 from untyped prose', () => {
   const msg = toUserFacingError(
     new Error('Pull request not found or inaccessible to the active gh account.'),
     'load PR details',
   );
-  assert.match(msg, /active gh account/i);
-  assert.match(msg, /gh auth status/i);
-  assert.match(msg, /gh auth switch/i);
+  assert.equal(msg, "Couldn't load PR details. Please retry.");
 });
 
 test('maps provider binary missing errors to install guidance', () => {

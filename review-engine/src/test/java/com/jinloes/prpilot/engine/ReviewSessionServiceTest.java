@@ -6,7 +6,9 @@ import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 
 import com.jinloes.prpilot.review.CancellationToken;
 import com.jinloes.prpilot.review.ClaudeService;
+import com.jinloes.prpilot.review.GitWorktreeService;
 import com.jinloes.prpilot.review.ReviewOutcomeLog;
+import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -277,6 +279,42 @@ class ReviewSessionServiceTest {
                                                     repoDir.toString(), List.of()))
                                     .guidelines())
                     .isEmpty();
+        }
+    }
+
+    @Nested
+    class RemoveWorktree {
+
+        @Test
+        void propagatesCleanupFailureAsADomainResult() {
+            GitWorktreeService failingService =
+                    new GitWorktreeService() {
+                        @Override
+                        public boolean removeWorktree(File repoDir, File worktreeDir) {
+                            return false;
+                        }
+                    };
+            ReviewSessionService service =
+                    new ReviewSessionService(new ReviewOutcomeLog(), failingService);
+
+            ReviewEngineApi.WorktreeRemovalResult result =
+                    service.removeWorktree(
+                            new ReviewEngineApi.RemoveWorktreeParams("/repo", "/worktree"));
+
+            assertThat(result.removed()).isFalse();
+        }
+
+        @Test
+        void rejectsMalformedCleanupRequestsWithoutCallingGit() {
+            ReviewSessionService service = new ReviewSessionService();
+
+            assertThat(service.removeWorktree(null).removed()).isFalse();
+            assertThat(
+                            service.removeWorktree(
+                                            new ReviewEngineApi.RemoveWorktreeParams(
+                                                    "", "/worktree"))
+                                    .removed())
+                    .isFalse();
         }
     }
 }

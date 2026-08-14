@@ -1433,7 +1433,11 @@ public class WebviewPanel implements Disposable {
                         .findFirst()
                         .orElse(null);
         String title = pr != null ? pr.getTitle() : "";
-        pendingIndex.add(owner, repo, number, title, headSha);
+        PendingReviewIndex.MutationResult indexResult =
+                pendingIndex.add(owner, repo, number, title, headSha);
+        if (indexResult != PendingReviewIndex.MutationResult.UPDATED) {
+            log.warn("Pending review index was not updated after saving draft: {}", indexResult);
+        }
         GeneratedReview generated = generatedReviews.get(key);
         if (bridgeGeneratedResult != null && generated != null) {
             generatedReviews.put(
@@ -1486,7 +1490,11 @@ public class WebviewPanel implements Disposable {
             return;
         }
 
-        pendingIndex.remove(owner, repo, number);
+        PendingReviewIndex.MutationResult indexResult = pendingIndex.remove(owner, repo, number);
+        if (indexResult != PendingReviewIndex.MutationResult.UPDATED) {
+            log.warn(
+                    "Pending review index was not updated after submitting draft: {}", indexResult);
+        }
         GeneratedReview generated = generatedReviews.remove(key);
         if (generated != null) {
             recordReviewOutcome(generated.result(), lastResult, generated.metadata());
@@ -1559,7 +1567,10 @@ public class WebviewPanel implements Disposable {
             return;
         }
 
-        pendingIndex.remove(owner, repo, number);
+        PendingReviewIndex.MutationResult indexResult = pendingIndex.remove(owner, repo, number);
+        if (indexResult != PendingReviewIndex.MutationResult.UPDATED) {
+            log.warn("Pending review index was not updated after deleting draft: {}", indexResult);
+        }
         if (StringUtils.equals(pendingReviewId, reviewId)
                 && StringUtils.equals(pendingReviewKey, key)) {
             lastResult = null;
@@ -1982,12 +1993,16 @@ public class WebviewPanel implements Disposable {
                 log.info("Using worktree {} for PR #{}", wt, pr.getNumber());
                 return serviceForWorktree(created.directory());
             }
-            worktreeService.removeWorktree(detectedRoot, wt);
+            if (!worktreeService.removeWorktree(detectedRoot, wt)) {
+                log.warn("Failed to remove discarded worktree at {}", wt);
+            }
             throw new IllegalStateException("The selected pull request changed.");
         } catch (Exception e) {
             worktrees.fail(lease);
             if (wt.exists()) {
-                worktreeService.removeWorktree(detectedRoot, wt);
+                if (!worktreeService.removeWorktree(detectedRoot, wt)) {
+                    log.warn("Failed to remove incomplete worktree at {}", wt);
+                }
             }
             log.warn("Worktree creation for PR #{} failed:", pr.getNumber(), e.getMessage());
             throw new IllegalStateException(
@@ -2003,9 +2018,14 @@ public class WebviewPanel implements Disposable {
         if (worktree != null && worktree.directory() != null && worktree.gitRoot() != null) {
             getApplication()
                     .executeOnPooledThread(
-                            () ->
-                                    worktreeService.removeWorktree(
-                                            worktree.gitRoot(), worktree.directory()));
+                            () -> {
+                                if (!worktreeService.removeWorktree(
+                                        worktree.gitRoot(), worktree.directory())) {
+                                    log.warn(
+                                            "Failed to remove worktree at {}",
+                                            worktree.directory());
+                                }
+                            });
         }
     }
 

@@ -264,10 +264,13 @@ test('parsePrDetailResult rejects malformed successful and unknown results', () 
   assert.equal(parsePrDetailResult({ status: 'ok', message: 'x', detail: { merged: false } }), null);
 });
 
-test('parsePrDiffResult accepts only complete successful review diffs', () => {
+test('parsePrDiffResult accepts complete success and ambiguous 404 results', () => {
   assert.deepEqual(parsePrDiffResult({ status: 'ok', message: 'Pull request diff loaded.', diff: 'diff', truncated: false, limitBytes: 250000 }),
     { status: 'ok', message: 'Pull request diff loaded.', diff: 'diff', truncated: false, limitBytes: 250000 });
+  assert.deepEqual(parsePrDiffResult({ status: 'not_found_or_inaccessible', message: 'Not found or inaccessible.', diff: null, truncated: false, limitBytes: 250000 }),
+    { status: 'not_found_or_inaccessible', message: 'Not found or inaccessible.', diff: null, truncated: false, limitBytes: 250000 });
   assert.equal(parsePrDiffResult({ status: 'ok', message: 'x', diff: null, truncated: false, limitBytes: 250000 }), null);
+  assert.equal(parsePrDiffResult({ status: 'unknown', message: 'x', diff: null, truncated: false, limitBytes: 250000 }), null);
 });
 
 test('parseDraftReviewResult accepts a decoded pending review', () => {
@@ -659,9 +662,25 @@ test('worktree lifecycle degrades instead of rejecting when the sidecar is unava
 
   assert.equal(await client.findGitRoot('/repo'), '');
   assert.equal((await client.createWorktree('/repo', 7, 'feature', '', '')).status, 'failed');
-  await client.removeWorktree('/repo', '/tmp/pr-pilot-wt-7-abc');
+  assert.equal(await client.removeWorktree('/repo', '/tmp/pr-pilot-wt-7-abc'), false);
   assert.equal(await client.readRepoGuidelines('/repo', []), '');
   assert.equal(harness.commands.length, 0);
+  client.dispose();
+});
+
+test('worktree removal preserves the engine cleanup result', async () => {
+  let removed = true;
+  const harness = createSidecarHarness((method) => {
+    if (method === 'initialize') return initializeResult;
+    if (method === 'reviews/removeWorktree') return { removed };
+    return { nope: true };
+  });
+  const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar);
+
+  assert.equal(await client.removeWorktree('/repo', '/tmp/pr-pilot-wt-7-abc'), true);
+  removed = false;
+  assert.equal(await client.removeWorktree('/repo', '/tmp/pr-pilot-wt-7-abc'), false);
+  assert.ok(harness.methods.includes('reviews/removeWorktree'));
   client.dispose();
 });
 

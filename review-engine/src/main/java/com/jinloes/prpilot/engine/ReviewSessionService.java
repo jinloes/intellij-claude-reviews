@@ -39,15 +39,20 @@ public class ReviewSessionService implements ReviewEngineApi {
 
     private final OperationRegistry activeOperations = new OperationRegistry();
     private final ReviewOutcomeLog outcomeLog;
-    private final GitWorktreeService worktreeService = new GitWorktreeService();
+    private final GitWorktreeService worktreeService;
 
     public ReviewSessionService() {
-        this(new ReviewOutcomeLog());
+        this(new ReviewOutcomeLog(), new GitWorktreeService());
     }
 
     /** Test seam so outcome logging can be pointed at a temp file. */
     public ReviewSessionService(ReviewOutcomeLog outcomeLog) {
+        this(outcomeLog, new GitWorktreeService());
+    }
+
+    ReviewSessionService(ReviewOutcomeLog outcomeLog, GitWorktreeService worktreeService) {
         this.outcomeLog = outcomeLog;
+        this.worktreeService = worktreeService;
     }
 
     private static PullRequest toPullRequest(PrParams p) {
@@ -371,7 +376,8 @@ public class ReviewSessionService implements ReviewEngineApi {
                 || StringUtils.isBlank(params.worktreeDir())) {
             return new WorktreeRemovalResult(false);
         }
-        worktreeService.removeWorktree(new File(params.gitRoot()), new File(params.worktreeDir()));
-        return new WorktreeRemovalResult(true);
+        return new WorktreeRemovalResult(
+                worktreeService.removeWorktree(
+                        new File(params.gitRoot()), new File(params.worktreeDir())));
     }
 }

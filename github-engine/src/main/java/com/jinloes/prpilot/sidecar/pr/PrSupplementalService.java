@@ -10,7 +10,9 @@ import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
@@ -18,6 +20,12 @@ import java.util.regex.Pattern;
 public final class PrSupplementalService {
     private static final int MAX_QUERY_LENGTH = 8 * 1024;
     private static final int STARRED_LIMIT = 200;
+    private static final int PAGE_SIZE = 100;
+    private static final int MAX_EXISTING_REVIEWS = 200;
+    private static final int MAX_EXISTING_REVIEW_COMMENTS = 500;
+    static final int MAX_EXISTING_REVIEWS_CHARS = 12_000;
+    private static final String CONTEXT_TRUNCATION_MARKER =
+            "\n...(existing review context truncated)";
     private static final Pattern SEGMENT = Pattern.compile("[A-Za-z0-9_.-]+");
 
     private final GitHubAuthService.TokenResolver tokenResolver;
@@ -163,60 +171,117 @@ public final class PrSupplementalService {
                         + "/pulls/"
                         + params.number()
                         + "/reviews";
-        GitHubResponse response = client.get(session.apiBase(), session.token(), reviewsPath);
-        Failure failure = failure(response);
-        if (failure != null)
-            return ExistingReviewsResult.failure(failure.status(), failure.message());
-        try {
-            JsonNode reviews = mapper.readTree(response.body());
-            if (!reviews.isArray())
-                return ExistingReviewsResult.failure(
-                        "api_failed", "GitHub API response was invalid.");
-            List<String> lines = new ArrayList<>();
-            for (JsonNode review : reviews) {
-                if ("PENDING".equals(review.path("state").asText())) continue;
-                String id = review.path("id").asText();
-                String reviewer = review.path("user").path("login").asText("");
-                String state = review.path("state").asText("COMMENTED");
-                String submittedAt = review.path("submitted_at").asText("");
-                String date = submittedAt.length() >= 10 ? submittedAt.substring(0, 10) : "";
-                lines.add(
-                        "Review by @"
-                                + reviewer
-                                + " ("
-                                + state
-                                + (date.isEmpty() ? "" : ", " + date)
-                                + "):");
-                String body = oneLine(review.path("body").asText(""), 300);
-                if (!body.isEmpty()) lines.add("  Overall: \"" + body + "\"");
-                GitHubResponse comments =
-                        client.get(
-                                session.apiBase(),
-                                session.token(),
-                                reviewsPath + "/" + id + "/comments");
-                if (comments.isSuccess()) appendComments(lines, comments.body());
-                lines.add("");
+        PageResult reviews = getAllPages(session, reviewsPath, MAX_EXISTING_REVIEWS);
+        if (reviews.failure() != null) {
+            return ExistingReviewsResult.failure(
+                    reviews.failure().status(), reviews.failure().message());
+        }
+        String commentsPath =
+                "/repos/"
+                        + params.owner()
+                        + "/"
+                        + params.repo()
+                        + "/pulls/"
+                        + params.number()
+                        + "/comments";
+        PageResult comments = getAllPages(session, commentsPath, MAX_EXISTING_REVIEW_COMMENTS);
+        if (comments.failure() != null) {
+            return ExistingReviewsResult.failure(
+                    comments.failure().status(), comments.failure().message());
+        }
+
+        Map<String, List<JsonNode>> commentsByReview = new HashMap<>();
+        for (JsonNode comment : comments.items()) {
+            JsonNode reviewId = comment.path("pull_request_review_id");
+            if (!reviewId.canConvertToLong()) continue;
+            commentsByReview
+                    .computeIfAbsent(reviewId.asText(), ignored -> new ArrayList<>())
+                    .add(comment);
+        }
+
+        List<String> lines = new ArrayList<>();
+        for (JsonNode review : reviews.items()) {
+            if ("PENDING".equals(review.path("state").asText())) continue;
+            String id = review.path("id").asText();
+            String reviewer = review.path("user").path("login").asText("");
+            String state = review.path("state").asText("COMMENTED");
+            String submittedAt = review.path("submitted_at").asText("");
+            String date = submittedAt.length() >= 10 ? submittedAt.substring(0, 10) : "";
+            lines.add(
+                    "Review by @"
+                            + reviewer
+                            + " ("
+                            + state
+                            + (date.isEmpty() ? "" : ", " + date)
+                            + "):");
+            String body = oneLine(review.path("body").asText(""), 300);
+            if (!body.isEmpty()) lines.add("  Overall: \"" + body + "\"");
+            appendComments(lines, commentsByReview.getOrDefault(id, List.of()));
+            lines.add("");
+        }
+        if (reviews.limited() || comments.limited()) {
+            lines.add("Existing review context limit reached; additional items may be omitted.");
+        }
+        return ExistingReviewsResult.success(capContext(String.join("\n", lines).trim()));
+    }
+
+    private PageResult getAllPages(Session session, String basePath, int maxItems) {
+        List<JsonNode> items = new ArrayList<>();
+        boolean limited = false;
+        for (int page = 1; items.size() < maxItems; page++) {
+            String separator = basePath.contains("?") ? "&" : "?";
+            String path = basePath + separator + "per_page=" + PAGE_SIZE + "&page=" + page;
+            GitHubResponse response = client.get(session.apiBase(), session.token(), path);
+            Failure failure = failure(response);
+            if (failure != null) return new PageResult(List.of(), failure, false);
+            JsonNode pageItems;
+            try {
+                pageItems = mapper.readTree(response.body());
+            } catch (IOException exception) {
+                return new PageResult(
+                        List.of(),
+                        new Failure("api_failed", "GitHub API response was invalid."),
+                        false);
             }
-            return ExistingReviewsResult.success(String.join("\n", lines).trim());
-        } catch (IOException exception) {
-            return ExistingReviewsResult.failure("api_failed", "GitHub API response was invalid.");
+            if (!pageItems.isArray()) {
+                return new PageResult(
+                        List.of(),
+                        new Failure("api_failed", "GitHub API response was invalid."),
+                        false);
+            }
+            int remaining = maxItems - items.size();
+            for (JsonNode item : pageItems) {
+                if (items.size() >= maxItems) {
+                    limited = true;
+                    break;
+                }
+                items.add(item);
+            }
+            if (pageItems.size() > remaining) limited = true;
+            if (items.size() >= maxItems) {
+                if (pageItems.size() == PAGE_SIZE) limited = true;
+                break;
+            }
+            if (pageItems.size() < PAGE_SIZE) break;
+        }
+        return new PageResult(List.copyOf(items), null, limited);
+    }
+
+    private static void appendComments(List<String> lines, List<JsonNode> comments) {
+        for (JsonNode comment : comments) {
+            String text = oneLine(comment.path("body").asText(""), 200);
+            if (text.isEmpty()) continue;
+            int line = comment.path("line").asInt(comment.path("original_line").asInt(0));
+            String location = comment.path("path").asText("") + (line > 0 ? ":" + line : "");
+            lines.add("  - " + location + ": \"" + text + "\"");
         }
     }
 
-    private void appendComments(List<String> lines, String body) {
-        try {
-            JsonNode comments = mapper.readTree(body);
-            if (!comments.isArray()) return;
-            for (JsonNode comment : comments) {
-                String text = oneLine(comment.path("body").asText(""), 200);
-                if (text.isEmpty()) continue;
-                int line = comment.path("line").asInt(comment.path("original_line").asInt(0));
-                String location = comment.path("path").asText("") + (line > 0 ? ":" + line : "");
-                lines.add("  - " + location + ": \"" + text + "\"");
-            }
-        } catch (IOException ignored) {
-            // Individual comment lookup failures must not discard the usable review summary.
-        }
+    private static String capContext(String summary) {
+        if (summary.length() <= MAX_EXISTING_REVIEWS_CHARS) return summary;
+        int end = MAX_EXISTING_REVIEWS_CHARS - CONTEXT_TRUNCATION_MARKER.length();
+        if (end > 0 && Character.isHighSurrogate(summary.charAt(end - 1))) end--;
+        return summary.substring(0, Math.max(0, end)) + CONTEXT_TRUNCATION_MARKER;
     }
 
     private Session openSession(String githubBaseUrl) {
@@ -276,6 +341,8 @@ public final class PrSupplementalService {
     private record Session(String apiBase, String token, Failure failure) {}
 
     private record Failure(String status, String message) {}
+
+    private record PageResult(List<JsonNode> items, Failure failure, boolean limited) {}
 
     /** Issues path-relative GETs through the shared GitHub transport. */
     private static final class HttpApiClient implements ApiClient {

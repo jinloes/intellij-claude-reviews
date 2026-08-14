@@ -16,6 +16,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,9 +47,34 @@ public final class PRNotificationService implements Disposable {
 
     private volatile ScheduledFuture<?> scheduledTask;
     private volatile PollStatus lastPollStatus = new PollStatus(0, null);
-    private final SeenPRSet seenSet = new SeenPRSet();
-    private final PendingReviewIndex pendingIndex = new PendingReviewIndex();
-    private final IntellijGitHubService githubService = IntellijGitHubService.getInstance();
+    private final Supplier<NotificationSettings> settingsSupplier;
+    private final NotificationSourceClient sourceClient;
+    private final SeenPRSet seenSet;
+    private final PendingReviewIndex pendingIndex;
+    private final BiConsumer<PullRequest, NotificationSource> notificationSink;
+
+    public PRNotificationService() {
+        this(
+                PRNotificationService::currentSettings,
+                new IntellijNotificationSourceClient(),
+                new SeenPRSet(),
+                new PendingReviewIndex(),
+                null);
+    }
+
+    PRNotificationService(
+            Supplier<NotificationSettings> settingsSupplier,
+            NotificationSourceClient sourceClient,
+            SeenPRSet seenSet,
+            PendingReviewIndex pendingIndex,
+            BiConsumer<PullRequest, NotificationSource> notificationSink) {
+        this.settingsSupplier = settingsSupplier;
+        this.sourceClient = sourceClient;
+        this.seenSet = seenSet;
+        this.pendingIndex = pendingIndex;
+        this.notificationSink =
+                notificationSink != null ? notificationSink : this::fireNotification;
+    }
 
     public static PRNotificationService getInstance() {
         return ApplicationManager.getApplication().getService(PRNotificationService.class);
@@ -111,32 +138,32 @@ public final class PRNotificationService implements Disposable {
     // Poll logic
     // -------------------------------------------------------------------------
 
-    private void poll() {
-        PluginSettings settings = PluginSettings.getInstance();
-        if (!settings.isNotificationsEnabled()) return;
+    void poll() {
+        NotificationSettings settings = settingsSupplier.get();
+        if (!settings.notificationsEnabled()) return;
 
         String pollError = null;
         List<PullRequest> reviewRequested = new ArrayList<>();
         List<PullRequest> starredPrs = new ArrayList<>();
 
-        if (settings.isNotifyReviewRequested()) {
+        if (settings.notifyReviewRequested()) {
             try {
-                reviewRequested.addAll(githubService.searchPRs(REVIEW_REQUESTED_QUERY));
+                reviewRequested.addAll(sourceClient.searchPRs(REVIEW_REQUESTED_QUERY));
             } catch (Exception e) {
                 log.warn("PR notification poll failed", e);
                 pollError = sanitizeError(e);
             }
         }
 
-        if (settings.isNotifyStarredRepos()) {
+        if (settings.notifyStarredRepos()) {
             try {
-                List<String> starred = githubService.getStarredRepos();
+                List<String> starred = sourceClient.getStarredRepos();
                 // Cap at 25 repos to avoid a huge search query
                 List<String> slice = starred.subList(0, Math.min(starred.size(), 25));
                 if (!slice.isEmpty()) {
                     String repoQ =
                             slice.stream().map(r -> "repo:" + r).collect(Collectors.joining(" "));
-                    starredPrs.addAll(githubService.searchPRs(buildStarredReposQuery(repoQ)));
+                    starredPrs.addAll(sourceClient.searchPRs(buildStarredReposQuery(repoQ)));
                 }
             } catch (Exception e) {
                 log.warn("PR notification poll failed", e);
@@ -145,6 +172,9 @@ public final class PRNotificationService implements Disposable {
         }
 
         recordPollStatus(pollError);
+        if (!seenSet.isSeeded() && pollError != null) {
+            return;
+        }
 
         List<Candidate> candidates = mergeCandidates(reviewRequested, starredPrs);
 
@@ -160,9 +190,14 @@ public final class PRNotificationService implements Disposable {
         for (Candidate c : candidates) {
             PullRequest pr = c.pr();
             if (!seenSet.contains(pr)) {
+                PendingReviewIndex.DraftState draftState =
+                        pendingIndex.draftState(pr.getOwner(), pr.getRepo(), pr.getNumber());
+                if (draftState == PendingReviewIndex.DraftState.UNAVAILABLE) {
+                    continue;
+                }
                 seenSet.add(pr);
-                if (!pendingIndex.hasDraft(pr.getOwner(), pr.getRepo(), pr.getNumber())) {
-                    fireNotification(pr, c.source());
+                if (draftState == PendingReviewIndex.DraftState.ABSENT) {
+                    notificationSink.accept(pr, c.source());
                 }
             }
         }
@@ -190,6 +225,17 @@ public final class PRNotificationService implements Disposable {
 
     record Candidate(PullRequest pr, NotificationSource source) {}
 
+    record NotificationSettings(
+            boolean notificationsEnabled,
+            boolean notifyReviewRequested,
+            boolean notifyStarredRepos) {}
+
+    interface NotificationSourceClient {
+        List<PullRequest> searchPRs(String query) throws Exception;
+
+        List<String> getStarredRepos() throws Exception;
+    }
+
     static String prKey(PullRequest pr) {
         return pr.getOwner() + "/" + pr.getRepo() + "#" + pr.getNumber();
     }
@@ -216,6 +262,29 @@ public final class PRNotificationService implements Disposable {
 
     static String buildStarredReposQuery(String repoQ) {
         return "is:open is:pr draft:false " + repoQ;
+    }
+
+    private static NotificationSettings currentSettings() {
+        PluginSettings settings = PluginSettings.getInstance();
+        return new NotificationSettings(
+                settings.isNotificationsEnabled(),
+                settings.isNotifyReviewRequested(),
+                settings.isNotifyStarredRepos());
+    }
+
+    private static final class IntellijNotificationSourceClient
+            implements NotificationSourceClient {
+        private final IntellijGitHubService githubService = IntellijGitHubService.getInstance();
+
+        @Override
+        public List<PullRequest> searchPRs(String query) throws Exception {
+            return githubService.searchPRs(query);
+        }
+
+        @Override
+        public List<String> getStarredRepos() throws Exception {
+            return githubService.getStarredRepos();
+        }
     }
 
     private void fireNotification(PullRequest pr, NotificationSource source) {

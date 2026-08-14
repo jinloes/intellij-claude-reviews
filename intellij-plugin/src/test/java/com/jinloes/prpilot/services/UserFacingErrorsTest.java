@@ -3,6 +3,7 @@ package com.jinloes.prpilot.services;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.jinloes.prpilot.model.ReviewProvider;
+import com.jinloes.prpilot.sidecar.pr.PrDiffResult;
 import java.io.IOException;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -29,14 +30,31 @@ class UserFacingErrorsTest {
         }
 
         @Test
-        void inaccessiblePullRequestsMapToAccountSwitchGuidance() {
+        void ambiguousNotFoundStatusPreservesBothPossibleCauses() {
+            String msg =
+                    UserFacingErrors.forGitHub(
+                            new IntellijGitHubService.GitHubOperationException(
+                                    PrDiffResult.STATUS_NOT_FOUND_OR_INACCESSIBLE,
+                                    "Pull request not found or inaccessible."),
+                            "load the PR diff");
+
+            assertThat(msg)
+                    .contains(
+                            "may not exist",
+                            "may not have access",
+                            "Verify the PR URL",
+                            "gh auth status");
+        }
+
+        @Test
+        void ambiguousNotFoundCopyIsNotSelectedFromUntypedProse() {
             String msg =
                     UserFacingErrors.forGitHub(
                             new IOException(
                                     "Pull request not found or inaccessible to the active gh account."),
                             "load the PR diff");
 
-            assertThat(msg).contains("active gh account", "gh auth status", "gh auth switch");
+            assertThat(msg).isEqualTo("Couldn't load the PR diff. Please retry.");
         }
     }
 

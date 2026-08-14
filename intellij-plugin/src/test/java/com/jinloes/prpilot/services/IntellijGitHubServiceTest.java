@@ -237,7 +237,7 @@ class IntellijGitHubServiceTest {
         }
 
         @Test
-        void surfacesANonOkStatusAsAnIoException() {
+        void preservesANonOkStatusInTheIoException() {
             IntellijGitHubService service =
                     serviceOver(
                             new StubEngine() {
@@ -408,8 +408,12 @@ class IntellijGitHubServiceTest {
                             });
 
             assertThatThrownBy(() -> service.getPRDiff("acme", "widgets", 42))
-                    .isInstanceOf(IOException.class)
-                    .hasMessage("slow down");
+                    .isInstanceOfSatisfying(
+                            IntellijGitHubService.GitHubOperationException.class,
+                            error -> {
+                                assertThat(error.status()).isEqualTo("rate_limited");
+                                assertThat(error).hasMessage("slow down");
+                            });
         }
     }
 }

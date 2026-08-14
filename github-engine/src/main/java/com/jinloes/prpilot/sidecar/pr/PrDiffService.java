@@ -86,7 +86,7 @@ public final class PrDiffService {
                             "network_error", "Unable to reach GitHub. Check your connection.");
             case NOT_FOUND ->
                     PrDiffResult.failure(
-                            "api_failed",
+                            PrDiffResult.STATUS_NOT_FOUND_OR_INACCESSIBLE,
                             "Pull request not found or inaccessible to the active gh account.");
             case API, TRANSIENT_API ->
                     PrDiffResult.failure("api_failed", "GitHub API request failed.");
@@ -138,13 +138,8 @@ public final class PrDiffService {
                         token,
                         GitHubHttpClient.ACCEPT_DIFF,
                         (statusCode, body) -> {
-                            if (statusCode == 401 || statusCode == 403)
-                                return Response.of(Status.UNAUTHENTICATED);
-                            if (statusCode == 429) return Response.of(Status.RATE_LIMITED);
-                            if (statusCode == 404) return Response.of(Status.NOT_FOUND);
                             if (statusCode < 200 || statusCode >= 300) {
-                                return Response.of(
-                                        statusCode >= 500 ? Status.TRANSIENT_API : Status.API);
+                                return Response.of(classifyFailure(statusCode));
                             }
                             return read(body, limitBytes);
                         });
@@ -177,6 +172,13 @@ public final class PrDiffService {
                 Thread.currentThread().interrupt();
             }
         }
+    }
+
+    static Status classifyFailure(int statusCode) {
+        if (statusCode == 401 || statusCode == 403) return Status.UNAUTHENTICATED;
+        if (statusCode == 429) return Status.RATE_LIMITED;
+        if (statusCode == 404) return Status.NOT_FOUND;
+        return statusCode >= 500 ? Status.TRANSIENT_API : Status.API;
     }
 
     private static boolean retryable(Status status) {

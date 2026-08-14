@@ -8,6 +8,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 class PrDiffServiceTest {
     @Test
@@ -115,7 +117,7 @@ class PrDiffServiceTest {
     }
 
     @Test
-    void explainsWhenTheActiveGhAccountCannotAccessThePullRequest() {
+    void preservesAmbiguityWhenThePullRequestIsNotFoundOrInaccessible() {
         PrDiffService service =
                 new PrDiffService(
                         hostname -> GitHubAuthService.TokenResolution.resolved("secret-token"),
@@ -124,8 +126,21 @@ class PrDiffServiceTest {
 
         PrDiffResult result = service.get(params("review"));
 
-        assertThat(result.status()).isEqualTo("api_failed");
+        assertThat(result.status()).isEqualTo(PrDiffResult.STATUS_NOT_FOUND_OR_INACCESSIBLE);
         assertThat(result.message()).contains("not found or inaccessible", "active gh account");
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "400, API",
+        "401, UNAUTHENTICATED",
+        "403, UNAUTHENTICATED",
+        "404, NOT_FOUND",
+        "429, RATE_LIMITED",
+        "500, TRANSIENT_API"
+    })
+    void classifiesHttpFailures(int statusCode, PrDiffService.Status expected) {
+        assertThat(PrDiffService.classifyFailure(statusCode)).isEqualTo(expected);
     }
 
     private static PrDiffService service(AtomicInteger requestedLimit) {

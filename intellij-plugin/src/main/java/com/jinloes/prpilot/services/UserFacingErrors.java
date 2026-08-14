@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import com.jinloes.prpilot.model.ReviewProvider;
+import com.jinloes.prpilot.sidecar.pr.PrDiffResult;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Collections;
@@ -16,7 +17,8 @@ public final class UserFacingErrors {
 
     private static final String TEMPLATE_RESOURCE = "user-facing-errors.yaml";
     private static final String TEMPLATE_GITHUB_AUTH_FAILED = "github_auth_failed";
-    private static final String TEMPLATE_GITHUB_ACCESS_FAILED = "github_access_failed";
+    private static final String TEMPLATE_GITHUB_NOT_FOUND_OR_INACCESSIBLE =
+            "github_not_found_or_inaccessible";
     private static final String TEMPLATE_PROVIDER_BINARY_MISSING = "provider_binary_missing";
     private static final String TEMPLATE_PROVIDER_NOT_INSTALLED = "provider_not_installed";
     private static final String TEMPLATE_REQUEST_TIMED_OUT = "request_timed_out";
@@ -75,8 +77,10 @@ public final class UserFacingErrors {
         String msg = normalize(e);
         String op = StringUtils.defaultIfBlank(operation, "complete this GitHub operation");
 
-        if (containsAny(msg, "not found or inaccessible", "active gh account")) {
-            return template(TEMPLATE_GITHUB_ACCESS_FAILED, Map.of());
+        if (e instanceof IntellijGitHubService.GitHubOperationException operationException
+                && PrDiffResult.STATUS_NOT_FOUND_OR_INACCESSIBLE.equals(
+                        operationException.status())) {
+            return template(TEMPLATE_GITHUB_NOT_FOUND_OR_INACCESSIBLE, Map.of());
         }
         if (containsAny(
                 msg,

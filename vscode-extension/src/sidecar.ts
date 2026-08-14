@@ -176,7 +176,7 @@ export interface SidecarWorktreeResult {
 }
 
 export interface SidecarPrDiffResult {
-    status: 'ok' | 'not_installed' | 'not_authenticated' | 'invalid_base_url' | 'invalid_request' | 'rate_limited' | 'network_error' | 'api_failed';
+    status: 'ok' | 'not_installed' | 'not_authenticated' | 'invalid_base_url' | 'invalid_request' | 'rate_limited' | 'network_error' | 'not_found_or_inaccessible' | 'api_failed';
     message: string;
     diff: string | null;
     truncated: boolean;
@@ -376,7 +376,10 @@ const PR_DETAIL_STATUSES = new Set<SidecarPrDetailResult['status']>([
     'network_error',
     'api_failed',
 ]);
-const PR_DIFF_STATUSES = new Set<SidecarPrDiffResult['status']>(PR_DETAIL_STATUSES);
+const PR_DIFF_STATUSES = new Set<SidecarPrDiffResult['status']>([
+    ...PR_DETAIL_STATUSES,
+    'not_found_or_inaccessible',
+]);
 
 const DRAFT_REVIEW_STATUSES = new Set<SidecarDraftReviewResult['status']>([
     'ok',
@@ -1229,12 +1232,16 @@ export class SidecarClient {
     }
 
     /** Removes a worktree created by {@link createWorktree}. Cleanup failure is logged, never thrown. */
-    async removeWorktree(gitRoot: string, worktreeDir: string): Promise<void> {
+    async removeWorktree(gitRoot: string, worktreeDir: string): Promise<boolean> {
         try {
-            await this.request('reviews/removeWorktree', { gitRoot, worktreeDir });
+            const value = await this.request('reviews/removeWorktree', { gitRoot, worktreeDir }) as { removed?: unknown };
+            if (value?.removed === true) return true;
+            console.warn(`[pr-pilot] Failed to remove worktree at ${worktreeDir}: engine reported cleanup failure`);
+            return false;
         } catch (err) {
             console.warn(`[pr-pilot] Failed to remove worktree at ${worktreeDir}:`,
                 err instanceof Error ? err.message : String(err));
+            return false;
         }
     }
 
