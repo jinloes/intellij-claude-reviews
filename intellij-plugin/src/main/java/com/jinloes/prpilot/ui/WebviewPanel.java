@@ -34,6 +34,7 @@ import com.jinloes.prpilot.review.ReviewOutcomeLog;
 import com.jinloes.prpilot.services.IntellijClaudeService;
 import com.jinloes.prpilot.services.IntellijGitHubService;
 import com.jinloes.prpilot.services.PendingReviewIndex;
+import com.jinloes.prpilot.services.PendingReviewIndexNotifications;
 import com.jinloes.prpilot.services.UserFacingErrors;
 import com.jinloes.prpilot.settings.PluginSettings;
 import com.jinloes.prpilot.settings.PluginSettingsConfigurable;
@@ -48,6 +49,7 @@ import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -285,6 +287,9 @@ public class WebviewPanel implements Disposable {
     private final ObjectMapper mapper =
             new ObjectMapper().disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
     private final PendingReviewIndex pendingIndex = new PendingReviewIndex();
+    private final Runnable pendingIndexRecoveryAction = this::reload;
+    private PendingReviewIndexNotifications.Registration pendingIndexRecoveryRegistration =
+            () -> {};
     private final IntellijClaudeService claudeService;
     private final GitWorktreeService worktreeService = new GitWorktreeService();
     private final IntellijGitHubService ghSvc = IntellijGitHubService.getInstance();
@@ -717,8 +722,20 @@ public class WebviewPanel implements Disposable {
                             // Check local index upfront (no network) so we can prefetch
                             // the current HEAD SHA in parallel if a staleness check is
                             // likely to be needed.
+                            Optional<List<PendingReviewIndex.Entry>> localEntries =
+                                    loadHealthyDraftEntries();
+                            if (localEntries.isEmpty()) {
+                                publishIfCurrentSelection(
+                                        key,
+                                        revision,
+                                        new ErrorMsg(
+                                                "reviewError",
+                                                key,
+                                                PendingReviewIndexNotifications.userMessage()));
+                                return;
+                            }
                             PendingReviewIndex.Entry localEntry =
-                                    pendingIndex.list().stream()
+                                    localEntries.orElseThrow().stream()
                                             .filter(
                                                     e ->
                                                             e.owner().equals(owner)
@@ -1435,9 +1452,7 @@ public class WebviewPanel implements Disposable {
         String title = pr != null ? pr.getTitle() : "";
         PendingReviewIndex.MutationResult indexResult =
                 pendingIndex.add(owner, repo, number, title, headSha);
-        if (indexResult != PendingReviewIndex.MutationResult.UPDATED) {
-            log.warn("Pending review index was not updated after saving draft: {}", indexResult);
-        }
+        reportPendingIndexMutation("saving draft", indexResult);
         GeneratedReview generated = generatedReviews.get(key);
         if (bridgeGeneratedResult != null && generated != null) {
             generatedReviews.put(
@@ -1491,10 +1506,7 @@ public class WebviewPanel implements Disposable {
         }
 
         PendingReviewIndex.MutationResult indexResult = pendingIndex.remove(owner, repo, number);
-        if (indexResult != PendingReviewIndex.MutationResult.UPDATED) {
-            log.warn(
-                    "Pending review index was not updated after submitting draft: {}", indexResult);
-        }
+        reportPendingIndexMutation("submitting draft", indexResult);
         GeneratedReview generated = generatedReviews.remove(key);
         if (generated != null) {
             recordReviewOutcome(generated.result(), lastResult, generated.metadata());
@@ -1568,9 +1580,7 @@ public class WebviewPanel implements Disposable {
         }
 
         PendingReviewIndex.MutationResult indexResult = pendingIndex.remove(owner, repo, number);
-        if (indexResult != PendingReviewIndex.MutationResult.UPDATED) {
-            log.warn("Pending review index was not updated after deleting draft: {}", indexResult);
-        }
+        reportPendingIndexMutation("deleting draft", indexResult);
         if (StringUtils.equals(pendingReviewId, reviewId)
                 && StringUtils.equals(pendingReviewKey, key)) {
             lastResult = null;
@@ -2107,8 +2117,14 @@ public class WebviewPanel implements Disposable {
             String currentRepo,
             boolean limited) {
         cachedPRs = prs;
+        Optional<List<PendingReviewIndex.Entry>> pendingEntries = loadHealthyDraftEntries();
+        if (pendingEntries.isEmpty()) {
+            pushSetupRequired(
+                    "draft_index_unavailable", PendingReviewIndexNotifications.userMessage());
+            return;
+        }
         Set<String> draftKeys =
-                pendingIndex.list().stream()
+                pendingEntries.orElseThrow().stream()
                         .map(e -> e.owner() + "/" + e.repo() + "#" + e.number())
                         .collect(java.util.stream.Collectors.toSet());
         List<WebviewPr> dtos =
@@ -2146,7 +2162,19 @@ public class WebviewPanel implements Disposable {
     }
 
     public void activatePr(PullRequest pr, String source) {
-        boolean hasReviewDraft = pendingIndex.hasDraft(pr.getOwner(), pr.getRepo(), pr.getNumber());
+        Optional<List<PendingReviewIndex.Entry>> pendingEntries = loadHealthyDraftEntries();
+        if (pendingEntries.isEmpty()) {
+            pushSetupRequired(
+                    "draft_index_unavailable", PendingReviewIndexNotifications.userMessage());
+            return;
+        }
+        boolean hasReviewDraft =
+                pendingEntries.orElseThrow().stream()
+                        .anyMatch(
+                                entry ->
+                                        entry.owner().equals(pr.getOwner())
+                                                && entry.repo().equals(pr.getRepo())
+                                                && entry.number() == pr.getNumber());
         if (cachedPRs.stream().anyMatch(existing -> isSamePr(existing, pr))) {
             cachedPRs =
                     cachedPRs.stream()
@@ -2159,6 +2187,36 @@ public class WebviewPanel implements Disposable {
             cachedPRs = next;
         }
         pushMessage(new ActivatePrMsg("activatePR", toWebviewPr(pr, hasReviewDraft), source));
+    }
+
+    static Optional<List<PendingReviewIndex.Entry>> healthyDraftEntries(
+            PendingReviewIndex.LoadResult result) {
+        return result.healthy() ? Optional.of(result.entries()) : Optional.empty();
+    }
+
+    private Optional<List<PendingReviewIndex.Entry>> loadHealthyDraftEntries() {
+        PendingReviewIndex.LoadResult result = pendingIndex.listResult();
+        observePendingIndex(result);
+        return healthyDraftEntries(result);
+    }
+
+    private void reportPendingIndexMutation(
+            String operation, PendingReviewIndex.MutationResult result) {
+        if (result == PendingReviewIndex.MutationResult.UPDATED) {
+            return;
+        }
+        log.warn("Pending review index was not updated after {}: {}", operation, result);
+        if (result == PendingReviewIndex.MutationResult.BLOCKED_CORRUPT) {
+            PendingReviewIndex.LoadResult loadResult = pendingIndex.listResult();
+            observePendingIndex(loadResult);
+        }
+    }
+
+    private void observePendingIndex(PendingReviewIndex.LoadResult result) {
+        pendingIndexRecoveryRegistration.close();
+        pendingIndexRecoveryRegistration =
+                PendingReviewIndexNotifications.observe(
+                        pendingIndex, result, pendingIndexRecoveryAction);
     }
 
     private static WebviewPr toWebviewPr(PullRequest pr, boolean hasReviewDraft) {
@@ -2203,6 +2261,7 @@ public class WebviewPanel implements Disposable {
             transition = transitionToSelection(null);
         }
         finishLifecycleTransition(transition);
+        pendingIndexRecoveryRegistration.close();
         HttpServer server = httpServer;
         if (server != null) {
             try {

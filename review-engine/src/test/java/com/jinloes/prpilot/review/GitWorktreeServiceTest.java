@@ -8,6 +8,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import org.apache.commons.io.FileUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -391,21 +393,30 @@ class GitWorktreeServiceTest {
 
         @Test
         void timeoutTerminatesAProcessThatKeepsOutputOpen() {
-            class HangingGitService extends GitWorktreeService {
-                private Process spawnedProcess;
-
-                @Override
-                Process startGitProcess(ProcessBuilder processBuilder) throws IOException {
-                    spawnedProcess = new ProcessBuilder("sh", "-c", "sleep 30").start();
-                    return spawnedProcess;
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            Process spawnedProcess;
+            try {
+                spawnedProcess = new ProcessBuilder("sh", "-c", "sleep 30").start();
+            } catch (IOException exception) {
+                throw new AssertionError(exception);
+            }
+            GitWorktreeService hangingService =
+                    new GitWorktreeService(
+                            new BoundedProcessRunner(
+                                    ignored -> spawnedProcess,
+                                    executor,
+                                    BoundedProcessRunner.DEFAULT_MAX_OUTPUT_BYTES));
+            try {
+                assertThatThrownBy(() -> hangingService.runGit(tmpDir, 1, "status"))
+                        .isInstanceOf(IOException.class)
+                        .hasMessageContaining("git status timed out after 1s");
+                assertThat(spawnedProcess.isAlive()).isFalse();
+            } finally {
+                executor.shutdownNow();
+                if (spawnedProcess.isAlive()) {
+                    spawnedProcess.destroyForcibly();
                 }
             }
-            HangingGitService hangingService = new HangingGitService();
-
-            assertThatThrownBy(() -> hangingService.runGit(tmpDir, 1, "status"))
-                    .isInstanceOf(IOException.class)
-                    .hasMessageContaining("git status timed out after 1s");
-            assertThat(hangingService.spawnedProcess.isAlive()).isFalse();
         }
     }
 }

@@ -222,17 +222,22 @@ class PRNotificationServiceTest {
             Path pendingFile = tempDir.resolve("corrupt-pending-prs.json");
             Files.writeString(pendingFile, "{broken", StandardCharsets.UTF_8);
             List<PullRequest> notified = new ArrayList<>();
+            int[] healthWarnings = {0};
             PRNotificationService service =
                     new PRNotificationService(
                             () -> new NotificationSettings(true, true, false),
                             source,
                             seenSet,
                             new PendingReviewIndex(pendingFile),
-                            (pullRequest, ignored) -> notified.add(pullRequest));
+                            (pullRequest, ignored) -> notified.add(pullRequest),
+                            (index, result) -> {
+                                if (!result.healthy()) healthWarnings[0]++;
+                            });
 
             service.poll();
 
             assertThat(notified).isEmpty();
+            assertThat(healthWarnings[0]).isEqualTo(1);
             assertThat(Files.readString(pendingFile, StandardCharsets.UTF_8)).isEqualTo("{broken");
 
             Files.delete(pendingFile);

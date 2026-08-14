@@ -6,6 +6,9 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -168,6 +171,47 @@ class PendingReviewIndexTest {
             assertThat(second.list()).hasSize(1);
             assertThat(second.list().get(0).number()).isEqualTo(7);
         }
+
+        @Test
+        void concurrentInstancesDoNotLoseOverlappingAdditions() throws Exception {
+            Path file = tempDir.resolve("pending-prs.json");
+            CountDownLatch firstLoaded = new CountDownLatch(1);
+            CountDownLatch allowFirstMutation = new CountDownLatch(1);
+            PendingReviewIndex first =
+                    new PendingReviewIndex(
+                            file,
+                            () -> {
+                                firstLoaded.countDown();
+                                try {
+                                    allowFirstMutation.await();
+                                } catch (InterruptedException exception) {
+                                    Thread.currentThread().interrupt();
+                                    throw new AssertionError(exception);
+                                }
+                            });
+            PendingReviewIndex second = new PendingReviewIndex(file);
+
+            CompletableFuture<PendingReviewIndex.MutationResult> firstMutation =
+                    CompletableFuture.supplyAsync(() -> first.add("owner", "repo", 1, "first", ""));
+            assertThat(firstLoaded.await(5, TimeUnit.SECONDS)).isTrue();
+            CompletableFuture<PendingReviewIndex.MutationResult> secondMutation =
+                    CompletableFuture.supplyAsync(
+                            () -> second.add("owner", "repo", 2, "second", ""));
+
+            try {
+                assertThat(secondMutation).isNotDone();
+            } finally {
+                allowFirstMutation.countDown();
+            }
+
+            assertThat(firstMutation.get(5, TimeUnit.SECONDS))
+                    .isEqualTo(PendingReviewIndex.MutationResult.UPDATED);
+            assertThat(secondMutation.get(5, TimeUnit.SECONDS))
+                    .isEqualTo(PendingReviewIndex.MutationResult.UPDATED);
+            assertThat(first.list())
+                    .extracting(PendingReviewIndex.Entry::number)
+                    .containsExactly(2, 1);
+        }
     }
 
     @Nested
@@ -205,6 +249,37 @@ class PendingReviewIndexTest {
 
             assertThat(Files.readString(file, StandardCharsets.UTF_8)).isEqualTo(truncated);
         }
+
+        @Test
+        void quarantinePreservesTheCorruptFileAndRestoresHealthyMutations() throws IOException {
+            Path file = tempDir.resolve("pending-prs.json");
+            String malformed = "{not-json";
+            Files.writeString(file, malformed, StandardCharsets.UTF_8);
+            PendingReviewIndex idx = new PendingReviewIndex(file);
+
+            PendingReviewIndex.QuarantineResult result = idx.quarantineCorruptFile();
+
+            assertThat(result.status()).isEqualTo(PendingReviewIndex.QuarantineStatus.QUARANTINED);
+            assertThat(result.quarantinedPath()).exists();
+            assertThat(Files.readString(result.quarantinedPath(), StandardCharsets.UTF_8))
+                    .isEqualTo(malformed);
+            assertThat(file).doesNotExist();
+            assertThat(idx.listResult().healthy()).isTrue();
+            assertThat(idx.add("owner", "repo", 1, "Title", "sha"))
+                    .isEqualTo(PendingReviewIndex.MutationResult.UPDATED);
+        }
+
+        @Test
+        void quarantineDoesNotMoveAHealthyIndex() {
+            PendingReviewIndex idx = index();
+            idx.add("owner", "repo", 1, "Title", "sha");
+
+            PendingReviewIndex.QuarantineResult result = idx.quarantineCorruptFile();
+
+            assertThat(result.status())
+                    .isEqualTo(PendingReviewIndex.QuarantineStatus.ALREADY_HEALTHY);
+            assertThat(idx.list()).hasSize(1);
+        }
     }
 
     @Nested
@@ -231,6 +306,28 @@ class PendingReviewIndexTest {
         void shortSavedAtIsNotTruncatedBeyondItsLength() {
             var entry = new PendingReviewIndex.Entry("o", "r", 1, "title", "2024-01", "sha");
             assertThat(entry.displayLabel()).contains("2024-01");
+        }
+
+        @Nested
+        class RecoveryRegistration {
+
+            @Test
+            void closeRemovesRecoveryActionForTheIndexPath() throws IOException {
+                Path file = tempDir.resolve("pending-prs.json");
+                Files.writeString(file, "{not-json", StandardCharsets.UTF_8);
+                PendingReviewIndex index = new PendingReviewIndex(file);
+                Runnable recoveryAction = () -> {};
+
+                PendingReviewIndexNotifications.Registration registration =
+                        PendingReviewIndexNotifications.observe(
+                                index, index.listResult(), recoveryAction);
+
+                assertThat(PendingReviewIndexNotifications.recoveryActionCount(file)).isEqualTo(1);
+
+                registration.close();
+
+                assertThat(PendingReviewIndexNotifications.recoveryActionCount(file)).isZero();
+            }
         }
     }
 }

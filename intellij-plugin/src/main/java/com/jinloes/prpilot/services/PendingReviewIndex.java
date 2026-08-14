@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -13,6 +14,8 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -31,15 +34,27 @@ public final class PendingReviewIndex {
                     .enable(SerializationFeature.INDENT_OUTPUT);
     private static final DateTimeFormatter SAVED_AT_FMT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+    private static final DateTimeFormatter QUARANTINE_AT_FMT =
+            DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
+    // Index instances are created by multiple project panels but share this process-wide file.
+    private static final ConcurrentMap<Path, Object> FILE_LOCKS = new ConcurrentHashMap<>();
 
     private final Path indexFile;
+    private final Object fileLock;
+    private final Runnable afterLoadBeforeMutation;
 
     public PendingReviewIndex() {
         this(Path.of(System.getProperty("user.home"), ".pr-pilot", "pending-prs.json"));
     }
 
     public PendingReviewIndex(Path indexFile) {
-        this.indexFile = indexFile;
+        this(indexFile, () -> {});
+    }
+
+    PendingReviewIndex(Path indexFile, Runnable afterLoadBeforeMutation) {
+        this.indexFile = indexFile.toAbsolutePath().normalize();
+        this.fileLock = FILE_LOCKS.computeIfAbsent(this.indexFile, ignored -> new Object());
+        this.afterLoadBeforeMutation = afterLoadBeforeMutation;
     }
 
     /**
@@ -87,7 +102,15 @@ public final class PendingReviewIndex {
         UNAVAILABLE
     }
 
-    private synchronized LoadResult loadEntries() {
+    public enum QuarantineStatus {
+        QUARANTINED,
+        ALREADY_HEALTHY,
+        FAILED
+    }
+
+    public record QuarantineResult(QuarantineStatus status, Path quarantinedPath, String error) {}
+
+    private LoadResult loadEntriesLocked() {
         if (!Files.exists(indexFile)) return new LoadResult(List.of(), null);
         try {
             String json = Files.readString(indexFile, StandardCharsets.UTF_8);
@@ -102,57 +125,100 @@ public final class PendingReviewIndex {
         }
     }
 
-    public synchronized LoadResult listResult() {
-        return loadEntries();
+    public LoadResult listResult() {
+        synchronized (fileLock) {
+            return loadEntriesLocked();
+        }
     }
 
-    public synchronized List<Entry> list() {
-        return loadEntries().entries();
+    List<Entry> list() {
+        synchronized (fileLock) {
+            return loadEntriesLocked().entries();
+        }
     }
 
-    public synchronized MutationResult add(
-            String owner, String repo, int number, String title, String headSha) {
-        LoadResult loaded = loadEntries();
-        if (!loaded.healthy()) return MutationResult.BLOCKED_CORRUPT;
-        List<Entry> entries = new ArrayList<>(loaded.entries());
-        entries.removeIf(
-                e -> e.owner().equals(owner) && e.repo().equals(repo) && e.number() == number);
-        entries.add(
-                0,
-                new Entry(
-                        owner,
-                        repo,
-                        number,
-                        title,
-                        LocalDateTime.now().format(SAVED_AT_FMT),
-                        headSha == null ? "" : headSha));
-        return save(entries) ? MutationResult.UPDATED : MutationResult.FAILED;
+    /**
+     * Moves a corrupt index aside without replacing it or touching remote drafts. A later read then
+     * starts from an empty, healthy local index.
+     */
+    public QuarantineResult quarantineCorruptFile() {
+        synchronized (fileLock) {
+            LoadResult loaded = loadEntriesLocked();
+            if (loaded.healthy() || !Files.exists(indexFile)) {
+                return new QuarantineResult(QuarantineStatus.ALREADY_HEALTHY, null, null);
+            }
+
+            Path quarantineFile = nextQuarantineFile();
+            try {
+                try {
+                    Files.move(indexFile, quarantineFile, StandardCopyOption.ATOMIC_MOVE);
+                } catch (AtomicMoveNotSupportedException exception) {
+                    Files.move(indexFile, quarantineFile);
+                }
+                return new QuarantineResult(QuarantineStatus.QUARANTINED, quarantineFile, null);
+            } catch (IOException exception) {
+                log.warn(
+                        "Failed to quarantine corrupt pending review index at {}",
+                        indexFile,
+                        exception);
+                return new QuarantineResult(
+                        QuarantineStatus.FAILED,
+                        null,
+                        "PR Pilot could not quarantine the corrupt draft index.");
+            }
+        }
     }
 
-    public synchronized boolean hasDraft(String owner, String repo, int number) {
+    public MutationResult add(String owner, String repo, int number, String title, String headSha) {
+        synchronized (fileLock) {
+            LoadResult loaded = loadEntriesLocked();
+            if (!loaded.healthy()) return MutationResult.BLOCKED_CORRUPT;
+            afterLoadBeforeMutation.run();
+            List<Entry> entries = new ArrayList<>(loaded.entries());
+            entries.removeIf(
+                    e -> e.owner().equals(owner) && e.repo().equals(repo) && e.number() == number);
+            entries.add(
+                    0,
+                    new Entry(
+                            owner,
+                            repo,
+                            number,
+                            title,
+                            LocalDateTime.now().format(SAVED_AT_FMT),
+                            headSha == null ? "" : headSha));
+            return save(entries) ? MutationResult.UPDATED : MutationResult.FAILED;
+        }
+    }
+
+    boolean hasDraft(String owner, String repo, int number) {
         return draftState(owner, repo, number) == DraftState.PRESENT;
     }
 
-    public synchronized DraftState draftState(String owner, String repo, int number) {
-        LoadResult loaded = loadEntries();
-        if (!loaded.healthy()) return DraftState.UNAVAILABLE;
-        boolean present =
-                loaded.entries().stream()
-                        .anyMatch(
-                                e ->
-                                        e.owner().equals(owner)
-                                                && e.repo().equals(repo)
-                                                && e.number() == number);
-        return present ? DraftState.PRESENT : DraftState.ABSENT;
+    public DraftState draftState(String owner, String repo, int number) {
+        synchronized (fileLock) {
+            LoadResult loaded = loadEntriesLocked();
+            if (!loaded.healthy()) return DraftState.UNAVAILABLE;
+            boolean present =
+                    loaded.entries().stream()
+                            .anyMatch(
+                                    e ->
+                                            e.owner().equals(owner)
+                                                    && e.repo().equals(repo)
+                                                    && e.number() == number);
+            return present ? DraftState.PRESENT : DraftState.ABSENT;
+        }
     }
 
-    public synchronized MutationResult remove(String owner, String repo, int number) {
-        LoadResult loaded = loadEntries();
-        if (!loaded.healthy()) return MutationResult.BLOCKED_CORRUPT;
-        List<Entry> entries = new ArrayList<>(loaded.entries());
-        entries.removeIf(
-                e -> e.owner().equals(owner) && e.repo().equals(repo) && e.number() == number);
-        return save(entries) ? MutationResult.UPDATED : MutationResult.FAILED;
+    public MutationResult remove(String owner, String repo, int number) {
+        synchronized (fileLock) {
+            LoadResult loaded = loadEntriesLocked();
+            if (!loaded.healthy()) return MutationResult.BLOCKED_CORRUPT;
+            afterLoadBeforeMutation.run();
+            List<Entry> entries = new ArrayList<>(loaded.entries());
+            entries.removeIf(
+                    e -> e.owner().equals(owner) && e.repo().equals(repo) && e.number() == number);
+            return save(entries) ? MutationResult.UPDATED : MutationResult.FAILED;
+        }
     }
 
     private boolean save(List<Entry> entries) {
@@ -170,5 +236,23 @@ public final class PendingReviewIndex {
             log.warn("Failed to save pending review index", e);
             return false;
         }
+    }
+
+    Path indexPath() {
+        return indexFile.toAbsolutePath().normalize();
+    }
+
+    private Path nextQuarantineFile() {
+        String baseName =
+                indexFile.getFileName()
+                        + ".corrupt-"
+                        + LocalDateTime.now().format(QUARANTINE_AT_FMT);
+        Path candidate = indexFile.resolveSibling(baseName);
+        int suffix = 2;
+        while (Files.exists(candidate)) {
+            candidate = indexFile.resolveSibling(baseName + "-" + suffix);
+            suffix++;
+        }
+        return candidate;
     }
 }

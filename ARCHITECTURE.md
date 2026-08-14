@@ -38,6 +38,7 @@ review-engine/                         – Plain Java 17 library owning Claude/C
     ClaudeService.java                – Shells out to `claude --print`; synchronous/blocking API; owns REVIEW_INSTRUCTIONS/CHAT_PERSONA prompt constants
     CopilotService.java               – Uses the official Copilot Java SDK to drive local `copilot`; mirrors ClaudeService API
     CancellationToken.java            – Operation-scoped cancellation state shared by the engine registry and provider resource owner
+    BoundedProcessRunner.java          – Shared bounded non-streaming subprocess lifecycle and dedicated output-drain executor
     CopilotModelDiscovery.java        – Runs `copilot help config` once per session and caches model list
     GitWorktreeService.java           – Creates/removes temporary git worktrees for PR branch reviews
     RepoGuidelinesReader.java         – Resolves/reads repo guidance docs (globs, bounded walk, size cap) behind the reviews/readGuidelines capability; sole owner of the default file list
@@ -52,6 +53,7 @@ intellij-plugin/                       – IntelliJ plugin host; depends on :cor
       IntellijClaudeService.java       – Adapts review-engine's ClaudeService/CopilotService to IntelliJ threading (pooled I/O, EDT callbacks)
       UserFacingErrors.java           – Maps runtime/network exceptions to actionable UI copy
       PendingReviewIndex.java         – Local JSON index of saved drafts (~/.pr-pilot/pending-prs.json)
+      PendingReviewIndexNotifications.java – Deduplicated corrupt-index warning and safe quarantine action
       SeenPRSet.java                  – Local JSON set of notified PR IDs (~/.pr-pilot/seen-prs.json)
       PRNotificationService.java
       PRNotificationStartup.java
@@ -225,6 +227,9 @@ The "Verify" and "Suggest fix" per-comment actions (`buildVerifyCommentPrompt`/`
 `core` is a plain Java 17 JVM module (Kotlin Multiplatform was removed once the `js` target and every shared model class had no reason to stay Kotlin — the review-engine extraction moved the JS target's last real consumers to the sidecar, and none of `PullRequest`/`ReviewResult`/`LineComment`/`ChatMessage`/`PRReviewRequest`/`ReviewProvider` ever exercised kotlinx.serialization's JSON encode/decode at runtime, so they were converted to plain Java classes with JavaBean-style getters/setters matching their prior Kotlin-generated method names exactly — no downstream call sites changed). The module's last Kotlin file (a unified diff parser) was later converted to Java too for the same reason, then removed entirely once it was found to have no production callers — actual diff parsing/rendering happens client-side in the webview via `react-diff-view`. `core` has zero IntelliJ dependencies. `intellij-plugin` also owns two IntelliJ-only local-file-index services (`PendingReviewIndex`, `SeenPRSet`, plain Java records/classes using Jackson) rather than `core`, since they are not shared with VS Code — the VS Code equivalent (`globalState`, see Notification parity below) is a different persistence mechanism entirely, so there is no cross-host code-sharing benefit to keeping them in `core`. `github-engine` is a plain Java 17 library with no Spring or IDE APIs; both `intellij-plugin` and `sidecar` depend on it. `review-engine` is a plain Java 17 library owning Claude/Copilot CLI invocation, prompt building, and review-JSON parsing (`ClaudeService`, `CopilotService`, `CopilotModelDiscovery`, `GitWorktreeService`); both `intellij-plugin` and `sidecar` depend on it, so AI review generation has exactly one JVM implementation rather than being duplicated per host. `review-engine` depends on `core` only for shared models. `intellij-plugin` also depends on `core` and no longer needs `jackson-module-kotlin`/`KotlinModule` now that `core`'s models are plain Java.
 
 `sidecar` is a Java 17 Spring Boot application configured with `WebApplicationType.NONE`; it is not an HTTP server. Its protocol uses bounded `Content-Length`-framed UTF-8 JSON-RPC over standard input/output. Standard output must contain protocol frames only—diagnostics belong on standard error. GitHub, PR, repository, and review behavior belongs in `github-engine`/`review-engine`; Spring remains only the sidecar composition and lifecycle layer.
+
+### Pending review index coordination
+`PendingReviewIndex` instances are per caller, but their default `~/.pr-pilot/pending-prs.json` is process-global. All reads, mutations, and corrupt-file quarantine operations therefore synchronize on a static lock keyed by the normalized index path; do not restore instance-only synchronization or introduce a separate write path. The lock map intentionally lives for the IntelliJ application lifetime, matching the default index lifetime, while distinct temporary paths remain independent test seams. Recovery callbacks are likewise path-scoped, but a `WebviewPanel` must close its registration on disposal so its bound reload callback cannot outlive the project.
 
 ### Engine capability boundary (test-enforced host parity)
 Each engine declares its complete capability surface as one interface — `GitHubEngineApi` in `github-engine`, `ReviewEngineApi` in `review-engine`, both in package `com.jinloes.prpilot.engine`. Each carries an `RPC_METHODS` map from Java method name to JSON-RPC wire name, and `StdioJsonRpcServer` registers a handler per entry (via a `Map<String, MethodHandler>` registry rather than a `switch`, so the registered set is introspectable).
@@ -492,6 +497,7 @@ IntelliJ-only (`intellij-plugin`'s `PendingReviewIndex`/`SeenPRSet`); VS Code pe
 | Path | Purpose |
 |------|---------|
 | `~/.pr-pilot/pending-prs.json` | Index of PRs with saved drafts (owner, repo, number, title, savedAt, headSha) |
+| `~/.pr-pilot/pending-prs.json.corrupt-<timestamp>` | User-triggered quarantine copy of an unreadable draft index; GitHub drafts are unchanged |
 | `~/.pr-pilot/seen-prs.json` | Set of `owner/repo#number` strings already notified about |
 | `~/.pr-pilot/review-outcomes.jsonl` | Append-only outcome log: one JSON object per generated/submitted comment (`ReviewOutcomeLog`, engine-owned), written by both hosts on submit |
 

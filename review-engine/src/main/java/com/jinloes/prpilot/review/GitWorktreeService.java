@@ -4,13 +4,10 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.regex.Pattern;
-import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,9 +26,18 @@ import org.slf4j.LoggerFactory;
 public class GitWorktreeService {
 
     private static final Logger log = LoggerFactory.getLogger(GitWorktreeService.class);
+    private final BoundedProcessRunner processRunner;
 
     /** Abbreviated or full hex object name; anything else is never passed to git as a revision. */
     private static final Pattern HEX_OBJECT_NAME = Pattern.compile("[0-9a-fA-F]{7,64}");
+
+    public GitWorktreeService() {
+        this(new BoundedProcessRunner());
+    }
+
+    GitWorktreeService(BoundedProcessRunner processRunner) {
+        this.processRunner = processRunner;
+    }
 
     /**
      * Walks up from {@code startDir} to find the git repository root — the closest ancestor
@@ -254,55 +260,19 @@ public class GitWorktreeService {
         pb.environment().put("HOME", System.getProperty("user.home", "/"));
         String existingPath = pb.environment().getOrDefault("PATH", "");
         pb.environment().put("PATH", "/opt/homebrew/bin:/usr/local/bin:" + existingPath);
-        Process process = startGitProcess(pb);
-        CompletableFuture<String> outputFuture =
-                CompletableFuture.supplyAsync(
-                        () -> {
-                            try {
-                                return IOUtils.toString(
-                                        process.getInputStream(),
-                                        java.nio.charset.StandardCharsets.UTF_8);
-                            } catch (IOException e) {
-                                throw new java.io.UncheckedIOException(e);
-                            }
-                        });
-        boolean finished;
         try {
-            finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            process.destroyForcibly();
-            outputFuture.cancel(true);
-            Thread.currentThread().interrupt();
-            throw new IOException("git " + args[0] + " interrupted", e);
-        }
-        if (!finished) {
-            process.destroyForcibly();
-            try {
-                process.waitFor(5, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-            outputFuture.cancel(true);
-            throw new IOException("git " + args[0] + " timed out after " + timeoutSeconds + "s");
-        }
-        try {
-            return new GitResult(process.exitValue(), outputFuture.get(5, TimeUnit.SECONDS));
-        } catch (ExecutionException e) {
-            Throwable cause = e.getCause();
-            if (cause instanceof java.io.UncheckedIOException unchecked) {
-                throw unchecked.getCause();
-            }
-            throw new IOException("Failed to read git " + args[0] + " output", cause);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException("git " + args[0] + " interrupted", e);
+            BoundedProcessRunner.ProcessResult result =
+                    processRunner.run(pb, timeoutSeconds, TimeUnit.SECONDS);
+            String output =
+                    result.outputTruncated()
+                            ? result.output() + "\n...(process output truncated)"
+                            : result.output();
+            return new GitResult(result.exitCode(), output);
         } catch (TimeoutException e) {
-            outputFuture.cancel(true);
-            throw new IOException("Timed out reading git " + args[0] + " output", e);
+            throw new IOException("git " + args[0] + " timed out after " + timeoutSeconds + "s", e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("git " + args[0] + " interrupted", e);
         }
-    }
-
-    Process startGitProcess(ProcessBuilder processBuilder) throws IOException {
-        return processBuilder.start();
     }
 }

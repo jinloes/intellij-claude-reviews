@@ -26,6 +26,8 @@ public final class PrSupplementalService {
     static final int MAX_EXISTING_REVIEWS_CHARS = 12_000;
     private static final String CONTEXT_TRUNCATION_MARKER =
             "\n...(existing review context truncated)";
+    private static final String INLINE_COMMENTS_UNAVAILABLE_MARKER =
+            "(Inline review comments were unavailable.)";
     private static final Pattern SEGMENT = Pattern.compile("[A-Za-z0-9_.-]+");
 
     private final GitHubAuthService.TokenResolver tokenResolver;
@@ -185,13 +187,11 @@ public final class PrSupplementalService {
                         + params.number()
                         + "/comments";
         PageResult comments = getAllPages(session, commentsPath, MAX_EXISTING_REVIEW_COMMENTS);
-        if (comments.failure() != null) {
-            return ExistingReviewsResult.failure(
-                    comments.failure().status(), comments.failure().message());
-        }
+        boolean commentsUnavailable = comments.failure() != null;
+        List<JsonNode> commentItems = commentsUnavailable ? List.of() : comments.items();
 
         Map<String, List<JsonNode>> commentsByReview = new HashMap<>();
-        for (JsonNode comment : comments.items()) {
+        for (JsonNode comment : commentItems) {
             JsonNode reviewId = comment.path("pull_request_review_id");
             if (!reviewId.canConvertToLong()) continue;
             commentsByReview
@@ -219,16 +219,21 @@ public final class PrSupplementalService {
             appendComments(lines, commentsByReview.getOrDefault(id, List.of()));
             lines.add("");
         }
-        if (reviews.limited() || comments.limited()) {
+        if (commentsUnavailable) {
+            lines.add(0, INLINE_COMMENTS_UNAVAILABLE_MARKER);
+            lines.add(1, "");
+        }
+        if (reviews.limited() || (!commentsUnavailable && comments.limited())) {
             lines.add("Existing review context limit reached; additional items may be omitted.");
         }
-        return ExistingReviewsResult.success(capContext(String.join("\n", lines).trim()));
+        return ExistingReviewsResult.success(
+                capContext(String.join("\n", lines).trim()), commentsUnavailable);
     }
 
     private PageResult getAllPages(Session session, String basePath, int maxItems) {
         List<JsonNode> items = new ArrayList<>();
         boolean limited = false;
-        for (int page = 1; items.size() < maxItems; page++) {
+        for (int page = 1; ; page++) {
             String separator = basePath.contains("?") ? "&" : "?";
             String path = basePath + separator + "per_page=" + PAGE_SIZE + "&page=" + page;
             GitHubResponse response = client.get(session.apiBase(), session.token(), path);
@@ -250,6 +255,10 @@ public final class PrSupplementalService {
                         false);
             }
             int remaining = maxItems - items.size();
+            if (remaining == 0) {
+                limited = !pageItems.isEmpty();
+                break;
+            }
             for (JsonNode item : pageItems) {
                 if (items.size() >= maxItems) {
                     limited = true;
@@ -258,10 +267,7 @@ public final class PrSupplementalService {
                 items.add(item);
             }
             if (pageItems.size() > remaining) limited = true;
-            if (items.size() >= maxItems) {
-                if (pageItems.size() == PAGE_SIZE) limited = true;
-                break;
-            }
+            if (limited) break;
             if (pageItems.size() < PAGE_SIZE) break;
         }
         return new PageResult(List.copyOf(items), null, limited);

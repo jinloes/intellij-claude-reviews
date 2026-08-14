@@ -14,6 +14,7 @@ import com.jinloes.prpilot.ui.PRToolWindowFactory;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
@@ -52,6 +53,8 @@ public final class PRNotificationService implements Disposable {
     private final SeenPRSet seenSet;
     private final PendingReviewIndex pendingIndex;
     private final BiConsumer<PullRequest, NotificationSource> notificationSink;
+    private final BiConsumer<PendingReviewIndex, PendingReviewIndex.LoadResult>
+            pendingIndexHealthObserver;
 
     public PRNotificationService() {
         this(
@@ -59,7 +62,8 @@ public final class PRNotificationService implements Disposable {
                 new IntellijNotificationSourceClient(),
                 new SeenPRSet(),
                 new PendingReviewIndex(),
-                null);
+                null,
+                PendingReviewIndexNotifications::observe);
     }
 
     PRNotificationService(
@@ -68,12 +72,30 @@ public final class PRNotificationService implements Disposable {
             SeenPRSet seenSet,
             PendingReviewIndex pendingIndex,
             BiConsumer<PullRequest, NotificationSource> notificationSink) {
+        this(
+                settingsSupplier,
+                sourceClient,
+                seenSet,
+                pendingIndex,
+                notificationSink,
+                PendingReviewIndexNotifications::observe);
+    }
+
+    PRNotificationService(
+            Supplier<NotificationSettings> settingsSupplier,
+            NotificationSourceClient sourceClient,
+            SeenPRSet seenSet,
+            PendingReviewIndex pendingIndex,
+            BiConsumer<PullRequest, NotificationSource> notificationSink,
+            BiConsumer<PendingReviewIndex, PendingReviewIndex.LoadResult>
+                    pendingIndexHealthObserver) {
         this.settingsSupplier = settingsSupplier;
         this.sourceClient = sourceClient;
         this.seenSet = seenSet;
         this.pendingIndex = pendingIndex;
         this.notificationSink =
                 notificationSink != null ? notificationSink : this::fireNotification;
+        this.pendingIndexHealthObserver = pendingIndexHealthObserver;
     }
 
     public static PRNotificationService getInstance() {
@@ -177,6 +199,11 @@ public final class PRNotificationService implements Disposable {
         }
 
         List<Candidate> candidates = mergeCandidates(reviewRequested, starredPrs);
+        PendingReviewIndex.LoadResult pendingEntries = pendingIndex.listResult();
+        pendingIndexHealthObserver.accept(pendingIndex, pendingEntries);
+        if (!pendingEntries.healthy()) {
+            return;
+        }
 
         if (!seenSet.isSeeded()) {
             // First run: populate the seen set without showing any notifications
@@ -186,17 +213,17 @@ public final class PRNotificationService implements Disposable {
             return;
         }
 
+        Set<String> draftKeys =
+                pendingEntries.entries().stream()
+                        .map(entry -> entry.owner() + "/" + entry.repo() + "#" + entry.number())
+                        .collect(Collectors.toSet());
+
         // Notify about PRs that weren't seen before and have no in-progress draft
         for (Candidate c : candidates) {
             PullRequest pr = c.pr();
             if (!seenSet.contains(pr)) {
-                PendingReviewIndex.DraftState draftState =
-                        pendingIndex.draftState(pr.getOwner(), pr.getRepo(), pr.getNumber());
-                if (draftState == PendingReviewIndex.DraftState.UNAVAILABLE) {
-                    continue;
-                }
                 seenSet.add(pr);
-                if (draftState == PendingReviewIndex.DraftState.ABSENT) {
+                if (!draftKeys.contains(prKey(pr))) {
                     notificationSink.accept(pr, c.source());
                 }
             }

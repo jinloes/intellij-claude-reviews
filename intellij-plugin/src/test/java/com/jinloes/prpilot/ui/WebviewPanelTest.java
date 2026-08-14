@@ -7,10 +7,12 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.jinloes.prpilot.model.PullRequest;
 import com.jinloes.prpilot.model.ReviewProvider;
 import com.jinloes.prpilot.services.IntellijClaudeService;
+import com.jinloes.prpilot.services.PendingReviewIndex;
 import com.jinloes.prpilot.sidecar.pr.PrDetail;
 import java.awt.BorderLayout;
 import java.awt.Rectangle;
 import java.io.File;
+import java.util.List;
 import javax.swing.JPanel;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -18,6 +20,24 @@ import org.junit.jupiter.api.Test;
 class WebviewPanelTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Nested
+    class HealthyDraftEntries {
+
+        @Test
+        void keepsHealthyEmptyStateDistinctFromUnavailableState() {
+            var healthy =
+                    WebviewPanel.healthyDraftEntries(
+                            new PendingReviewIndex.LoadResult(List.of(), null));
+            var unavailable =
+                    WebviewPanel.healthyDraftEntries(
+                            new PendingReviewIndex.LoadResult(List.of(), "corrupt"));
+
+            assertThat(healthy).isPresent();
+            assertThat(healthy.orElseThrow()).isEmpty();
+            assertThat(unavailable).isEmpty();
+        }
+    }
 
     @Nested
     class WorktreeKey {

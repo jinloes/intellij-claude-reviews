@@ -195,6 +195,89 @@ class PrSupplementalServiceTest {
     }
 
     @Test
+    void preservesReviewBodiesWhenTheFirstCommentsPageFails() {
+        FakeClient client = new FakeClient();
+        client.responses.add(
+                ok(MAPPER.createArrayNode().add(review(2, "APPROVED", "sam")).toString()));
+        client.responses.add(new GitHubResponse(500, ""));
+
+        ExistingReviewsResult result =
+                service(client)
+                        .existingReviews(
+                                new PrSupplementalService.IdentityParams(
+                                        "https://github.com", "acme", "widgets", 42));
+
+        assertThat(result.status()).isEqualTo("ok");
+        assertThat(result.message()).contains("without inline comments");
+        assertThat(result.summary())
+                .contains("Review by @sam")
+                .contains("Overall: \"Overall\"")
+                .contains("(Inline review comments were unavailable.)");
+    }
+
+    @Test
+    void preservesReviewBodiesWhenALaterCommentsPageFails() {
+        FakeClient client = new FakeClient();
+        client.responses.add(
+                ok(MAPPER.createArrayNode().add(review(2, "APPROVED", "sam")).toString()));
+        ArrayNode fullCommentsPage = MAPPER.createArrayNode();
+        for (int i = 0; i < 100; i++) {
+            fullCommentsPage.add(comment(2, "src/File" + i + ".java", i + 1, "Comment"));
+        }
+        client.responses.add(ok(fullCommentsPage.toString()));
+        client.responses.add(new GitHubResponse(500, ""));
+
+        ExistingReviewsResult result =
+                service(client)
+                        .existingReviews(
+                                new PrSupplementalService.IdentityParams(
+                                        "https://github.com", "acme", "widgets", 42));
+
+        assertThat(result.status()).isEqualTo("ok");
+        assertThat(result.summary())
+                .contains("Review by @sam")
+                .doesNotContain("src/File0.java")
+                .contains("(Inline review comments were unavailable.)");
+    }
+
+    @Test
+    void exactReviewCapIsNotReportedAsTruncated() {
+        FakeClient client = new FakeClient();
+        client.responses.add(ok(reviewPage(1, 100, "PENDING").toString()));
+        client.responses.add(ok(reviewPage(101, 100, "PENDING").toString()));
+        client.responses.add(ok("[]"));
+        client.responses.add(ok("[]"));
+
+        ExistingReviewsResult result =
+                service(client)
+                        .existingReviews(
+                                new PrSupplementalService.IdentityParams(
+                                        "https://github.com", "acme", "widgets", 42));
+
+        assertThat(result.status()).isEqualTo("ok");
+        assertThat(result.summary()).doesNotContain("additional items may be omitted");
+        assertThat(client.paths.get(2)).endsWith("reviews?per_page=100&page=3");
+    }
+
+    @Test
+    void reviewCapPlusOneIsReportedAsTruncated() {
+        FakeClient client = new FakeClient();
+        client.responses.add(ok(reviewPage(1, 100, "PENDING").toString()));
+        client.responses.add(ok(reviewPage(101, 100, "PENDING").toString()));
+        client.responses.add(ok(reviewPage(201, 1, "PENDING").toString()));
+        client.responses.add(ok("[]"));
+
+        ExistingReviewsResult result =
+                service(client)
+                        .existingReviews(
+                                new PrSupplementalService.IdentityParams(
+                                        "https://github.com", "acme", "widgets", 42));
+
+        assertThat(result.status()).isEqualTo("ok");
+        assertThat(result.summary()).contains("additional items may be omitted");
+    }
+
+    @Test
     void capsRenderedExistingReviewContext() {
         FakeClient client = new FakeClient();
         client.responses.add(
@@ -237,6 +320,14 @@ class PrSupplementalServiceTest {
         review.put("submitted_at", "2026-07-22T01:00:00Z");
         review.putObject("user").put("login", reviewer);
         return review;
+    }
+
+    private static ArrayNode reviewPage(int firstId, int count, String state) {
+        ArrayNode reviews = MAPPER.createArrayNode();
+        for (int i = 0; i < count; i++) {
+            reviews.add(review(firstId + i, state, "reviewer-" + (firstId + i)));
+        }
+        return reviews;
     }
 
     private static ObjectNode comment(long reviewId, String path, int line, String body) {
