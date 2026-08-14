@@ -195,7 +195,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "Additional guidance files (literal relative paths or globs like `**/style.md`, `.review/ai-agent/*.md`) read from the review working directory and folded into the model's repo-guidelines context. Entries are prioritized and added to the shared engine defaults: AGENTS.md, CLAUDE.md, Claude rules, GitHub Copilot instructions, and contribution guides."
+          "description": "Saved for future trusted base-commit guidance. These paths are not currently applied to reviews."
         },
         "pr-pilot.reviewGuidanceProfiles": {
           "type": "array",
@@ -217,7 +217,7 @@
               }
             }
           },
-          "description": "Named reusable review-guidance profiles. Manage these from PR Pilot Settings; each profile saves focus areas, custom instructions, and additional guidance file paths/globs that augment the shared defaults."
+          "description": "Named reusable review-guidance profiles. Focus areas and custom instructions are applied; saved guidance file paths/globs are retained for future trusted base-commit support but are not currently applied."
         },
         "pr-pilot.activeReviewGuidanceProfileId": {
           "type": "string",

@@ -1,7 +1,7 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Fragment, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { parseDiff, isDelete, isInsert } from 'react-diff-view'
+import { isDelete, isInsert } from 'react-diff-view'
 import type { ChangeData, FileData, HunkData } from 'react-diff-view'
 import { Check, ChevronDown, ChevronUp, Pencil, Plus, Search, ShieldCheck, Sparkles, Trash2, X } from 'lucide-react'
 import hljs from 'highlight.js/lib/core'
@@ -71,6 +71,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -92,6 +93,7 @@ import {
 } from '@/components/ui/select'
 import type { LineComment } from '@/bridge/types'
 import { cn } from '@/lib/utils'
+import { parseDiffSafely } from '@/lib/diffParse'
 import {
   buildDiffFileNavItems,
   buildDiffFileTree,
@@ -179,6 +181,7 @@ export function DiffViewer({
   const scrollParentRef = useRef<HTMLElement | null>(null)
   const [activeFilePath, setActiveFilePath] = useState('')
   const [pendingScrollPath, setPendingScrollPath] = useState<string | null>(null)
+  const [rawDiffCopied, setRawDiffCopied] = useState(false)
 
   const openSearch = useCallback(() => {
     setSearchOpen(true)
@@ -222,14 +225,8 @@ export function DiffViewer({
     matches[idx]?.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest' })
   }, [searchCursor, searchQuery, matchCount])
 
-  const files = useMemo<FileData[]>(() => {
-    if (!diff) return []
-    try {
-      return parseDiff(diff)
-    } catch {
-      return []
-    }
-  }, [diff])
+  const parseResult = useMemo(() => parseDiffSafely(diff), [diff])
+  const files: FileData[] = parseResult.files
 
   const totalChanges = files.reduce(
     (sum, f) => sum + f.hunks.reduce((s, h) => s + h.changes.length, 0),
@@ -341,7 +338,37 @@ export function DiffViewer({
     target?.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest' })
   }, [comments, focusedCommentIdx, truncating])
 
-  if (files.length === 0) return null
+  if (parseResult.status === 'empty') return null
+  if (parseResult.status === 'unrenderable') {
+    return (
+      <div className="p-4">
+        <Alert variant="destructive">
+          <AlertTitle>PR Pilot could not render this diff</AlertTitle>
+          <AlertDescription>
+            The diff is non-empty but uses an unsupported or malformed format. Review the raw diff before submitting.
+          </AlertDescription>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                void navigator.clipboard.writeText(diff).then(
+                  () => setRawDiffCopied(true),
+                  () => undefined,
+                )
+              }}
+            >
+              {rawDiffCopied ? 'Copied raw diff' : 'Copy raw diff'}
+            </Button>
+          </div>
+          <details className="mt-3">
+            <summary className="cursor-pointer text-sm font-medium">Show raw diff</summary>
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre rounded bg-muted p-3 text-xs text-foreground">{diff}</pre>
+          </details>
+        </Alert>
+      </div>
+    )
+  }
 
   const activeFile = allNavItems.find((item) => item.displayPath === activeFilePath)
     ?? visibleNavItems.find((item) => item.displayPath === activeFilePath)

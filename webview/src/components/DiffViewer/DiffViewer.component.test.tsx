@@ -57,6 +57,24 @@ describe('DiffViewer', () => {
     expect(screen.getByTestId('diff-current-file-path')).toHaveTextContent('src/auth.ts')
   })
 
+  it('renders nothing for a truly empty diff', () => {
+    const { container } = render(<DiffViewer diff="" comments={[]} />)
+
+    expect(container).toBeEmptyDOMElement()
+  })
+
+  it('shows an actionable warning and exposes raw content for an unrenderable diff', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    render(<DiffViewer diff="not a unified diff" comments={[]} />)
+
+    expect(screen.getByRole('alert')).toHaveTextContent('PR Pilot could not render this diff')
+    fireEvent.click(screen.getByRole('button', { name: 'Copy raw diff' }))
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('not a unified diff'))
+    expect(screen.getByRole('button', { name: 'Copied raw diff' })).toBeVisible()
+  })
+
   it('jumps to the selected file from the tree and updates the current-file indicator', async () => {
     render(
       <div data-testid="review-scroll-body" style={{ overflowY: 'auto', maxHeight: '400px' }}>

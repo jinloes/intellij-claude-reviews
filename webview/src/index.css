@@ -30,6 +30,14 @@
     --status-issue: 0 65% 38%;
     --status-suggestion: 32 90% 29%;
     --status-note: 204 85% 32%;
+    --diff-add-foreground: 142 68% 25%;
+    --diff-add-background: 142 55% 94%;
+    --diff-add-gutter: 142 48% 90%;
+    --diff-add-border: 142 45% 38%;
+    --diff-delete-foreground: 0 65% 38%;
+    --diff-delete-background: 0 70% 95%;
+    --diff-delete-gutter: 0 62% 91%;
+    --diff-delete-border: 0 58% 44%;
     --syntax-keyword: 201 96% 26%;
     --syntax-string: 142 72% 24%;
     --syntax-comment: 215 20% 35%;
@@ -68,6 +76,14 @@
     --status-issue: 0 70% 60%;
     --status-suggestion: 38 90% 58%;
     --status-note: 204 85% 62%;
+    --diff-add-foreground: 142 65% 62%;
+    --diff-add-background: 142 52% 9%;
+    --diff-add-gutter: 142 52% 12%;
+    --diff-add-border: 142 45% 42%;
+    --diff-delete-foreground: 0 72% 68%;
+    --diff-delete-background: 0 65% 10%;
+    --diff-delete-gutter: 0 65% 13%;
+    --diff-delete-border: 0 58% 48%;
     --syntax-keyword: 198 93% 74%;
     --syntax-string: 142 69% 74%;
     --syntax-comment: 215 20% 65%;
@@ -84,6 +100,14 @@
     --border: 0 0% 50%;
     --input: 0 0% 55%;
     --ring: 48 100% 50%;
+    --diff-add-foreground: var(--foreground);
+    --diff-add-background: var(--background);
+    --diff-add-gutter: var(--background);
+    --diff-add-border: var(--foreground);
+    --diff-delete-foreground: var(--foreground);
+    --diff-delete-background: var(--background);
+    --diff-delete-gutter: var(--background);
+    --diff-delete-border: var(--foreground);
   }
 }
 

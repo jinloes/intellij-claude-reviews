@@ -129,6 +129,18 @@ test('buildSettingsHtml renders reusable review-guidance profile controls', () =
     assert.match(html, /activeProfileId: activeGuidanceProfileId/);
     assert.match(html, /msg\.requestId !== latestSaveRequestId/);
     assert.doesNotMatch(html, /save\('activeReviewGuidanceProfileId'/);
+    assert.match(html, /id="guidanceGlobs"[^>]*disabled/);
+    assert.match(html, /not currently applied/);
+});
+
+test('buildSettingsHtml exposes notification health, retry, and dependent controls', () => {
+    const html = buildSettingsHtml('csp', 'n');
+
+    assert.match(html, /id="notificationHealth"/);
+    assert.match(html, /id="retryNotifications"/);
+    assert.match(html, /type: 'retryNotifications'/);
+    assert.match(html, /applyNotificationVisibility\(state\.notificationsEnabled\)/);
+    assert.match(html, /Notification polling failed:/);
 });
 
 test('buildSettingsHtml lists the Claude model presets and effort levels', () => {

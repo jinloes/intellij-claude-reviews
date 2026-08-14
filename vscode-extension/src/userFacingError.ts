@@ -13,6 +13,7 @@ type ErrorContext =
 
 type TemplateKey =
     | 'github_auth_failed'
+    | 'github_access_failed'
     | 'provider_binary_missing'
     | 'provider_not_installed'
     | 'request_timed_out'
@@ -80,6 +81,9 @@ export function providerNotInstalledMessage(provider: 'claude' | 'copilot'): str
 export function toUserFacingError(err: unknown, context: ErrorContext): string {
     const msg = messageOf(err);
 
+    if (includesAny(msg, ['not found or inaccessible', 'active gh account'])) {
+        return template('github_access_failed', {});
+    }
     if (includesAny(msg, ['no github token configured', 'gh auth', 'authentication', 'unauthorized', 'forbidden'])) {
         return template('github_auth_failed', { auth_command: 'gh auth login' });
     }

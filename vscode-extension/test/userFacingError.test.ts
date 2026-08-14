@@ -8,6 +8,16 @@ test('maps GitHub auth failures to gh auth guidance', () => {
   assert.match(msg, /gh auth login/i);
 });
 
+test('maps inaccessible pull requests to account-switch guidance', () => {
+  const msg = toUserFacingError(
+    new Error('Pull request not found or inaccessible to the active gh account.'),
+    'load PR details',
+  );
+  assert.match(msg, /active gh account/i);
+  assert.match(msg, /gh auth status/i);
+  assert.match(msg, /gh auth switch/i);
+});
+
 test('maps provider binary missing errors to install guidance', () => {
   const msg = toUserFacingError(new Error('Cannot run program "copilot": error=2'), 'generate review');
   assert.match(msg, /copilot/i);

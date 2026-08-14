@@ -84,6 +84,10 @@ public final class PrDiffService {
             case NETWORK ->
                     PrDiffResult.failure(
                             "network_error", "Unable to reach GitHub. Check your connection.");
+            case NOT_FOUND ->
+                    PrDiffResult.failure(
+                            "api_failed",
+                            "Pull request not found or inaccessible to the active gh account.");
             case API, TRANSIENT_API ->
                     PrDiffResult.failure("api_failed", "GitHub API request failed.");
         };
@@ -117,6 +121,7 @@ public final class PrDiffService {
         RATE_LIMITED,
         NETWORK,
         TRANSIENT_API,
+        NOT_FOUND,
         API
     }
 
@@ -136,6 +141,7 @@ public final class PrDiffService {
                             if (statusCode == 401 || statusCode == 403)
                                 return Response.of(Status.UNAUTHENTICATED);
                             if (statusCode == 429) return Response.of(Status.RATE_LIMITED);
+                            if (statusCode == 404) return Response.of(Status.NOT_FOUND);
                             if (statusCode < 200 || statusCode >= 300) {
                                 return Response.of(
                                         statusCode >= 500 ? Status.TRANSIENT_API : Status.API);

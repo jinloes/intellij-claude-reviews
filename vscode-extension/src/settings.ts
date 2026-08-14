@@ -15,6 +15,7 @@ import {
     normalizeReviewGuidanceProfiles,
     normalizeReviewGuidanceState,
 } from './reviewGuidanceProfiles';
+import { EMPTY_NOTIFICATION_HEALTH, type NotificationHealth } from './notifications';
 
 let panel: vscode.WebviewPanel | undefined;
 
@@ -22,7 +23,7 @@ function config(): vscode.WorkspaceConfiguration {
     return vscode.workspace.getConfiguration('pr-pilot');
 }
 
-function readState(): SettingsState {
+function readState(notificationHealth: NotificationHealth = EMPTY_NOTIFICATION_HEALTH): SettingsState {
     const c = config();
     return {
         provider: normalizeProvider(c.get<string>('reviewProvider', 'claude')),
@@ -43,6 +44,7 @@ function readState(): SettingsState {
         notifyReviewRequested: c.get<boolean>('notifyReviewRequested', true),
         notifyStarredRepos: c.get<boolean>('notifyStarredRepos', false),
         notificationPollMinutes: c.get<number>('notificationPollMinutes', 5),
+        notificationHealth,
     };
 }
 
@@ -181,7 +183,12 @@ async function persistSetting(webview: vscode.Webview, msg: SettingsMessage): Pr
 }
 
 /** Opens (or reveals) the PR Pilot settings webview panel. */
-export function openSettings(context: vscode.ExtensionContext, sidecar: SidecarClient): void {
+export function openSettings(
+    context: vscode.ExtensionContext,
+    sidecar: SidecarClient,
+    getNotificationHealth: () => NotificationHealth = () => EMPTY_NOTIFICATION_HEALTH,
+    retryNotifications: () => Promise<void> = () => Promise.resolve(),
+): void {
     if (panel) {
         panel.reveal();
         return;
@@ -202,7 +209,7 @@ export function openSettings(context: vscode.ExtensionContext, sidecar: SidecarC
     };
 
     const sendInit = async () => {
-        const state = readState();
+        const state = readState(getNotificationHealth());
         const discovered = await copilot.listModels().catch(() => []);
         current.webview.postMessage({
             type: 'init',
@@ -240,6 +247,11 @@ export function openSettings(context: vscode.ExtensionContext, sidecar: SidecarC
                     message,
                     copilotModels: mergeCopilotModelOptions(discovered, state.reviewModelCopilot),
                 });
+                break;
+            }
+            case 'retryNotifications': {
+                await retryNotifications();
+                await sendInit();
                 break;
             }
             case 'testConnection': {

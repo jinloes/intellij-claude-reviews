@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import { examplePr, installHostFixture, pushHostMessage } from '../a11y/hostFixture'
+import { buildExampleFixPrompt, buildVerifyCommentPrompt } from '../src/components/ReviewPane/verifyPrompt'
 
 test.beforeEach(async ({ page }) => {
   await installHostFixture(page)
@@ -89,23 +90,7 @@ test('Verify with AI keeps review, chat, and footer usable in a constrained view
   await openDraftReview(page)
 
   await page.getByRole('button', { name: 'Verify with AI' }).click()
-  const expectedQuestion =
-    'Verify whether this draft review comment is supported by the provided context.\n\n' +
-    'Respond with:\n' +
-    '- Verdict: valid | invalid | unclear\n' +
-    '- Why: cite the changed lines or explain why the context does not support the comment\n' +
-    '- Action: keep | revise | delete\n' +
-    'If you choose revise, provide one replacement comment. Do not rely on code outside the provided context.'
-  const expectedContext =
-    'Draft review comment under verification:\n' +
-    'File: src/auth.ts\n' +
-    'Line: 2\n' +
-    'Type: issue\n' +
-    'Comment text: Explain this security behavior.\n' +
-    'Relevant diff excerpt:\n' +
-    '@@ -1,1 +1,2 @@\n' +
-    'export const ready = true\n' +
-    'export const accessible = true'
+  const expected = buildVerifyCommentPrompt(reviewComment, reviewDiff)
   await expect.poll(() => page.evaluate(() => {
     const fixture = (window as unknown as {
       __hostFixture: { outgoing: Array<Record<string, unknown>> }
@@ -115,8 +100,8 @@ test('Verify with AI keeps review, chat, and footer usable in a constrained view
     protocolVersion: 1,
     type: 'askClaude',
     operationId: expect.any(String),
-    context: expectedContext,
-    question: expectedQuestion,
+    context: expected.context,
+    question: expected.question,
   })])
 
   const chat = page.getByRole('region', { name: 'Chat' })
@@ -127,9 +112,9 @@ test('Verify with AI keeps review, chat, and footer usable in a constrained view
   await expect(body).toBeVisible()
   await expect(savedButton).toBeVisible()
   await expect(page.getByRole('textbox', { name: 'Ask about this pull request' })).toBeVisible()
-  await expect(page.getByTestId('chat-messages')).toContainText('Verify whether this draft review comment is supported by the provided context.')
-  await expect(page.getByTestId('chat-messages')).toContainText('Verdict: valid | invalid | unclear')
-  await expect(page.getByTestId('chat-messages')).toContainText('Action: keep | revise | delete')
+  await expect(page.getByTestId('chat-messages')).toContainText('Verify whether the draft review comment is supported by the reference data.')
+  await expect(page.getByTestId('chat-messages')).toContainText('"verdict":"valid|invalid|unclear"')
+  await expect(page.getByTestId('chat-messages')).toContainText('"action":"keep|revise|delete"')
 
   const geometry = await Promise.all([body.boundingBox(), chatPanel.boundingBox(), savedButton.boundingBox()])
   expect(geometry.every((box) => box !== null)).toBe(true)
@@ -173,30 +158,47 @@ test('wide tall Verify layout fills the viewport instead of collapsing to conten
   expect(savedBox!.y + savedBox!.height).toBeLessThanOrEqual(1_181)
 })
 
+test('narrow selected review keeps Save and submit controls reachable', async ({ page }) => {
+  for (const width of [320, 400]) {
+    await page.setViewportSize({ width, height: 568 })
+    await page.goto('/')
+    await openDraftReview(page)
+
+    for (const control of [
+      page.getByRole('button', { name: 'Saved', exact: true }),
+      page.getByRole('button', { name: 'Comment', exact: true }),
+      page.getByRole('button', { name: 'More submit options' }),
+    ]) {
+      const box = await control.boundingBox()
+      expect(box).not.toBeNull()
+      expect(box!.x).toBeGreaterThanOrEqual(0)
+      expect(box!.x + box!.width).toBeLessThanOrEqual(width)
+    }
+  }
+})
+
+test('persisted tall chat leaves the review body usable in a short viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 600, height: 500 })
+  await page.goto('/')
+  await page.evaluate(() => localStorage.setItem('claude-reviews:chat-height', '600'))
+  await page.reload()
+  await openDraftReview(page)
+  await page.getByRole('button', { name: 'Chat' }).click()
+
+  const body = await page.getByTestId('review-scroll-body').boundingBox()
+  const chat = await page.getByTestId('chat-panel').boundingBox()
+  expect(body).not.toBeNull()
+  expect(chat).not.toBeNull()
+  expect(body!.height).toBeGreaterThanOrEqual(200)
+  expect(chat!.height).toBeGreaterThan(0)
+})
+
 test('Suggest fix with AI sends an example-fix prompt with focused diff context', async ({ page }) => {
   await page.goto('/')
   await openDraftReview(page)
 
   await page.getByRole('button', { name: 'Suggest fix with AI' }).click()
-  const expectedQuestion =
-    'Generate an example code change that addresses this draft review comment using only the provided context.\n\n' +
-    'Respond with:\n' +
-    '- Approach: 1-2 concise bullets\n' +
-    '- Example patch: one fenced code block\n' +
-    '- Why this helps: cite the changed lines\n' +
-    '- Risks/assumptions\n' +
-    '- Test updates (if applicable)\n' +
-    'If the context is insufficient, say so explicitly instead of guessing and list what is missing.'
-  const expectedContext =
-    'Draft review comment requiring an example fix:\n' +
-    'File: src/auth.ts\n' +
-    'Line: 2\n' +
-    'Type: issue\n' +
-    'Comment text: Explain this security behavior.\n' +
-    'Relevant diff excerpt:\n' +
-    '@@ -1,1 +1,2 @@\n' +
-    'export const ready = true\n' +
-    'export const accessible = true'
+  const expected = buildExampleFixPrompt(reviewComment, reviewDiff)
   await expect.poll(() => page.evaluate(() => {
     const fixture = (window as unknown as {
       __hostFixture: { outgoing: Array<Record<string, unknown>> }
@@ -206,8 +208,8 @@ test('Suggest fix with AI sends an example-fix prompt with focused diff context'
     protocolVersion: 1,
     type: 'askClaude',
     operationId: expect.any(String),
-    context: expectedContext,
-    question: expectedQuestion,
+    context: expected.context,
+    question: expected.question,
   })])
 })
 

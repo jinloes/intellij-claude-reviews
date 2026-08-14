@@ -9,6 +9,7 @@
  */
 
 import type { ReviewGuidanceProfile } from './reviewGuidanceProfiles';
+import type { NotificationHealth } from './notifications';
 
 export type Provider = 'claude' | 'copilot';
 
@@ -54,6 +55,7 @@ export interface SettingsState {
     notifyReviewRequested: boolean;
     notifyStarredRepos: boolean;
     notificationPollMinutes: number;
+    notificationHealth: NotificationHealth;
 }
 
 export function normalizeProvider(value: unknown): Provider {
@@ -259,7 +261,7 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
         <button id="renameGuidanceProfile" class="secondary">Rename</button>
         <button id="deleteGuidanceProfile" class="secondary">Delete</button>
       </div>
-      <div class="hint">Save and reuse focus areas, custom instructions, and guidance files as one named profile.</div>
+      <div class="hint">Focus areas and custom instructions are applied. Saved guidance-file selections remain inactive until trusted base-commit support is available.</div>
     </div>
 
     <div class="field">
@@ -275,9 +277,9 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
     </div>
 
     <div class="field">
-      <label for="guidanceGlobs">Additional guidance files</label>
-      <textarea id="guidanceGlobs" rows="4" placeholder="One relative path or glob per line"></textarea>
-      <div class="hint">These paths are prioritized and added to shared defaults for AGENTS.md, CLAUDE.md, Claude rules, GitHub Copilot instructions, and contribution guides.</div>
+      <label for="guidanceGlobs">Additional guidance files (not currently applied)</label>
+      <textarea id="guidanceGlobs" rows="4" disabled aria-describedby="guidanceGlobsHint"></textarea>
+      <div class="hint" id="guidanceGlobsHint">Saved for future use. Re-enabling requires guidance resolved from the trusted base commit.</div>
     </div>
 
     <div class="field">
@@ -291,10 +293,14 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
 
     <div class="field">
       <label><input type="checkbox" id="notificationsEnabled" style="width:auto;margin-right:6px;">Enable background PR notifications</label>
-      <label><input type="checkbox" id="notifyReviewRequested" style="width:auto;margin-right:6px;">Notify when a review is requested from me</label>
-      <label><input type="checkbox" id="notifyStarredRepos" style="width:auto;margin-right:6px;">Notify for new PRs in starred repositories</label>
-      <label for="notificationPollMinutes">Notification polling interval (minutes)</label>
-      <input type="number" id="notificationPollMinutes" min="1" max="60" step="1">
+      <div id="notificationOptions">
+        <label><input type="checkbox" id="notifyReviewRequested" style="width:auto;margin-right:6px;">Notify when a review is requested from me</label>
+        <label><input type="checkbox" id="notifyStarredRepos" style="width:auto;margin-right:6px;">Notify for new PRs in starred repositories</label>
+        <label for="notificationPollMinutes">Notification polling interval (minutes)</label>
+        <input type="number" id="notificationPollMinutes" min="1" max="60" step="1">
+      </div>
+      <div id="notificationHealth" class="hint" role="status" aria-live="polite"></div>
+      <button id="retryNotifications" class="secondary" type="button">Retry notification poll</button>
       <div class="hint">Notification changes apply to the next polling cycle.</div>
     </div>
   </div>
@@ -320,6 +326,29 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
     $('claudeModelField').classList.toggle('hidden', isCopilot);
     $('copilotModelField').classList.toggle('hidden', !isCopilot);
     $('advancedCopilot').classList.toggle('hidden', !isCopilot);
+  }
+
+  function applyNotificationVisibility(enabled) {
+    for (const id of ['notifyReviewRequested', 'notifyStarredRepos', 'notificationPollMinutes', 'retryNotifications']) {
+      $(id).disabled = !enabled;
+    }
+    $('notificationOptions').style.opacity = enabled ? '1' : '0.6';
+  }
+
+  function renderNotificationHealth(health) {
+    const target = $('notificationHealth');
+    if (!state.notificationsEnabled) {
+      target.textContent = 'Notifications are disabled.';
+      return;
+    }
+    if (!health || health.status === 'never') {
+      target.textContent = 'No notification poll has run yet.';
+      return;
+    }
+    const when = health.lastAttemptAt ? ' Last checked ' + new Date(health.lastAttemptAt).toLocaleString() + '.' : '';
+    target.textContent = health.status === 'healthy'
+      ? 'Notifications are working.' + when
+      : 'Notification polling failed: ' + (health.message || 'Unknown error.') + when;
   }
 
   function renderCopilotModels(models, current) {
@@ -481,10 +510,19 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
   $('customInstructions').addEventListener('change', () => saveGuidanceField('reviewCustomInstructions'));
   $('guidanceGlobs').addEventListener('change', () => saveGuidanceField('reviewGuidanceGlobs'));
   $('reviewSelfCritique').addEventListener('change', () => save('reviewSelfCritique', $('reviewSelfCritique').checked));
-  $('notificationsEnabled').addEventListener('change', () => save('notificationsEnabled', $('notificationsEnabled').checked));
+  $('notificationsEnabled').addEventListener('change', () => {
+    state.notificationsEnabled = $('notificationsEnabled').checked;
+    applyNotificationVisibility(state.notificationsEnabled);
+    renderNotificationHealth(state.notificationHealth);
+    save('notificationsEnabled', state.notificationsEnabled);
+  });
   $('notifyReviewRequested').addEventListener('change', () => save('notifyReviewRequested', $('notifyReviewRequested').checked));
   $('notifyStarredRepos').addEventListener('change', () => save('notifyStarredRepos', $('notifyStarredRepos').checked));
   $('notificationPollMinutes').addEventListener('change', () => save('notificationPollMinutes', Number($('notificationPollMinutes').value)));
+  $('retryNotifications').addEventListener('click', () => {
+    setStatus('Retrying notification poll…');
+    vscode.postMessage({ type: 'retryNotifications' });
+  });
   $('refreshModels').addEventListener('click', () => {
     $('refreshModels').textContent = 'Refreshing…';
     setStatus('Refreshing model list…');
@@ -529,6 +567,8 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
       $('notifyReviewRequested').checked = state.notifyReviewRequested === true;
       $('notifyStarredRepos').checked = state.notifyStarredRepos === true;
       $('notificationPollMinutes').value = String(state.notificationPollMinutes || 5);
+      applyNotificationVisibility(state.notificationsEnabled);
+      renderNotificationHealth(state.notificationHealth);
       renderCopilotModels(msg.copilotModels || [], state.reviewModelCopilot);
       applyProviderVisibility(state.provider);
     } else if (msg.type === 'models') {

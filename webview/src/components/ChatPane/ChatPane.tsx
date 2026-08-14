@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { AlertTriangle, Check, Loader2, Send, X, XCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
 import { onHostMessage, sendToHost, type PR } from '@/bridge/types'
 import { LiveStatus } from '../a11y/LiveStatus'
+import { MarkdownContent } from '../MarkdownContent/MarkdownContent'
 import { useI18n } from '@/i18n/I18nProvider'
 import { parseStructuredResult, type ExampleFixResult, type StructuredResult, type VerifyResult } from './structuredResult'
 
@@ -215,14 +214,14 @@ export function ChatPane({
                     {m.isError ? (
                       m.content
                     ) : (
-                      <div className={cn(
-                        'prose prose-sm max-w-none [&_code]:font-mono [&_code]:text-xs [&_code]:px-1 [&_code]:rounded [&_p]:my-0.5 [&_ul]:my-1 [&_li]:my-0 [&_pre]:my-1 [&_pre]:p-2 [&_pre]:rounded [&_blockquote]:border-l-2 [&_blockquote]:pl-2 [&_blockquote]:italic',
+                      <MarkdownContent className={cn(
+                        '[&_p]:my-0.5 [&_li]:my-0 [&_blockquote]:italic',
                         m.role === 'user'
-                          ? 'prose-invert [&_code]:bg-primary-foreground/20 [&_pre]:bg-primary-foreground/20 [&_blockquote]:border-primary-foreground/40 [&_a]:text-primary-foreground'
-                          : 'prose-invert [&_code]:bg-background/50 [&_pre]:bg-background/50 [&_blockquote]:border-muted-foreground/40 [&_a]:text-primary',
+                          ? '[&_code]:bg-primary-foreground/20 [&_pre]:bg-primary-foreground/20 [&_blockquote]:border-primary-foreground/40 [&_a]:text-primary-foreground'
+                          : '[&_code]:bg-background/50 [&_pre]:bg-background/50 [&_blockquote]:border-muted-foreground/40',
                       )}>
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
-                      </div>
+                        {m.content}
+                      </MarkdownContent>
                     )}
                   </div>
                 )}
@@ -255,9 +254,9 @@ export function ChatPane({
                   <StructuredResultCard result={streamedStructured} />
                 ) : (
                   <div className="bg-secondary text-secondary-foreground rounded-md px-3 py-2 text-sm max-w-[90%]">
-                    <div className="prose prose-sm prose-invert max-w-none [&_code]:font-mono [&_code]:text-xs [&_code]:bg-background/50 [&_code]:px-1 [&_code]:rounded [&_p]:my-0.5">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{streaming}</ReactMarkdown>
-                    </div>
+                    <MarkdownContent className="[&_code]:bg-background/50 [&_pre]:bg-background/50 [&_p]:my-0.5">
+                      {streaming}
+                    </MarkdownContent>
                     <span className="inline-block w-2 h-3.5 bg-primary animate-pulse ml-0.5 align-text-bottom" />
                   </div>
                 )}
@@ -430,9 +429,7 @@ function ExampleFixResultCard({ result }: { result: ExampleFixResult }) {
       {result.examplePatch && (
         <div>
           <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground mb-1">Example patch</p>
-          <div className="prose prose-sm prose-invert max-w-none [&_code]:font-mono [&_code]:text-xs [&_pre]:my-0 [&_pre]:bg-background/50 [&_pre]:p-2 [&_pre]:rounded">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{result.examplePatch}</ReactMarkdown>
-          </div>
+          <MarkdownContent className="[&_pre]:my-0 [&_pre]:bg-background/50">{result.examplePatch}</MarkdownContent>
         </div>
       )}
       <div>

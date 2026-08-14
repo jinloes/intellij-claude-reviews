@@ -109,6 +109,9 @@ public class PluginSettingsComponent {
 
     public PluginSettingsComponent() {
         checkButton.addActionListener(e -> checkStatus());
+        reviewGuidanceGlobsArea.setEnabled(false);
+        reviewGuidanceGlobsArea.setToolTipText(
+                "Saved for future use; repository guidance files are not currently applied to reviews.");
 
         providerCombo.setRenderer(
                 new DefaultListCellRenderer() {
@@ -293,7 +296,8 @@ public class PluginSettingsComponent {
                         .addComponent(
                                 hintLabel(
                                         "<html><small>Save and reuse focus areas, custom instructions,"
-                                                + " and guidance files as one named profile.</small></html>"),
+                                                + " and saved guidance-file selections as one named"
+                                                + " profile.</small></html>"),
                                 1)
                         .addLabeledComponent(
                                 new JBLabel("Review focus areas:"), reviewFocusAreasField, 1, false)
@@ -313,18 +317,15 @@ public class PluginSettingsComponent {
                                                 + " prompt, such as team conventions.</small></html>"),
                                 1)
                         .addLabeledComponent(
-                                new JBLabel("Additional guidance files:"),
+                                new JBLabel("Additional guidance files (not currently applied):"),
                                 new JBScrollPane(reviewGuidanceGlobsArea),
                                 1,
                                 false)
                         .addComponent(
                                 hintLabel(
-                                        "<html><small>One path or glob per line, read from the review"
-                                                + " working directory into repo guidelines (for example"
-                                                + " <code>**/style.md</code> or"
-                                                + " <code>.review/ai-agent/*.md</code>). These are"
-                                                + " prioritized and added to the standard agent"
-                                                + " instructions and contribution guides.</small></html>"),
+                                        "<html><small>Saved for future use but not currently applied to"
+                                                + " reviews. Re-enabling requires guidance resolved from"
+                                                + " the trusted base commit.</small></html>"),
                                 1)
                         .addComponent(reviewSelfCritiqueBox, 1)
                         .addComponent(

@@ -1,5 +1,6 @@
 templates:
   github_auth_failed: "GitHub authentication failed. Run '{auth_command}', then retry."
+  github_access_failed: "The active gh account can't access this pull request. Run 'gh auth status', then 'gh auth switch --user <account>' if another account has access, and retry."
   provider_binary_missing: "'{binary}' is not available on PATH. Install {provider_cli} and retry."
   provider_not_installed: "Can't generate a review: the {provider_cli} ('{binary}') isn't installed or isn't on this app's PATH. Install it, confirm '{binary}' runs in your terminal, then try again."
   request_timed_out: "The request timed out while trying to {operation}. Retry, or try a smaller diff / lower reasoning effort."

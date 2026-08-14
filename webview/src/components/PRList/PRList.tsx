@@ -502,7 +502,7 @@ function PRItem({ pr, selected, spotlighted, onClick }: ItemProps) {
     <button
       className={cn(
         'pr-item w-full flex items-stretch border-b border-border text-left transition-colors',
-        'hover:bg-accent/50 focus-visible:outline-none focus-visible:bg-accent/50',
+        'hover:bg-accent/50 focus-visible:relative focus-visible:z-10 focus-visible:bg-accent/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring',
         selected && 'bg-accent/40 border-l-2 border-l-primary',
       )}
       onClick={onClick}

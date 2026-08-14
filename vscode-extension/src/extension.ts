@@ -7,7 +7,17 @@ import * as copilot from './copilot';
 import * as settings from './settings';
 import * as workspace from './workspace';
 import { hasStaleCommits } from './draftState';
-import { mergeBySource, notificationMessage, prNotificationKey } from './notifications';
+import {
+    EMPTY_NOTIFICATION_HEALTH,
+    markNotificationWarningShown,
+    mergeBySource,
+    notificationMessage,
+    prNotificationKey,
+    recordNotificationFailure,
+    recordNotificationSuccess,
+    shouldWarnAboutNotificationFailure,
+    type NotificationHealth,
+} from './notifications';
 import { BRIDGE_PROTOCOL_VERSION, isValidBridgeRequest } from './bridgeValidation';
 import { classifySetupAuthError } from './authError';
 import { toUserFacingError, providerNotInstalledMessage } from './userFacingError';
@@ -68,7 +78,12 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('pr-pilot.open', () => provider.openPanel()),
         vscode.commands.registerCommand('pr-pilot.selectCopilotModel', selectCopilotModel),
         vscode.commands.registerCommand('pr-pilot.openSettings', () =>
-            settings.openSettings(context, sidecarClient)),
+            settings.openSettings(
+                context,
+                sidecarClient,
+                () => notificationPoller.getHealth(),
+                () => notificationPoller.retry(),
+            )),
         notificationPoller,
     );
     notificationPoller.syncFromSettings();
@@ -99,6 +114,7 @@ export function deactivate() {
 
 /** globalState key for the persisted seen-PR set so notifications survive reloads/restarts. */
 const NOTIFY_STATE_KEY = 'pr-pilot.notifications.seenState';
+const NOTIFY_HEALTH_KEY = 'pr-pilot.notifications.health';
 const MAX_SEEN_NOTIFICATION_PRS = 500;
 
 interface SeenState {
@@ -111,6 +127,7 @@ class PRNotificationPoller implements vscode.Disposable {
     private seeded: boolean;
     private readonly seen: Set<string>;
     private running = false;
+    private health: NotificationHealth;
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -121,6 +138,10 @@ class PRNotificationPoller implements vscode.Disposable {
         const saved = context.globalState.get<SeenState>(NOTIFY_STATE_KEY);
         this.seeded = saved?.seeded ?? false;
         this.seen = new Set(saved?.seen ?? []);
+        this.health = {
+            ...EMPTY_NOTIFICATION_HEALTH,
+            ...context.globalState.get<NotificationHealth>(NOTIFY_HEALTH_KEY),
+        };
     }
 
     /** Starts/restarts the timer for the current interval, preserving the existing seed. */
@@ -144,6 +165,14 @@ class PRNotificationPoller implements vscode.Disposable {
         this.stop();
     }
 
+    getHealth(): NotificationHealth {
+        return { ...this.health };
+    }
+
+    retry(): Promise<void> {
+        return this.poll();
+    }
+
     private stop(): void {
         if (this.timer) clearInterval(this.timer);
         this.timer = null;
@@ -154,6 +183,15 @@ class PRNotificationPoller implements vscode.Disposable {
             seeded: this.seeded,
             seen: [...this.seen],
         } satisfies SeenState);
+    }
+
+    private persistHealth(): Thenable<void> {
+        return this.context.globalState.update(NOTIFY_HEALTH_KEY, this.health);
+    }
+
+    private async recordSuccess(): Promise<void> {
+        this.health = recordNotificationSuccess(this.health);
+        await this.persistHealth();
     }
 
     private async poll(): Promise<void> {
@@ -189,6 +227,7 @@ class PRNotificationPoller implements vscode.Disposable {
                 this.seeded = true;
                 trimSeenSet(this.seen, MAX_SEEN_NOTIFICATION_PRS);
                 await this.persist();
+                await this.recordSuccess();
                 return;
             }
 
@@ -205,8 +244,23 @@ class PRNotificationPoller implements vscode.Disposable {
             }
             trimSeenSet(this.seen, MAX_SEEN_NOTIFICATION_PRS);
             await this.persist();
+            await this.recordSuccess();
         } catch (err) {
-            console.warn('[pr-pilot] PR notification poll failed:', err instanceof Error ? err.message : String(err));
+            const message = err instanceof Error ? err.message : String(err);
+            console.warn('[pr-pilot] PR notification poll failed:', message);
+            this.health = recordNotificationFailure(this.health, message);
+            if (shouldWarnAboutNotificationFailure(this.health)) {
+                this.health = markNotificationWarningShown(this.health);
+                void vscode.window.showWarningMessage(
+                    'PR Pilot notifications are not working. Open settings for details or retry now.',
+                    'Retry',
+                    'Open Settings',
+                ).then((choice) => {
+                    if (choice === 'Retry') void this.retry();
+                    if (choice === 'Open Settings') void vscode.commands.executeCommand('pr-pilot.openSettings');
+                });
+            }
+            await Promise.resolve(this.persistHealth()).catch(() => undefined);
         } finally {
             this.running = false;
         }

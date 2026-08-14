@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   onHostMessage,
   sendToHost,
@@ -18,6 +18,7 @@ import {
   type ReviewQualityReport,
 } from '@/lib/reviewQuality'
 import { autosaveDelayMs, isReviewDirty, reviewSnapshot } from '@/lib/autosave'
+import { parseDiffSafely } from '@/lib/diffParse'
 import {
   AlertTriangle,
   Check,
@@ -76,8 +77,9 @@ import { LiveStatus } from '../a11y/LiveStatus'
 import { useI18n } from '@/i18n/I18nProvider'
 import {
   CHAT_HEIGHT_KEY,
-  MAX_CHAT_HEIGHT,
-  MIN_CHAT_HEIGHT,
+  chatHeightBounds,
+  clampChatHeight,
+  effectiveChatAvailableHeight,
   loadChatHeight,
 } from './chatHeight'
 import { focusedIndexAfterCommentDeletion } from './commentNavigation'
@@ -88,23 +90,29 @@ interface Props {
   onDirtyStateChange?: (dirty: boolean) => void
 }
 
+export interface ReviewPaneHandle {
+  discardPendingChanges: () => boolean
+}
+
 type Verdict = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT'
+
+type DraftPresentState = {
+  kind: 'draftPresent'
+  result: ReviewResult
+  reviewId: string
+  staleCommits: boolean
+  importedFromGitHub: boolean
+  diff?: string
+  validationDiff?: string
+  generationElapsedSec?: number
+}
 
 type PaneState =
   | { kind: 'idle' }
   | { kind: 'draftLoading' }
   | { kind: 'noDraft'; diff?: string; validationDiff?: string; providerReadiness?: ProviderReadiness }
   | { kind: 'authError'; message: string; diff?: string; validationDiff?: string }
-  | {
-      kind: 'draftPresent'
-      result: ReviewResult
-      reviewId: string
-      staleCommits: boolean
-      importedFromGitHub: boolean
-      diff?: string
-      validationDiff?: string
-      generationElapsedSec?: number
-    }
+  | DraftPresentState
   | {
       kind: 'generating'
       messages: string[]
@@ -117,6 +125,7 @@ type PaneState =
   | { kind: 'error'; message: string }
   | { kind: 'saveError'; message: string; result: ReviewResult | null; diff: string; validationDiff: string }
   | { kind: 'submitError'; message: string; result: ReviewResult | null; diff: string; validationDiff: string }
+  | { kind: 'deleteError'; message: string; draft: DraftPresentState }
 
 interface ChunkedProgress {
   running: boolean
@@ -183,6 +192,7 @@ function diffOf(state: PaneState): string {
   if (state.kind === 'draftPresent') return state.diff ?? ''
   if (state.kind === 'noDraft' || state.kind === 'authError') return state.diff ?? ''
   if (state.kind === 'saveError' || state.kind === 'submitError') return state.diff
+  if (state.kind === 'deleteError') return state.draft.diff ?? ''
   return ''
 }
 
@@ -193,12 +203,14 @@ function validationDiffOf(state: PaneState): string {
     return state.validationDiff ?? state.diff ?? ''
   }
   if (state.kind === 'saveError' || state.kind === 'submitError') return state.validationDiff
+  if (state.kind === 'deleteError') return state.draft.validationDiff ?? state.draft.diff ?? ''
   return diffOf(state)
 }
 
 function resultOf(state: PaneState): ReviewResult | null {
   if (state.kind === 'draftPresent' || state.kind === 'reviewUnsaved') return state.result
   if (state.kind === 'saveError' || state.kind === 'submitError') return state.result
+  if (state.kind === 'deleteError') return state.draft.result
   return null
 }
 
@@ -208,6 +220,10 @@ function mutateComments(
   fn: (comments: LineComment[]) => LineComment[],
 ): PaneState {
   if (!kinds.includes(prev.kind)) return prev
+  if (prev.kind === 'deleteError') {
+    const updated = { ...prev.draft.result, lineComments: fn(prev.draft.result.lineComments) }
+    return { ...prev.draft, result: updated }
+  }
   const s = prev as { kind: string; result: ReviewResult; diff?: string; reviewId?: string; staleCommits?: boolean }
   const updated = { ...s.result, lineComments: fn(s.result.lineComments) }
   return { ...prev, result: updated } as PaneState
@@ -321,7 +337,10 @@ function mergeChunkResults(results: ReviewResult[]): ReviewResult {
   return { summary: combinedSummary, lineComments, verdict }
 }
 
-export function ReviewPane({ pr, onDirtyStateChange }: Props) {
+export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPane(
+  { pr, onDirtyStateChange },
+  ref,
+) {
   const [state, setState] = useState<PaneState>({ kind: 'idle' })
   const [focusAreasOverride, setFocusAreasOverride] = useState('')
   const [customInstructionsOverride, setCustomInstructionsOverride] = useState('')
@@ -335,8 +354,11 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   const [chunkedOverride, setChunkedOverride] = useState<boolean | null>(null)
   const [chunkedProgress, setChunkedProgress] = useState<ChunkedProgress | null>(null)
   const [qualityExpanded, setQualityExpanded] = useState(false)
-  const [chatHeight, setChatHeight] = useState(loadChatHeight)
+  const [chatHeight, setChatHeight] = useState(() => loadChatHeight(localStorage, window.innerHeight))
+  const [chatAvailableHeight, setChatAvailableHeight] = useState(window.innerHeight)
   const chatHeightRef = useRef(chatHeight)
+  const paneRef = useRef<HTMLDivElement>(null)
+  const reviewBodyRef = useRef<HTMLDivElement>(null)
   const chatDragRef = useRef<{ startY: number; startHeight: number } | null>(null)
   /** Verify-request token → the comment that request was made for. See handleVerifyComment. */
   const verifyTargetsRef = useRef<Map<string, LineComment>>(new Map())
@@ -373,6 +395,8 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   const saveWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const submitWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const deleteWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const deleteDraftStateRef = useRef<DraftPresentState | null>(null)
+  const suppressOutgoingAutosaveRef = useRef(false)
   const allocateSaveId = useCallback(() => ++nextSaveIdRef.current, [])
 
   const clearAllWatchdogs = useCallback(() => {
@@ -411,6 +435,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     generatedBaselineRef.current = null
     inFlightSaveRef.current = null
     pendingAutosaveRef.current = null
+    deleteDraftStateRef.current = null
     if (autosaveTimerRef.current !== null) {
       clearTimeout(autosaveTimerRef.current)
       autosaveTimerRef.current = null
@@ -769,13 +794,17 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
         case 'draftDeleted':
           clearWatchdog(deleteWatchdogRef)
           setDeleting(false)
+          deleteDraftStateRef.current = null
           setState({ kind: 'noDraft' })
           break
 
         case 'draftDeleteError':
           clearWatchdog(deleteWatchdogRef)
           setDeleting(false)
-          setState({ kind: 'error', message: msg.message })
+          setState((prev) => {
+            const draft = deleteDraftStateRef.current ?? (prev.kind === 'draftPresent' ? prev : null)
+            return draft ? { kind: 'deleteError', message: msg.message, draft } : { kind: 'error', message: msg.message }
+          })
           break
 
         default:
@@ -797,6 +826,31 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   }, [showChat, chatVisible, chatHeight])
 
   useEffect(() => {
+    const pane = paneRef.current
+    if (!pane) return
+    const updateBounds = () => {
+      const containerHeight = pane.getBoundingClientRect().height || window.innerHeight
+      const reviewBodyHeight = reviewBodyRef.current?.getBoundingClientRect().height ?? containerHeight
+      const availableHeight = effectiveChatAvailableHeight(
+        containerHeight,
+        chatHeightRef.current,
+        reviewBodyHeight,
+      )
+      setChatAvailableHeight(availableHeight)
+      const clamped = clampChatHeight(chatHeightRef.current, availableHeight)
+      chatHeightRef.current = clamped
+      setChatHeight(clamped)
+      localStorage.setItem(CHAT_HEIGHT_KEY, String(clamped))
+    }
+    updateBounds()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(updateBounds)
+    observer.observe(pane)
+    if (reviewBodyRef.current) observer.observe(reviewBodyRef.current)
+    return () => observer.disconnect()
+  }, [chatVisible, showChat, state.kind])
+
+  useEffect(() => {
     if (!pr) {
       setSelectedContext('')
       return
@@ -815,10 +869,10 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   const handleChatResizeMove = useCallback((e: PointerEvent) => {
     if (!chatDragRef.current) return
     const delta = chatDragRef.current.startY - e.clientY
-    const newHeight = Math.max(MIN_CHAT_HEIGHT, Math.min(MAX_CHAT_HEIGHT, chatDragRef.current.startHeight + delta))
+    const newHeight = clampChatHeight(chatDragRef.current.startHeight + delta, chatAvailableHeight)
     chatHeightRef.current = newHeight
     setChatHeight(newHeight)
-  }, [])
+  }, [chatAvailableHeight])
 
   function handleChatResizeUp() {
     chatDragRef.current = null
@@ -833,6 +887,10 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   const result = resultOf(state)
   const diff = diffOf(state)
   const validationDiff = validationDiffOf(state)
+  const diffUnavailable = useMemo(
+    () => parseDiffSafely(validationDiff || diff).status === 'unrenderable',
+    [validationDiff, diff],
+  )
   const partition = useMemo(
     () => validateComments(validationDiff, result?.lineComments ?? []),
     [validationDiff, result?.lineComments],
@@ -853,6 +911,19 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
     state.kind === 'reviewUnsaved' || state.kind === 'draftPresent' ? state.result : null
   const savableSnapshot = savableResult ? reviewSnapshot(savableResult) : null
   const autosaveDirty = isReviewDirty(savableSnapshot, lastSavedSnapshotRef.current)
+
+  useImperativeHandle(ref, () => ({
+    discardPendingChanges: () => {
+      if (inFlightSaveRef.current) return false
+      suppressOutgoingAutosaveRef.current = true
+      if (autosaveTimerRef.current !== null) {
+        clearTimeout(autosaveTimerRef.current)
+        autosaveTimerRef.current = null
+      }
+      pendingAutosaveRef.current = null
+      return true
+    },
+  }), [])
 
   useEffect(() => {
     const dirty = autosaveDirty || state.kind === 'reviewUnsaved' || state.kind === 'saveError'
@@ -985,7 +1056,9 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
         clearTimeout(autosaveTimerRef.current)
         autosaveTimerRef.current = null
       }
-      const p = pendingAutosaveRef.current
+      const suppressSave = suppressOutgoingAutosaveRef.current
+      suppressOutgoingAutosaveRef.current = false
+      const p = suppressSave ? null : pendingAutosaveRef.current
       const inFlight = inFlightSaveRef.current
       const alreadyInFlight = p
         && inFlight?.prKey === prKey(p.pr)
@@ -1014,7 +1087,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   function applyQualityRepair(action: ReviewQualityAction) {
     if (!qualityReport) return
     setState((prev) =>
-      mutateComments(prev, ['draftPresent', 'reviewUnsaved'], () => {
+      mutateComments(prev, ['draftPresent', 'reviewUnsaved', 'deleteError'], () => {
         const baseResult = resultOf(prev)
         if (!baseResult) return []
         return applyReviewQualityRepairs(baseResult, qualityReport, [action]).lineComments
@@ -1134,10 +1207,21 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   }
 
   function handleDelete() {
+    const draft = state.kind === 'draftPresent'
+      ? state
+      : state.kind === 'deleteError'
+        ? state.draft
+        : null
+    if (!draft) return
+    deleteDraftStateRef.current = draft
     setDeleting(true)
     armWatchdog(deleteWatchdogRef, () => {
       setDeleting(false)
-      setState({ kind: 'error', message: 'The host did not respond in time. Check your connection and try again.' })
+      setState({
+        kind: 'deleteError',
+        message: 'The host did not respond in time. The draft may still exist on GitHub.',
+        draft,
+      })
     })
     sendToHost({ type: 'deleteDraft', number: currentPr.number, owner: currentPr.owner, repo: currentPr.repo })
   }
@@ -1145,6 +1229,10 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   function handleReloadDraft() {
     setState({ kind: 'draftLoading' })
     sendToHost({ type: 'selectPR', number: currentPr.number, owner: currentPr.owner, repo: currentPr.repo })
+  }
+
+  function handleKeepDraft() {
+    setState((prev) => prev.kind === 'deleteError' ? prev.draft : prev)
   }
 
   // Re-anchor an imported draft against the current diff: snap comments back to
@@ -1282,7 +1370,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
   function mutateAtOriginal(origIdx: number, fn: (c: LineComment) => LineComment | null) {
     if (origIdx < 0) return
     setState((prev) =>
-      mutateComments(prev, ['draftPresent', 'reviewUnsaved'], (comments) => {
+      mutateComments(prev, ['draftPresent', 'reviewUnsaved', 'deleteError'], (comments) => {
         const next = comments.slice()
         const updated = fn(next[origIdx])
         if (updated === null) next.splice(origIdx, 1)
@@ -1329,7 +1417,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
 
   return (
     <TooltipProvider delayDuration={400}>
-      <div data-testid="review-pane-content" className="flex min-h-0 flex-1 flex-col bg-background">
+      <div ref={paneRef} data-testid="review-pane-content" className="flex min-h-0 flex-1 flex-col bg-background">
         <LiveStatus message={statusMessage} />
         {/* Header */}
         <div className="shrink-0 px-4 py-2.5 border-b border-border bg-card">
@@ -1443,7 +1531,7 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
         {/* Body */}
         <ContextMenu>
           <ContextMenuTrigger asChild>
-            <div data-testid="review-scroll-body" className="flex-1 overflow-y-auto min-h-0">
+            <div ref={reviewBodyRef} data-testid="review-scroll-body" className="flex-1 overflow-y-auto min-h-0">
               {showReviewOverrides && (
                 <ReviewOverrides
                   focusAreas={focusAreasOverride}
@@ -1487,6 +1575,8 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
                 onEditOrphan={orphanHandlers.onEditOrphan}
                 onDeleteOrphan={orphanHandlers.onDeleteOrphan}
                 onReloadDraft={handleReloadDraft}
+                onRetryDelete={handleDelete}
+                onKeepDraft={handleKeepDraft}
                 onReanchor={handleReanchorDraft}
                 onOpenSettings={() => sendToHost({ type: 'openSettings' })}
                 onOpenAuthGuide={() => sendToHost({ type: 'openUrl', url: 'https://cli.github.com/manual/gh_auth_login' })}
@@ -1542,8 +1632,8 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
                 label="Resize chat panel"
                 orientation="horizontal"
                 value={chatHeight}
-                min={MIN_CHAT_HEIGHT}
-                max={MAX_CHAT_HEIGHT}
+                min={chatHeightBounds(chatAvailableHeight).min}
+                max={chatHeightBounds(chatAvailableHeight).max}
                 onChange={(height) => {
                   chatHeightRef.current = height
                   setChatHeight(height)
@@ -1581,11 +1671,12 @@ export function ReviewPane({ pr, onDirtyStateChange }: Props) {
           orphanCommentCount={orphanCount}
           summary={result?.summary ?? ''}
           qualityReport={qualityReport}
+          diffUnavailable={diffUnavailable}
         />
       </div>
     </TooltipProvider>
   )
-}
+})
 
 interface ReviewOverridesProps {
   focusAreas: string
@@ -1631,6 +1722,9 @@ function ReviewOverrides({
         </div>
         <p className="mt-1 text-[11px] text-muted-foreground">
           Leave blank to use defaults from Settings.
+        </p>
+        <p className="mt-1 text-[11px] text-muted-foreground" role="note">
+          {t('review.guidanceStatus')}
         </p>
         <label htmlFor="review-focus-areas" className="mt-2 block text-xs font-medium text-foreground">{t('review.focusAreas')}</label>
         <input
@@ -1809,6 +1903,8 @@ interface ContentProps {
   onEditOrphan: (orphan: LineComment, body: string) => void
   onDeleteOrphan: (orphan: LineComment) => void
   onReloadDraft: () => void
+  onRetryDelete: () => void
+  onKeepDraft: () => void
   onReanchor: () => void
   onOpenSettings: () => void
   onOpenAuthGuide: () => void
@@ -1971,6 +2067,7 @@ function ErrorWithReview({
   orphanComments,
   onEditOrphan,
   onDeleteOrphan,
+  actions,
 }: {
   message: string
   result: ReviewResult | null
@@ -1981,6 +2078,7 @@ function ErrorWithReview({
   orphanComments: LineComment[]
   onEditOrphan: (orphan: LineComment, body: string) => void
   onDeleteOrphan: (orphan: LineComment) => void
+  actions?: ReactNode
 }) {
   return (
     <div className="flex flex-col">
@@ -2000,6 +2098,7 @@ function ErrorWithReview({
         <Alert variant="destructive">
           <AlertDescription>{message}</AlertDescription>
         </Alert>
+        {actions && <div className="mt-3">{actions}</div>}
       </div>
     </div>
   )
@@ -2017,6 +2116,8 @@ function PaneContent({
   onEditOrphan,
   onDeleteOrphan,
   onReloadDraft,
+  onRetryDelete,
+  onKeepDraft,
   onReanchor,
   onOpenSettings,
   onOpenAuthGuide,
@@ -2221,6 +2322,28 @@ function PaneContent({
           onDeleteOrphan={onDeleteOrphan}
         />
       )
+
+    case 'deleteError':
+      return (
+        <ErrorWithReview
+          message={state.message}
+          result={state.draft.result}
+          diff={state.draft.diff ?? ''}
+          focusedCommentIdx={focusedCommentIdx}
+          editCommentHandlers={editCommentHandlers}
+          inlineComments={inlineComments}
+          orphanComments={orphanComments}
+          onEditOrphan={onEditOrphan}
+          onDeleteOrphan={onDeleteOrphan}
+          actions={(
+            <div className="flex flex-wrap gap-2">
+              <Button variant="destructive" size="sm" onClick={onRetryDelete}>Retry delete</Button>
+              <Button variant="outline" size="sm" onClick={onReloadDraft}>Reload draft</Button>
+              <Button variant="ghost" size="sm" onClick={onKeepDraft}>Keep draft</Button>
+            </div>
+          )}
+        />
+      )
   }
 }
 
@@ -2242,6 +2365,7 @@ interface FooterProps {
   orphanCommentCount: number
   summary: string
   qualityReport: ReviewQualityReport | null
+  diffUnavailable: boolean
 }
 
 function ReviewFooter({
@@ -2260,6 +2384,7 @@ function ReviewFooter({
   orphanCommentCount,
   summary,
   qualityReport,
+  diffUnavailable,
 }: FooterProps) {
   if (state.kind === 'generating') {
     return (
@@ -2275,7 +2400,7 @@ function ReviewFooter({
   if (state.kind === 'draftPresent' || state.kind === 'reviewUnsaved') {
     const busy = saving || submitting || deleting
     return (
-      <div className="shrink-0 flex items-center gap-2 px-4 py-2.5 border-t border-border bg-card">
+      <div className="shrink-0 flex flex-wrap items-center gap-2 px-4 py-2.5 border-t border-border bg-card">
         {/* Regen — confirm when saved draft exists */}
         {state.kind === 'draftPresent' ? (
           <AlertDialog>
@@ -2305,7 +2430,7 @@ function ReviewFooter({
           </Button>
         )}
 
-        <div className="flex-1" />
+        <div className="hidden flex-1 sm:block" />
 
         <div className="flex items-center gap-2">
           <span className="hidden text-[11px] text-muted-foreground lg:inline">
@@ -2354,40 +2479,43 @@ function ReviewFooter({
           </AlertDialog>
         )}
 
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={onSave}
-              disabled={saving || submitting || deleting || (!autosaveDirty && state.kind === 'draftPresent')}
-              className="gap-1.5 text-xs"
-            >
-              {saving ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : autosaveDirty ? (
-                <CloudUpload className="w-3.5 h-3.5" />
-              ) : (
-                <Check className="w-3.5 h-3.5" />
-              )}
-              {saving ? 'Saving…' : autosaveDirty ? 'Save now' : 'Saved'}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="top" className="max-w-xs text-xs leading-relaxed">
-            Changes save to the GitHub draft automatically. Click to save right now.
-          </TooltipContent>
-        </Tooltip>
+        <div className="ml-auto flex w-full shrink-0 items-center justify-end gap-2 sm:w-auto">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={onSave}
+                disabled={saving || submitting || deleting || (!autosaveDirty && state.kind === 'draftPresent')}
+                className="gap-1.5 text-xs"
+              >
+                {saving ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : autosaveDirty ? (
+                  <CloudUpload className="w-3.5 h-3.5" />
+                ) : (
+                  <Check className="w-3.5 h-3.5" />
+                )}
+                {saving ? 'Saving…' : autosaveDirty ? 'Save now' : 'Saved'}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="max-w-xs text-xs leading-relaxed">
+              Changes save to the GitHub draft automatically. Click to save right now.
+            </TooltipContent>
+          </Tooltip>
 
-        <SubmitSplitButton
-          verdict={state.kind === 'draftPresent' || state.kind === 'reviewUnsaved' ? state.result.verdict : 'APPROVE'}
-          onSubmit={onSubmit}
-          submitting={submitting}
-          disabled={saving || deleting}
-          inlineCommentCount={inlineCommentCount}
-          orphanCommentCount={orphanCommentCount}
-          summary={summary}
-          qualityReport={qualityReport}
-        />
+          <SubmitSplitButton
+            verdict={state.result.verdict}
+            onSubmit={onSubmit}
+            submitting={submitting}
+            disabled={saving || deleting}
+            inlineCommentCount={inlineCommentCount}
+            orphanCommentCount={orphanCommentCount}
+            summary={summary}
+            qualityReport={qualityReport}
+            diffUnavailable={diffUnavailable}
+          />
+        </div>
       </div>
     )
   }
@@ -2408,6 +2536,7 @@ function ReviewFooter({
           orphanCommentCount={orphanCommentCount}
           summary={summary}
           qualityReport={qualityReport}
+          diffUnavailable={diffUnavailable}
         />
       </div>
     )
@@ -2425,6 +2554,7 @@ function ReviewFooter({
           orphanCommentCount={orphanCommentCount}
           summary={summary}
           qualityReport={qualityReport}
+          diffUnavailable={diffUnavailable}
         />
       </div>
     )
@@ -2444,6 +2574,7 @@ function SubmitSplitButton({
   orphanCommentCount,
   summary,
   qualityReport,
+  diffUnavailable,
 }: {
   verdict: Verdict
   onSubmit: (v: Verdict, comment?: string) => void
@@ -2453,16 +2584,20 @@ function SubmitSplitButton({
   orphanCommentCount: number
   summary: string
   qualityReport: ReviewQualityReport | null
+  diffUnavailable: boolean
 }) {
+  const [selectedVerdict, setSelectedVerdict] = useState(verdict)
   const [confirming, setConfirming] = useState<Verdict | null>(null)
   const [comment, setComment] = useState('')
   const [risksAcknowledged, setRisksAcknowledged] = useState(false)
   const pendingMenuVerdictRef = useRef<Verdict | null>(null)
   const t = useI18n()
-  const riskCount = qualityReport?.issues.reduce((count, issue) => count + issue.count, 0) ?? 0
+  const qualityRiskCount = qualityReport?.issues.reduce((count, issue) => count + issue.count, 0) ?? 0
+  const riskCount = qualityRiskCount + (diffUnavailable ? 1 : 0)
   const riskKey = qualityReport?.issues.map((issue) => `${issue.id}:${issue.count}`).join('|') ?? ''
 
-  useEffect(() => setRisksAcknowledged(false), [riskKey, confirming])
+  useEffect(() => setSelectedVerdict(verdict), [verdict])
+  useEffect(() => setRisksAcknowledged(false), [riskKey, diffUnavailable, confirming])
   const ICON: Record<Verdict, React.ReactNode> = {
     APPROVE: <Check className="w-3.5 h-3.5" />,
     REQUEST_CHANGES: <XCircle className="w-3.5 h-3.5" />,
@@ -2479,9 +2614,10 @@ function SubmitSplitButton({
     COMMENT: 'secondary',
   }
 
-  const others: Verdict[] = (['COMMENT', 'APPROVE', 'REQUEST_CHANGES'] as Verdict[]).filter((v) => v !== verdict)
+  const others: Verdict[] = (['COMMENT', 'APPROVE', 'REQUEST_CHANGES'] as Verdict[]).filter((v) => v !== selectedVerdict)
 
   const requestMenuConfirmation = (nextVerdict: Verdict) => {
+    setSelectedVerdict(nextVerdict)
     pendingMenuVerdictRef.current = nextVerdict
   }
 
@@ -2497,19 +2633,19 @@ function SubmitSplitButton({
   return (
     <div className="flex items-stretch rounded-md overflow-hidden">
       <Button
-        variant={VARIANT[verdict]}
+        variant={VARIANT[selectedVerdict]}
         size="sm"
         className="text-xs rounded-r-none gap-1.5 border-r border-white/20"
-        onClick={() => setConfirming(verdict)}
+        onClick={() => setConfirming(selectedVerdict)}
         disabled={submitting || disabled}
       >
-        {submitting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : ICON[verdict]}
-        {submitting ? 'Submitting…' : LABEL[verdict]}
+        {submitting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : ICON[selectedVerdict]}
+        {submitting ? 'Submitting…' : LABEL[selectedVerdict]}
       </Button>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
-            variant={VARIANT[verdict]}
+            variant={VARIANT[selectedVerdict]}
             size="sm"
             className="text-xs rounded-l-none px-1.5"
             disabled={submitting || disabled}
@@ -2568,6 +2704,7 @@ function SubmitSplitButton({
                 {qualityReport?.issues.map((issue) => (
                   <li key={issue.id}>{issue.title}: {issue.count}. {issue.description}</li>
                 ))}
+                {diffUnavailable && <li>The diff could not be rendered. Review the raw diff before publishing.</li>}
               </ul>
               <label className="mt-3 flex items-start gap-2">
                 <input type="checkbox" checked={risksAcknowledged} onChange={(event) => setRisksAcknowledged(event.target.checked)} />

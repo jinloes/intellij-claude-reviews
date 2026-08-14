@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Toaster } from 'sonner'
 import { PRList, SetupScreen, type SetupReason } from './components/PRList'
-import { ReviewPane } from './components/ReviewPane'
+import { ReviewPane, type ReviewPaneHandle } from './components/ReviewPane'
 import { onHostMessage, sendToHost, type PR } from './bridge/types'
 import { BRIDGE_PROTOCOL_VERSION } from './bridge/validation'
 import { AccessibleResizer } from './components/layout/AccessibleResizer'
@@ -102,6 +102,7 @@ export default function App() {
   const dragStartW = useRef(0)
   const selectedPrRef = useRef<PR | null>(null)
   const unsavedReviewRef = useRef(false)
+  const reviewPaneRef = useRef<ReviewPaneHandle>(null)
   // Tracks the latest width synchronously so handleMouseUp can persist without stale closure
   const currentWidthRef = useRef(leftWidth)
 
@@ -112,6 +113,29 @@ export default function App() {
   useEffect(() => {
     unsavedReviewRef.current = hasUnsavedReview
   }, [hasUnsavedReview])
+
+  const handleDirtyStateChange = useCallback((dirty: boolean) => {
+    unsavedReviewRef.current = dirty
+    setHasUnsavedReview(dirty)
+  }, [])
+
+  const nextPrSelectionAllowed = useCallback((nextPr: PR): boolean => {
+    const currentPr = selectedPrRef.current
+    const samePr = currentPr
+      && currentPr.number === nextPr.number
+      && currentPr.owner === nextPr.owner
+      && currentPr.repo === nextPr.repo
+    if (samePr || !unsavedReviewRef.current) return true
+    const confirmed = window.confirm(
+      'You have unsaved review changes for the currently selected PR. Switch anyway and discard those unsaved edits?',
+    )
+    if (!confirmed) return false
+    if (reviewPaneRef.current?.discardPendingChanges() === false) {
+      window.alert('A draft save is already in progress. Wait for it to finish, then switch pull requests.')
+      return false
+    }
+    return true
+  }, [])
 
   useEffect(() => {
     const id = setTimeout(seedDevData, 100)
@@ -149,22 +173,13 @@ export default function App() {
     return onHostMessage((msg) => {
       if (msg.type !== 'activatePR') return
       const nextPr = msg.pr
-      const currentPr = selectedPrRef.current
-      const samePr = currentPr
-        && currentPr.number === nextPr.number
-        && currentPr.owner === nextPr.owner
-        && currentPr.repo === nextPr.repo
-      if (!samePr && unsavedReviewRef.current) {
-        const confirmed = window.confirm(
-          'You have unsaved review changes for the currently selected PR. Switch anyway and discard in-memory edits?',
-        )
-        if (!confirmed) return
-      }
+      if (!nextPrSelectionAllowed(nextPr)) return
+      selectedPrRef.current = nextPr
       setSelectedPR(nextPr)
       if (window.innerWidth < 640) setActivePane('review')
       sendToHost({ type: 'selectPR', number: nextPr.number, owner: nextPr.owner, repo: nextPr.repo })
     })
-  }, [])
+  }, [nextPrSelectionAllowed])
 
   const handleMouseMove = useCallback((e: PointerEvent) => {
     if (!dragging.current) return
@@ -199,18 +214,6 @@ export default function App() {
     document.addEventListener('pointermove', handleMouseMove)
     document.addEventListener('pointerup', handleMouseUp)
     e.preventDefault()
-  }
-
-  function nextPrSelectionAllowed(nextPr: PR): boolean {
-    if (!selectedPR) return true
-    const samePr =
-      selectedPR.number === nextPr.number
-      && selectedPR.owner === nextPr.owner
-      && selectedPR.repo === nextPr.repo
-    if (samePr || !hasUnsavedReview) return true
-    return window.confirm(
-      'You have unsaved review changes for the currently selected PR. Switch anyway and discard in-memory edits?',
-    )
   }
 
   return (
@@ -251,6 +254,7 @@ export default function App() {
           selectedPr={selectedPR}
           onSelect={(nextPr) => {
             if (!nextPrSelectionAllowed(nextPr)) return false
+            selectedPrRef.current = nextPr
             setSelectedPR(nextPr)
             if (narrow) setActivePane('review')
             return true
@@ -279,7 +283,7 @@ export default function App() {
         aria-label={t('app.review')}
         className={`${narrow ? (activePane === 'review' ? 'flex w-full pt-12' : 'hidden') : 'flex'} min-h-0 min-w-0 flex-1 flex-col overflow-hidden`}
       >
-        <ReviewPane pr={selectedPR} onDirtyStateChange={setHasUnsavedReview} />
+        <ReviewPane ref={reviewPaneRef} pr={selectedPR} onDirtyStateChange={handleDirtyStateChange} />
       </section>
     </main>
     )}

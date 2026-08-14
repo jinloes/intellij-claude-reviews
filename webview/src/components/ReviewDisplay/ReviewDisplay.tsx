@@ -1,8 +1,7 @@
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import type { ReviewResult } from '../../bridge/types'
+import { MarkdownContent } from '../MarkdownContent/MarkdownContent'
 
 interface Props {
   result: ReviewResult
@@ -29,9 +28,9 @@ export function ReviewDisplay({ result }: Props) {
       >
         {VERDICT_LABEL[result.verdict]}
       </Badge>
-      <div className="prose prose-sm prose-invert max-w-none text-sm text-foreground/90 [&_code]:font-mono [&_code]:text-xs [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_ul]:my-1 [&_li]:my-0.5 [&_h1]:text-sm [&_h2]:text-sm [&_h3]:text-sm [&_h1]:font-semibold [&_h2]:font-semibold [&_h3]:font-semibold [&_p]:my-1 [&_a]:text-primary [&_strong]:text-foreground">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{result.summary}</ReactMarkdown>
-      </div>
+      <MarkdownContent className="text-foreground/90 [&_h1]:text-sm [&_h2]:text-sm [&_h3]:text-sm [&_strong]:text-foreground">
+        {result.summary}
+      </MarkdownContent>
     </div>
   )
 }

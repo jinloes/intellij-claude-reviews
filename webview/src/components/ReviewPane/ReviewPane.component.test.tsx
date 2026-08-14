@@ -1,8 +1,9 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { createRef } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { PR } from '../../bridge/types'
-import { ReviewPane } from './ReviewPane'
+import { ReviewPane, type ReviewPaneHandle } from './ReviewPane'
 
 const pr: PR = {
   number: 42,
@@ -28,6 +29,150 @@ afterEach(() => {
 })
 
 describe('ReviewPane review submission', () => {
+  it('discards a pending edit without saving it during PR cleanup', async () => {
+    const user = userEvent.setup()
+    const cefQuery = vi.fn()
+    const ref = createRef<ReviewPaneHandle>()
+    ;(window as unknown as { cefQuery?: typeof cefQuery }).cefQuery = cefQuery
+    const { rerender } = render(<ReviewPane ref={ref} pr={pr} />)
+
+    act(() => {
+      hostMessage({
+        type: 'draftLoaded',
+        prKey: 'acme/widget#42',
+        prState: 'DRAFT_PRESENT',
+        reviewId: 'draft-1',
+        result: {
+          summary: 'Saved review.',
+          verdict: 'COMMENT',
+          lineComments: [{ file: 'missing.ts', line: 1, type: 'issue', body: 'Remove this.' }],
+        },
+        diff: '',
+        validationDiff: '',
+      })
+    })
+    await user.click(screen.getByRole('button', { name: 'Delete unanchored comment' }))
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Delete' }))
+
+    expect(ref.current?.discardPendingChanges()).toBe(true)
+    rerender(<ReviewPane ref={ref} pr={{ ...pr, number: 43 }} />)
+
+    const saves = cefQuery.mock.calls
+      .map(([arg]) => JSON.parse(arg.request) as { type: string })
+      .filter((message) => message.type === 'saveDraft')
+    expect(saves).toEqual([])
+  })
+
+  it('refuses to discard after a save has already been sent', async () => {
+    const cefQuery = vi.fn()
+    const ref = createRef<ReviewPaneHandle>()
+    ;(window as unknown as { cefQuery?: typeof cefQuery }).cefQuery = cefQuery
+    render(<ReviewPane ref={ref} pr={pr} />)
+
+    act(() => {
+      hostMessage({
+        type: 'reviewResult',
+        prKey: 'acme/widget#42',
+        result: { summary: 'Generated review.', verdict: 'COMMENT', lineComments: [] },
+        diff: '',
+        validationDiff: '',
+      })
+    })
+    await waitFor(() => expect(cefQuery).toHaveBeenCalled())
+
+    expect(ref.current?.discardPendingChanges()).toBe(false)
+  })
+
+  it('keeps the review visible and offers operation-specific recovery after delete fails', async () => {
+    const user = userEvent.setup()
+    const cefQuery = vi.fn()
+    ;(window as unknown as { cefQuery?: typeof cefQuery }).cefQuery = cefQuery
+    render(<ReviewPane pr={pr} />)
+
+    act(() => {
+      hostMessage({
+        type: 'draftLoaded',
+        prKey: 'acme/widget#42',
+        prState: 'DRAFT_PRESENT',
+        reviewId: 'draft-1',
+        result: { summary: 'Keep this review visible.', verdict: 'COMMENT', lineComments: [] },
+        diff: '',
+        validationDiff: '',
+      })
+    })
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Delete' }))
+    act(() => {
+      hostMessage({ type: 'draftDeleteError', prKey: 'acme/widget#42', message: 'Delete failed.' })
+    })
+
+    expect(screen.getByText('Keep this review visible.')).toBeInTheDocument()
+    expect(screen.getByText('Delete failed.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Retry delete' }))
+    const deletes = cefQuery.mock.calls
+      .map(([arg]) => JSON.parse(arg.request) as { type: string })
+      .filter((message) => message.type === 'deleteDraft')
+    expect(deletes).toHaveLength(2)
+
+    act(() => {
+      hostMessage({ type: 'draftDeleteError', prKey: 'acme/widget#42', message: 'Still failed.' })
+    })
+    await user.click(screen.getByRole('button', { name: 'Keep draft' }))
+    expect(screen.queryByText('Still failed.')).not.toBeInTheDocument()
+    expect(screen.getByText('Keep this review visible.')).toBeInTheDocument()
+  })
+
+  it('requires acknowledgement before submitting when the diff cannot be rendered', async () => {
+    const user = userEvent.setup()
+    ;(window as unknown as { cefQuery?: ReturnType<typeof vi.fn> }).cefQuery = vi.fn()
+    render(<ReviewPane pr={pr} />)
+
+    act(() => {
+      hostMessage({
+        type: 'draftLoaded',
+        prKey: 'acme/widget#42',
+        prState: 'DRAFT_PRESENT',
+        reviewId: 'draft-1',
+        result: { summary: 'Review summary.', verdict: 'COMMENT', lineComments: [] },
+        diff: 'not a unified diff',
+        validationDiff: 'not a unified diff',
+      })
+    })
+    await user.click(screen.getByRole('button', { name: 'Comment' }))
+
+    expect(screen.getByText('The diff could not be rendered. Review the raw diff before publishing.')).toBeInTheDocument()
+    const submit = screen.getByRole('button', { name: 'Submit Comment' })
+    expect(submit).toBeDisabled()
+    await user.click(screen.getByRole('checkbox'))
+    expect(submit).toBeEnabled()
+  })
+
+  it('keeps the selected submit option as the primary action', async () => {
+    const user = userEvent.setup()
+    ;(window as unknown as { cefQuery?: ReturnType<typeof vi.fn> }).cefQuery = vi.fn()
+    render(<ReviewPane pr={pr} />)
+
+    act(() => {
+      hostMessage({
+        type: 'draftLoaded',
+        prKey: 'acme/widget#42',
+        prState: 'DRAFT_PRESENT',
+        reviewId: 'draft-1',
+        result: { summary: 'Changes needed.', verdict: 'REQUEST_CHANGES', lineComments: [] },
+        diff: '',
+        validationDiff: '',
+      })
+    })
+
+    expect(screen.getByRole('button', { name: 'Request Changes' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'More submit options' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Approve' }))
+    await user.click(await screen.findByRole('button', { name: 'Cancel' }))
+
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Request Changes' })).not.toBeInTheDocument()
+  })
+
   it('submits Comment from an Approve review split menu', async () => {
     const user = userEvent.setup()
     const cefQuery = vi.fn()

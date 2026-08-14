@@ -10,6 +10,7 @@ export const englishMessages = {
   'review.customInstructions': 'Custom instructions for this review',
   'review.advanced': 'Advanced review options',
   'review.finalBody': 'Final review body (optional)',
+  'review.guidanceStatus': 'Focus areas and custom instructions are applied. Repository guidance files are not currently applied.',
   'chat.input': 'Ask about this pull request',
   'diff.search': 'Find in diff',
   'diff.commentType': 'Comment type',

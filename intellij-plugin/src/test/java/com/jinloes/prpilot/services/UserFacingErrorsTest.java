@@ -27,6 +27,17 @@ class UserFacingErrorsTest {
                             new IOException("request timed out after 30s"), "submit review");
             assertThat(msg).contains("timed out").contains("Retry");
         }
+
+        @Test
+        void inaccessiblePullRequestsMapToAccountSwitchGuidance() {
+            String msg =
+                    UserFacingErrors.forGitHub(
+                            new IOException(
+                                    "Pull request not found or inaccessible to the active gh account."),
+                            "load the PR diff");
+
+            assertThat(msg).contains("active gh account", "gh auth status", "gh auth switch");
+        }
     }
 
     @Nested

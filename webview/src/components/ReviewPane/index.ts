@@ -1,1 +1,1 @@
-export { ReviewPane } from './ReviewPane'
+export { ReviewPane, type ReviewPaneHandle } from './ReviewPane'

@@ -114,6 +114,20 @@ class PrDiffServiceTest {
         assertThat(attempts).hasValue(1);
     }
 
+    @Test
+    void explainsWhenTheActiveGhAccountCannotAccessThePullRequest() {
+        PrDiffService service =
+                new PrDiffService(
+                        hostname -> GitHubAuthService.TokenResolution.resolved("secret-token"),
+                        (api, token, owner, repo, number, limit) ->
+                                PrDiffService.Response.of(PrDiffService.Status.NOT_FOUND));
+
+        PrDiffResult result = service.get(params("review"));
+
+        assertThat(result.status()).isEqualTo("api_failed");
+        assertThat(result.message()).contains("not found or inaccessible", "active gh account");
+    }
+
     private static PrDiffService service(AtomicInteger requestedLimit) {
         return new PrDiffService(
                 hostname -> GitHubAuthService.TokenResolution.resolved("secret-token"),
