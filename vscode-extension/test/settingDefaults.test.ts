@@ -48,6 +48,7 @@ test('reviewSelfCritique defaults to on in the contribution', () => {
     assert.equal(property.default, true);
 });
 
+
 test('reviewSelfCritique reader fallback matches the contribution default', () => {
     const property = packageJsonDefaults()['pr-pilot.reviewSelfCritique'] as { default: boolean };
     assert.equal(readerFallback('reviewSelfCritique'), String(property.default));
@@ -55,6 +56,7 @@ test('reviewSelfCritique reader fallback matches the contribution default', () =
 
 test('review-guidance profile settings default to the built-in profile', () => {
     const properties = packageJsonDefaults();
+    assert.equal(properties['pr-pilot.reviewGuidanceGlobs'], undefined);
     const profiles = properties['pr-pilot.reviewGuidanceProfiles'] as {
         default: unknown[];
         maxItems: number;
@@ -96,5 +98,3 @@ test('every boolean setting reader fallback matches its contribution default', (
         );
     }
 });
-
-

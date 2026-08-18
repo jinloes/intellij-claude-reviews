@@ -261,7 +261,7 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
         <button id="renameGuidanceProfile" class="secondary">Rename</button>
         <button id="deleteGuidanceProfile" class="secondary">Delete</button>
       </div>
-      <div class="hint">Focus areas and custom instructions are applied. Saved guidance-file selections remain inactive until trusted base-commit support is available.</div>
+      <div class="hint">Save and reuse focus areas and custom instructions.</div>
     </div>
 
     <div class="field">
@@ -274,12 +274,6 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
       <label for="customInstructions">Custom review instructions</label>
       <textarea id="customInstructions" rows="3" placeholder="Extra instructions appended to every review prompt (for example team conventions to enforce)."></textarea>
       <div class="hint">Plain text. Use this for conventions or repeated review guidance.</div>
-    </div>
-
-    <div class="field">
-      <label for="guidanceGlobs">Additional guidance files (not currently applied)</label>
-      <textarea id="guidanceGlobs" rows="4" disabled aria-describedby="guidanceGlobsHint"></textarea>
-      <div class="hint" id="guidanceGlobsHint">Saved for future use. Re-enabling requires guidance resolved from the trusted base commit.</div>
     </div>
 
     <div class="field">
@@ -410,10 +404,11 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
   }
 
   function guidanceValues() {
+    const profile = activeGuidanceProfile();
     return {
       focusAreas: $('focusAreas').value.trim(),
       customInstructions: $('customInstructions').value.trim(),
-      guidanceGlobs: $('guidanceGlobs').value.split(/\\r?\\n/).map((value) => value.trim()).filter(Boolean),
+      guidanceGlobs: [...(profile ? profile.guidanceGlobs : (state.reviewGuidanceGlobs || []))],
     };
   }
 
@@ -441,7 +436,6 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
     const profile = activeGuidanceProfile();
     $('focusAreas').value = profile ? profile.focusAreas : (state.reviewFocusAreas || '');
     $('customInstructions').value = profile ? profile.customInstructions : (state.reviewCustomInstructions || '');
-    $('guidanceGlobs').value = (profile ? profile.guidanceGlobs : (state.reviewGuidanceGlobs || [])).join('\\n');
   }
 
   function saveGuidanceField(defaultKey) {
@@ -454,7 +448,6 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
     }
     if (defaultKey === 'reviewFocusAreas') state.reviewFocusAreas = values.focusAreas;
     if (defaultKey === 'reviewCustomInstructions') state.reviewCustomInstructions = values.customInstructions;
-    if (defaultKey === 'reviewGuidanceGlobs') state.reviewGuidanceGlobs = values.guidanceGlobs;
     save(defaultKey, state[defaultKey]);
   }
 
@@ -508,7 +501,6 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
   });
   $('focusAreas').addEventListener('change', () => saveGuidanceField('reviewFocusAreas'));
   $('customInstructions').addEventListener('change', () => saveGuidanceField('reviewCustomInstructions'));
-  $('guidanceGlobs').addEventListener('change', () => saveGuidanceField('reviewGuidanceGlobs'));
   $('reviewSelfCritique').addEventListener('change', () => save('reviewSelfCritique', $('reviewSelfCritique').checked));
   $('notificationsEnabled').addEventListener('change', () => {
     state.notificationsEnabled = $('notificationsEnabled').checked;

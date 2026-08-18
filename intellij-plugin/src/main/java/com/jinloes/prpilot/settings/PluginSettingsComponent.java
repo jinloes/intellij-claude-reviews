@@ -109,9 +109,6 @@ public class PluginSettingsComponent {
 
     public PluginSettingsComponent() {
         checkButton.addActionListener(e -> checkStatus());
-        reviewGuidanceGlobsArea.setEnabled(false);
-        reviewGuidanceGlobsArea.setToolTipText(
-                "Saved for future use; repository guidance files are not currently applied to reviews.");
 
         providerCombo.setRenderer(
                 new DefaultListCellRenderer() {
@@ -295,9 +292,8 @@ public class PluginSettingsComponent {
                                 false)
                         .addComponent(
                                 hintLabel(
-                                        "<html><small>Save and reuse focus areas, custom instructions,"
-                                                + " and saved guidance-file selections as one named"
-                                                + " profile.</small></html>"),
+                                        "<html><small>Save and reuse focus areas and custom"
+                                                + " instructions as one named profile.</small></html>"),
                                 1)
                         .addLabeledComponent(
                                 new JBLabel("Review focus areas:"), reviewFocusAreasField, 1, false)
@@ -315,17 +311,6 @@ public class PluginSettingsComponent {
                                 hintLabel(
                                         "<html><small>Extra instructions appended to every review"
                                                 + " prompt, such as team conventions.</small></html>"),
-                                1)
-                        .addLabeledComponent(
-                                new JBLabel("Additional guidance files (not currently applied):"),
-                                new JBScrollPane(reviewGuidanceGlobsArea),
-                                1,
-                                false)
-                        .addComponent(
-                                hintLabel(
-                                        "<html><small>Saved for future use but not currently applied to"
-                                                + " reviews. Re-enabling requires guidance resolved from"
-                                                + " the trusted base commit.</small></html>"),
                                 1)
                         .addComponent(reviewSelfCritiqueBox, 1)
                         .addComponent(

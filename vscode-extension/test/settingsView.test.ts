@@ -122,15 +122,15 @@ test('buildSettingsHtml renders reusable review-guidance profile controls', () =
     assert.match(html, /id="addGuidanceProfile"/);
     assert.match(html, /id="renameGuidanceProfile"/);
     assert.match(html, /id="deleteGuidanceProfile"/);
-    assert.match(html, /id="guidanceGlobs"/);
     assert.match(html, /id="reviewSelfCritique"/);
     assert.match(html, /type: 'updateReviewGuidanceState'/);
     assert.match(html, /profiles: guidanceProfiles/);
     assert.match(html, /activeProfileId: activeGuidanceProfileId/);
     assert.match(html, /msg\.requestId !== latestSaveRequestId/);
     assert.doesNotMatch(html, /save\('activeReviewGuidanceProfileId'/);
-    assert.match(html, /id="guidanceGlobs"[^>]*disabled/);
-    assert.match(html, /not currently applied/);
+    assert.doesNotMatch(html, /id="guidanceGlobs"/);
+    assert.doesNotMatch(html, /guidance-file selections remain inactive/);
+    assert.match(html, /profile \? profile\.guidanceGlobs/);
 });
 
 test('buildSettingsHtml exposes notification health, retry, and dependent controls', () => {

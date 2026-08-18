@@ -17,6 +17,17 @@ const pr: PR = {
   hasReviewDraft: true,
 }
 
+function diffWithFiles(count: number): string {
+  return Array.from({ length: count }, (_, index) => [
+    `diff --git a/src/file-${index}.ts b/src/file-${index}.ts`,
+    `--- a/src/file-${index}.ts`,
+    `+++ b/src/file-${index}.ts`,
+    '@@ -1 +1 @@',
+    '-old',
+    '+new',
+  ].join('\n')).join('\n')
+}
+
 function hostMessage(message: object) {
   const handler = (window as unknown as { __handleMessage?: (payload: object) => void }).__handleMessage
   if (!handler) throw new Error('ReviewPane did not register the JCEF bridge handler')
@@ -61,6 +72,124 @@ describe('ReviewPane review submission', () => {
       .map(([arg]) => JSON.parse(arg.request) as { type: string })
       .filter((message) => message.type === 'saveDraft')
     expect(saves).toEqual([])
+  })
+
+
+
+  describe('ReviewPane chunked review fallback', () => {
+    function loadReviewableDiff(diff: string) {
+      act(() => {
+        hostMessage({
+          type: 'draftLoaded',
+          prKey: 'acme/widget#42',
+          prState: 'NO_DRAFT',
+          diff,
+          validationDiff: diff,
+          providerReadiness: { provider: 'claude', available: true, detail: 'Ready.' },
+        })
+      })
+    }
+
+    function generateMessages(cefQuery: ReturnType<typeof vi.fn>) {
+      return cefQuery.mock.calls
+        .map(([arg]) => JSON.parse(arg.request) as {
+          type: string
+          diff?: string
+          customInstructions?: string
+        })
+        .filter((message) => message.type === 'generateReview')
+    }
+
+    async function openAdvanced(user: ReturnType<typeof userEvent.setup>) {
+      await user.click(screen.getByText('Advanced review options'))
+    }
+
+    it('keeps chunking off for a large PR recommendation and generates a single-pass review', async () => {
+      const user = userEvent.setup()
+      const cefQuery = vi.fn()
+      ;(window as unknown as { cefQuery?: typeof cefQuery }).cefQuery = cefQuery
+      render(<ReviewPane pr={pr} />)
+      loadReviewableDiff(diffWithFiles(8))
+
+      await openAdvanced(user)
+      expect(screen.getByRole('checkbox', { name: /Use chunked review mode/ })).not.toBeChecked()
+      expect(screen.getByText('Fallback available: consider chunked mode.')).toBeInTheDocument()
+      expect(screen.getByText(/miss cross-file interactions and provide limited synthesis/)).toBeInTheDocument()
+
+      await user.click(screen.getByRole('button', { name: 'Generate Review' }))
+
+      expect(generateMessages(cefQuery)).toEqual([
+        expect.not.objectContaining({
+          diff: expect.any(String),
+          customInstructions: expect.stringContaining('Chunked review mode is enabled'),
+        }),
+      ])
+    })
+
+    it('keeps chunking off when the diff is truncated', async () => {
+      const user = userEvent.setup()
+      ;(window as unknown as { cefQuery?: ReturnType<typeof vi.fn> }).cefQuery = vi.fn()
+      render(<ReviewPane pr={pr} />)
+      loadReviewableDiff(`${diffWithFiles(1)}\n[... diff truncated at 250 KB ...]`)
+
+      await openAdvanced(user)
+
+      expect(screen.getByRole('checkbox', { name: /Use chunked review mode/ })).not.toBeChecked()
+      expect(screen.getByText('Fallback available: consider chunked mode.')).toBeInTheDocument()
+      expect(screen.getByText('Diff context is truncated.')).toBeInTheDocument()
+    })
+
+    it('keeps chunking off for a small PR', async () => {
+      const user = userEvent.setup()
+      ;(window as unknown as { cefQuery?: ReturnType<typeof vi.fn> }).cefQuery = vi.fn()
+      render(<ReviewPane pr={pr} />)
+      loadReviewableDiff(diffWithFiles(1))
+
+      await openAdvanced(user)
+
+      expect(screen.getByRole('checkbox', { name: /Use chunked review mode/ })).not.toBeChecked()
+      expect(screen.getByText('Recommended: Single-pass mode.')).toBeInTheDocument()
+    })
+
+    it('runs chunked review only after the user explicitly enables it', async () => {
+      const user = userEvent.setup()
+      const cefQuery = vi.fn()
+      ;(window as unknown as { cefQuery?: typeof cefQuery }).cefQuery = cefQuery
+      render(<ReviewPane pr={pr} />)
+      loadReviewableDiff(diffWithFiles(8))
+
+      await openAdvanced(user)
+      await user.click(screen.getByRole('checkbox', { name: /Use chunked review mode/ }))
+      await user.click(screen.getByRole('button', { name: 'Generate Review' }))
+
+      expect(generateMessages(cefQuery)).toEqual([
+        expect.objectContaining({
+          diff: expect.stringContaining('src/file-0.ts'),
+          customInstructions: expect.stringContaining('Chunked review mode is enabled'),
+        }),
+      ])
+    })
+
+    it('honors an explicit opt-out after chunking was selected', async () => {
+      const user = userEvent.setup()
+      const cefQuery = vi.fn()
+      ;(window as unknown as { cefQuery?: typeof cefQuery }).cefQuery = cefQuery
+      render(<ReviewPane pr={pr} />)
+      loadReviewableDiff(diffWithFiles(8))
+
+      await openAdvanced(user)
+      const chunked = screen.getByRole('checkbox', { name: /Use chunked review mode/ })
+      await user.click(chunked)
+      await user.click(chunked)
+      await user.click(screen.getByRole('button', { name: 'Generate Review' }))
+
+      expect(generateMessages(cefQuery)).toEqual([
+        expect.not.objectContaining({
+          diff: expect.any(String),
+          customInstructions: expect.stringContaining('Chunked review mode is enabled'),
+        }),
+      ])
+    })
   })
 
   it('refuses to discard after a save has already been sent', async () => {
@@ -330,5 +459,3 @@ describe('ReviewPane review submission', () => {
     })
   })
 })
-
-

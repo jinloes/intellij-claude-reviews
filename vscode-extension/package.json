@@ -189,14 +189,6 @@
           "default": "",
           "description": "Default extra instructions appended to every review prompt (e.g. team conventions to enforce). A per-review override in the PR Pilot view takes precedence when set."
         },
-        "pr-pilot.reviewGuidanceGlobs": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Saved for future trusted base-commit guidance. These paths are not currently applied to reviews."
-        },
         "pr-pilot.reviewGuidanceProfiles": {
           "type": "array",
           "default": [],
@@ -217,7 +209,7 @@
               }
             }
           },
-          "description": "Named reusable review-guidance profiles. Focus areas and custom instructions are applied; saved guidance file paths/globs are retained for future trusted base-commit support but are not currently applied."
+          "description": "Named reusable review-guidance profiles for focus areas and custom instructions."
         },
         "pr-pilot.activeReviewGuidanceProfileId": {
           "type": "string",

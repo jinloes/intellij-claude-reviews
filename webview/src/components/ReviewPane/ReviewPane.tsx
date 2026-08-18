@@ -351,7 +351,7 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
   const [chatVisible, setChatVisible] = useState(false)
   const [selectedContext, setSelectedContext] = useState('')
   const [pendingChatMessage, setPendingChatMessage] = useState<{ q: string; ctx: string; id: number; token?: string } | null>(null)
-  const [chunkedOverride, setChunkedOverride] = useState<boolean | null>(null)
+  const [chunkedMode, setChunkedMode] = useState(false)
   const [chunkedProgress, setChunkedProgress] = useState<ChunkedProgress | null>(null)
   const [qualityExpanded, setQualityExpanded] = useState(false)
   const [chatHeight, setChatHeight] = useState(() => loadChatHeight(localStorage, window.innerHeight))
@@ -417,7 +417,7 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
     setState({ kind: pr ? 'draftLoading' : 'idle' })
     setFocusAreasOverride('')
     setCustomInstructionsOverride('')
-    setChunkedOverride(null)
+    setChunkedMode(false)
     pendingSubmit.current = null
     submitInFlightRef.current = false
     setSaving(false)
@@ -905,8 +905,6 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
     () => chunkRecommendation(preflight, isDiffTruncated(validationDiff) || isDiffTruncated(diff)),
     [preflight, validationDiff, diff],
   )
-  const chunkedMode = chunkedOverride ?? recommendation.recommendChunked
-
   const savableResult: ReviewResult | null =
     state.kind === 'reviewUnsaved' || state.kind === 'draftPresent' ? state.result : null
   const savableSnapshot = savableResult ? reviewSnapshot(savableResult) : null
@@ -1541,7 +1539,7 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
                   recommendation={recommendation}
                   onFocusAreasChange={setFocusAreasOverride}
                   onCustomInstructionsChange={setCustomInstructionsOverride}
-                  onChunkedModeChange={setChunkedOverride}
+                  onChunkedModeChange={setChunkedMode}
                 />
               )}
               {result && qualityReport && qualityRiskCount > 0 && !qualityExpanded && (
@@ -1751,7 +1749,7 @@ function ReviewOverrides({
             checked={chunkedMode}
             onChange={(e) => onChunkedModeChange(e.target.checked)}
           />
-          Use chunked review mode (file batches with per-batch confidence)
+          Use chunked review mode as an advanced fallback
         </label>
         <div className="mt-1 pl-6 text-[11px] text-muted-foreground">
           {preflight
@@ -1760,13 +1758,13 @@ function ReviewOverrides({
         </div>
         <div className="mt-1 pl-6 text-[11px]">
           <span className={cn('font-medium', recommendation.recommendChunked ? 'text-status-suggestion' : 'text-status-approve')}>
-            {recommendation.recommendChunked ? 'Recommended: Chunked mode.' : 'Recommended: Single-pass mode.'}
+            {recommendation.recommendChunked ? 'Fallback available: consider chunked mode.' : 'Recommended: Single-pass mode.'}
           </span>
           <span className="text-muted-foreground"> {recommendation.reason}</span>
         </div>
         <p className="mt-1 pl-6 text-[11px] text-muted-foreground">
-          Best for large or high-risk PRs (many files, truncated diff context). Leave off for smaller PRs when you
-          want the fastest single-pass review.
+          Chunked reviews process file batches independently, so they can miss cross-file interactions and provide
+          limited synthesis. Enable this fallback explicitly only when a single-pass review cannot cover the diff.
         </p>
         </details>
       </div>
