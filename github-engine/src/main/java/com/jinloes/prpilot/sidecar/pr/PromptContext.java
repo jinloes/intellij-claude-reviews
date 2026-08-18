@@ -35,13 +35,27 @@ final class PromptContext {
     static String oneLine(String value, int limit) {
         if (value == null) return "";
         String normalized = value.replaceAll("\\s+", " ").trim();
-        return normalized.length() <= limit ? normalized : normalized.substring(0, limit) + "…";
+        return normalized.length() <= limit
+                ? normalized
+                : normalized.substring(0, safeTruncationEnd(normalized, limit)) + "…";
     }
 
     /** Bounds multi-line text while preserving its line structure. */
     static String bounded(String value, int limit) {
         if (value == null) return "";
         String trimmed = value.strip();
-        return trimmed.length() <= limit ? trimmed : trimmed.substring(0, limit) + "\n…[truncated]";
+        return trimmed.length() <= limit
+                ? trimmed
+                : trimmed.substring(0, safeTruncationEnd(trimmed, limit)) + "\n…[truncated]";
+    }
+
+    static int safeTruncationEnd(String value, int end) {
+        if (end > 0
+                && end < value.length()
+                && Character.isHighSurrogate(value.charAt(end - 1))
+                && Character.isLowSurrogate(value.charAt(end))) {
+            return end - 1;
+        }
+        return end;
     }
 }

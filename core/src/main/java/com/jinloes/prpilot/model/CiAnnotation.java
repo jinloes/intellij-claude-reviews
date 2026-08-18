@@ -22,6 +22,11 @@ public final class CiAnnotation {
         this.message = message;
     }
 
+    static CiAnnotation copyOf(CiAnnotation source) {
+        java.util.Objects.requireNonNull(source);
+        return new CiAnnotation(source.file, source.line, source.level, source.message);
+    }
+
     public String getFile() {
         return file != null ? file : "";
     }

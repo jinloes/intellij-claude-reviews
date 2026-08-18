@@ -645,8 +645,11 @@ public class CopilotService {
                             + (SDK_BOOT_TIMEOUT_MS / 1000)
                             + "s",
                     timeout);
-        } catch (InterruptedException | ExecutionException e) {
-            throw new IOException("copilot " + operation + " failed", e);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IOException("copilot " + operation + " failed", interrupted);
+        } catch (ExecutionException execution) {
+            throw new IOException("copilot " + operation + " failed", execution);
         }
     }
 

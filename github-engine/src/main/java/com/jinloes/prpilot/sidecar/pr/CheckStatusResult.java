@@ -25,6 +25,11 @@ public record CheckStatusResult(
         List<CheckAnnotation> annotations,
         String summary) {
 
+    public CheckStatusResult {
+        checkRuns = checkRuns == null ? List.of() : List.copyOf(checkRuns);
+        annotations = annotations == null ? List.of() : List.copyOf(annotations);
+    }
+
     static final String STATE_COMPLETE = "complete";
     static final String STATE_IN_PROGRESS = "in_progress";
     static final String STATE_NONE = "none";

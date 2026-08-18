@@ -13,6 +13,10 @@ import java.awt.BorderLayout;
 import java.awt.Rectangle;
 import java.io.File;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import javax.swing.JPanel;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -20,6 +24,45 @@ import org.junit.jupiter.api.Test;
 class WebviewPanelTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Nested
+    class MessagePublication {
+
+        @Test
+        void disposalWinningTheLifecycleLockSuppressesTheBrowserCall() throws Exception {
+            Object lifecycleLock = new Object();
+            AtomicBoolean disposed = new AtomicBoolean();
+            AtomicInteger browserCalls = new AtomicInteger();
+            CountDownLatch readyToPublish = new CountDownLatch(1);
+            CountDownLatch publish = new CountDownLatch(1);
+            Thread publisher =
+                    new Thread(
+                            () -> {
+                                readyToPublish.countDown();
+                                try {
+                                    publish.await();
+                                } catch (InterruptedException exception) {
+                                    Thread.currentThread().interrupt();
+                                    return;
+                                }
+                                WebviewPanel.publishIfActive(
+                                        lifecycleLock,
+                                        disposed::get,
+                                        browserCalls::incrementAndGet);
+                            });
+            publisher.start();
+            assertThat(readyToPublish.await(1, TimeUnit.SECONDS)).isTrue();
+
+            synchronized (lifecycleLock) {
+                disposed.set(true);
+            }
+            publish.countDown();
+            publisher.join(TimeUnit.SECONDS.toMillis(1));
+
+            assertThat(publisher.isAlive()).isFalse();
+            assertThat(browserCalls).hasValue(0);
+        }
+    }
 
     @Nested
     class HealthyDraftEntries {

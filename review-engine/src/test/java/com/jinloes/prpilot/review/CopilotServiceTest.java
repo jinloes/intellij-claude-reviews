@@ -773,5 +773,20 @@ class CopilotServiceTest {
                     .isInstanceOf(IOException.class)
                     .hasMessage("copilot session creation timed out after 60s");
         }
+
+        @Test
+        void interruptedWaitRestoresTheThreadInterruptStatus() {
+            CompletableFuture<String> future = new CompletableFuture<>();
+            Thread.currentThread().interrupt();
+            try {
+                assertThatThrownBy(() -> CopilotService.awaitWithTimeout(future, "runtime startup"))
+                        .isInstanceOf(IOException.class)
+                        .hasMessage("copilot runtime startup failed")
+                        .hasCauseInstanceOf(InterruptedException.class);
+                assertThat(Thread.currentThread().isInterrupted()).isTrue();
+            } finally {
+                Thread.interrupted();
+            }
+        }
     }
 }

@@ -42,7 +42,7 @@ public final class PRReviewRequest {
         this.ciAnnotations =
                 builder.ciAnnotations == null
                         ? java.util.List.of()
-                        : java.util.List.copyOf(builder.ciAnnotations);
+                        : copyCiAnnotations(builder.ciAnnotations);
     }
 
     /** Creates a request with only the two required inputs and no optional context. */
@@ -108,7 +108,12 @@ public final class PRReviewRequest {
      * deterministically. Never null.
      */
     public java.util.List<CiAnnotation> getCiAnnotations() {
-        return ciAnnotations;
+        return copyCiAnnotations(ciAnnotations);
+    }
+
+    private static java.util.List<CiAnnotation> copyCiAnnotations(
+            java.util.List<CiAnnotation> annotations) {
+        return annotations.stream().map(CiAnnotation::copyOf).toList();
     }
 
     /** Fluent builder; every context setter is optional. */

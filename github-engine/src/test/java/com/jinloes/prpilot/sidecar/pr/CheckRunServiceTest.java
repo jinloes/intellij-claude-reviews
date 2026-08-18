@@ -1,6 +1,7 @@
 package com.jinloes.prpilot.sidecar.pr;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -21,6 +22,43 @@ class CheckRunServiceTest {
 
     private static final String SHA = "a".repeat(40);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Nested
+    class ResultSnapshots {
+
+        @Test
+        void copiesCallerOwnedListsAndExposesImmutableAccessors() {
+            List<CheckRunSummary> checkRuns =
+                    new ArrayList<>(
+                            List.of(new CheckRunSummary("build", "completed", "success", "")));
+            List<CheckAnnotation> annotations =
+                    new ArrayList<>(
+                            List.of(
+                                    new CheckAnnotation(
+                                            "src/Main.java", 1, 1, "warning", "message")));
+
+            CheckStatusResult result =
+                    new CheckStatusResult("ok", "loaded", "complete", checkRuns, annotations, "");
+            checkRuns.clear();
+            annotations.clear();
+
+            assertThat(result.checkRuns()).hasSize(1);
+            assertThat(result.annotations()).hasSize(1);
+            assertThatThrownBy(() -> result.checkRuns().clear())
+                    .isInstanceOf(UnsupportedOperationException.class);
+            assertThatThrownBy(() -> result.annotations().clear())
+                    .isInstanceOf(UnsupportedOperationException.class);
+        }
+
+        @Test
+        void normalizesNullListsToEmpty() {
+            CheckStatusResult result =
+                    new CheckStatusResult("api_failed", "failed", "none", null, null, "");
+
+            assertThat(result.checkRuns()).isEmpty();
+            assertThat(result.annotations()).isEmpty();
+        }
+    }
 
     private static CheckRunService service(FakeClient client) {
         return new CheckRunService(

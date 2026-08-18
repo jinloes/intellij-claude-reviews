@@ -19,12 +19,15 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Canonical save/submit/delete orchestration for GitHub pending reviews; tokens never leave the
  * engine. Includes the body-first, per-comment 422 fallback used by both hosts.
  */
 public final class DraftReviewMutationService {
+    private static final Logger log = LoggerFactory.getLogger(DraftReviewMutationService.class);
     private static final Duration TIMEOUT = Duration.ofSeconds(15);
     private static final int MAX_ATTEMPTS = 3;
     private static final Pattern SEGMENT = Pattern.compile("[A-Za-z0-9_.-]+");
@@ -178,6 +181,12 @@ public final class DraftReviewMutationService {
             deleteProvisionalReview(session, reviewsUrl, provisionalReviewId);
             return DraftReviewMutationResult.failure(exception.status(), exception.getMessage());
         } catch (RuntimeException exception) {
+            log.warn(
+                    "Unexpected draft review save failure for {}/{}#{} ({})",
+                    params.owner(),
+                    params.repo(),
+                    params.number(),
+                    exception.getClass().getName());
             deleteProvisionalReview(session, reviewsUrl, provisionalReviewId);
             return DraftReviewMutationResult.failure("api_failed", "GitHub API request failed.");
         }
@@ -313,7 +322,11 @@ public final class DraftReviewMutationService {
         if (reviewId == null) return;
         try {
             client.delete(session.apiBase(), session.token(), reviewsUrl + "/" + reviewId);
-        } catch (RuntimeException ignored) {
+        } catch (RuntimeException exception) {
+            log.debug(
+                    "Unable to clean up provisional draft review {} ({})",
+                    reviewId,
+                    exception.getClass().getName());
             // Best effort: the original API failure remains the user-visible result.
         }
     }

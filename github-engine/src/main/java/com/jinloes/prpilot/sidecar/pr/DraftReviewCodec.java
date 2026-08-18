@@ -10,12 +10,15 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Encodes/decodes PR Pilot review metadata embedded in a GitHub review body, falling back to GitHub
  * inline comments when absent or invalid.
  */
 public final class DraftReviewCodec {
+    private static final Logger log = LoggerFactory.getLogger(DraftReviewCodec.class);
     private static final String VERDICT_TAG = "<!-- claude-verdict: ";
     private static final String SUMMARY_TAG = "<!-- claude-summary: ";
     private static final String COMMENTS_TAG = "<!-- claude-comments: ";
@@ -49,7 +52,10 @@ public final class DraftReviewCodec {
                             new LineComment(
                                     c.f(), c.l(), c.t(), c.b(), c.s(), c.c(), c.cf(), c.r()));
                 return new DecodedReview(summary, verdict, lines, false);
-            } catch (Exception ignored) {
+            } catch (Exception exception) {
+                log.debug(
+                        "Embedded draft review metadata was invalid; using GitHub comments ({})",
+                        exception.getClass().getName());
             }
         }
         if (!validVerdict) {

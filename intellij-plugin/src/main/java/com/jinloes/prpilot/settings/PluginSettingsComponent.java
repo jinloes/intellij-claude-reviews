@@ -17,6 +17,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
+import java.util.function.Function;
 import javax.swing.*;
 import javax.swing.event.ChangeEvent;
 
@@ -95,6 +98,7 @@ public class PluginSettingsComponent {
 
     private final JLabel statusLabel = new JBLabel("Checking…");
     private final JButton checkButton = new JButton("Check Status");
+    private final AuthCheckCoordinator authChecks;
 
     // Notification settings
     private final JCheckBox notificationsEnabledBox =
@@ -108,6 +112,17 @@ public class PluginSettingsComponent {
     private JPanel notifSubPanel;
 
     public PluginSettingsComponent() {
+        this(
+                baseUrl -> IntellijGitHubService.getInstance().checkAuth(baseUrl),
+                task -> ApplicationManager.getApplication().executeOnPooledThread(task),
+                SwingUtilities::invokeLater);
+    }
+
+    PluginSettingsComponent(
+            Function<String, CheckAuthResult> authChecker,
+            Consumer<Runnable> backgroundExecutor,
+            Consumer<Runnable> uiExecutor) {
+        this.authChecks = new AuthCheckCoordinator(authChecker, backgroundExecutor, uiExecutor);
         checkButton.addActionListener(e -> checkStatus());
 
         providerCombo.setRenderer(
@@ -326,9 +341,8 @@ public class PluginSettingsComponent {
                         .addComponent(notifSubPanel, 1)
                         .addComponentFillVertically(new JPanel(), 0)
                         .getPanel();
-
         refreshPollStatus();
-        refreshAuthStatus();
+        refreshPollStatus();
         updateAdvancedCopilotOptionsVisibility();
     }
 
@@ -751,6 +765,7 @@ public class PluginSettingsComponent {
     }
 
     private void checkStatus() {
+        long checkId = authChecks.begin();
         checkButton.setEnabled(false);
         statusLabel.setText("Checking…");
 
@@ -762,30 +777,18 @@ public class PluginSettingsComponent {
             checkButton.setEnabled(true);
             return;
         }
-        ApplicationManager.getApplication()
-                .executeOnPooledThread(
-                        () -> {
-                            CheckAuthResult result =
-                                    IntellijGitHubService.getInstance().checkAuth(baseUrl);
-                            if ("authenticated".equals(result.status())
-                                    && result.username() != null) {
-                                String username = result.username();
-                                SwingUtilities.invokeLater(
-                                        () -> {
-                                            statusLabel.setText("Signed in as @" + username);
-                                            checkButton.setEnabled(true);
-                                        });
-                            } else {
-                                SwingUtilities.invokeLater(
-                                        () -> {
-                                            statusLabel.setText(
-                                                    "<html><font color='red'>"
-                                                            + result.message()
-                                                            + "</font></html>");
-                                            checkButton.setEnabled(true);
-                                        });
-                            }
-                        });
+        authChecks.execute(
+                checkId,
+                baseUrl,
+                result -> {
+                    if ("authenticated".equals(result.status()) && result.username() != null) {
+                        statusLabel.setText("Signed in as @" + result.username());
+                    } else {
+                        statusLabel.setText(
+                                "<html><font color='red'>" + result.message() + "</font></html>");
+                    }
+                    checkButton.setEnabled(true);
+                });
     }
 
     private void refreshPollStatus() {
@@ -801,7 +804,40 @@ public class PluginSettingsComponent {
                 "<html><font color='" + color + "'><small>" + status + "</small></font></html>");
     }
 
-    private void refreshAuthStatus() {
+    void refreshAuthStatus() {
         checkStatus();
+    }
+
+    static final class AuthCheckCoordinator {
+        private final Function<String, CheckAuthResult> authChecker;
+        private final Consumer<Runnable> backgroundExecutor;
+        private final Consumer<Runnable> uiExecutor;
+        private final AtomicLong sequence = new AtomicLong();
+
+        AuthCheckCoordinator(
+                Function<String, CheckAuthResult> authChecker,
+                Consumer<Runnable> backgroundExecutor,
+                Consumer<Runnable> uiExecutor) {
+            this.authChecker = authChecker;
+            this.backgroundExecutor = backgroundExecutor;
+            this.uiExecutor = uiExecutor;
+        }
+
+        long begin() {
+            return sequence.incrementAndGet();
+        }
+
+        void execute(long checkId, String baseUrl, Consumer<CheckAuthResult> resultConsumer) {
+            backgroundExecutor.accept(
+                    () -> {
+                        CheckAuthResult result = authChecker.apply(baseUrl);
+                        uiExecutor.accept(
+                                () -> {
+                                    if (checkId == sequence.get()) {
+                                        resultConsumer.accept(result);
+                                    }
+                                });
+                    });
+        }
     }
 }

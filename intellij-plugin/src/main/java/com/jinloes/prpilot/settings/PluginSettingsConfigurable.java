@@ -3,6 +3,7 @@ package com.jinloes.prpilot.settings;
 import com.intellij.openapi.options.Configurable;
 import com.intellij.openapi.options.ConfigurationException;
 import com.jinloes.prpilot.services.PRNotificationService;
+import java.util.function.Consumer;
 import javax.swing.*;
 import org.jetbrains.annotations.Nls;
 import org.jetbrains.annotations.Nullable;
@@ -94,7 +95,6 @@ public class PluginSettingsConfigurable implements Configurable {
     @Override
     public void reset() {
         PluginSettings s = PluginSettings.getInstance();
-        component.setGithubBaseUrl(s.getGithubBaseUrl());
         component.setNotificationsEnabled(s.isNotificationsEnabled());
         component.setNotifyReviewRequested(s.isNotifyReviewRequested());
         component.setNotifyStarredRepos(s.isNotifyStarredRepos());
@@ -112,6 +112,14 @@ public class PluginSettingsConfigurable implements Configurable {
         component.setReviewGuidanceProfiles(s.getReviewGuidanceProfiles());
         component.setActiveReviewGuidanceProfileId(s.getActiveReviewGuidanceProfileId());
         component.setReviewSelfCritique(s.isReviewSelfCritique());
+        loadGithubBaseUrlAndRefresh(
+                s.getGithubBaseUrl(), component::setGithubBaseUrl, component::refreshAuthStatus);
+    }
+
+    static void loadGithubBaseUrlAndRefresh(
+            String persistedBaseUrl, Consumer<String> baseUrlSetter, Runnable refresh) {
+        baseUrlSetter.accept(persistedBaseUrl);
+        refresh.run();
     }
 
     @Override

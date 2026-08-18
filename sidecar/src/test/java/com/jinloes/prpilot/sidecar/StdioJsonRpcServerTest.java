@@ -6,7 +6,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.jinloes.prpilot.engine.GitHubEngine;
+import com.jinloes.prpilot.engine.ReviewEngineApi;
 import com.jinloes.prpilot.engine.ReviewSessionService;
+import com.jinloes.prpilot.model.ReviewResult;
 import com.jinloes.prpilot.review.ReviewOutcomeLog;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -18,6 +20,9 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -373,6 +378,40 @@ class StdioJsonRpcServerTest {
     }
 
     @Test
+    void asyncReviewNotificationsCompleteWithoutResponsesOrOperationLeaks() throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        AtomicInteger generations = new AtomicInteger();
+        ReviewSessionService fakeReview =
+                new ReviewSessionService() {
+                    @Override
+                    public ReviewResult generate(
+                            ReviewEngineApi.GenerateReviewParams params,
+                            Consumer<String> onStatus,
+                            BiConsumer<String, String> onChunk) {
+                        generations.incrementAndGet();
+                        return new ReviewResult("summary", "APPROVE", java.util.List.of());
+                    }
+                };
+        server =
+                new StdioJsonRpcServer(
+                        objectMapper,
+                        frameCodec,
+                        new SidecarBootstrapService(),
+                        new GitHubEngine(),
+                        fakeReview,
+                        reviewExecutor);
+        server.run(new ByteArrayInputStream(new byte[0]), output);
+
+        assertThat(invokeGenerateNotification()).isNull();
+        reviewExecutor.submit(() -> {}).get(1, TimeUnit.SECONDS);
+        assertThat(invokeGenerateNotification()).isNull();
+        reviewExecutor.submit(() -> {}).get(1, TimeUnit.SECONDS);
+
+        assertThat(generations).hasValue(2);
+        assertThat(output.size()).isZero();
+    }
+
+    @Test
     void reviewsGenerateReturnsNullSynchronouslyWithoutBlockingTheReadLoop() {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         server = serverWithOutput(output);
@@ -494,6 +533,16 @@ class StdioJsonRpcServerTest {
         return server.handle(
                 ("{\"jsonrpc\":\"2.0\",\"id\":43,\"method\":\"reviews/generate\",\"params\":{"
                                 + "\"operationId\":\"review-1\",\"provider\":\"claude\",\"model\":\"\",\"effort\":\"\",\"inheritMcp\":false,"
+                                + "\"pr\":{\"title\":\"T\",\"htmlUrl\":\"\",\"owner\":\"o\",\"repo\":\"r\","
+                                + "\"number\":1,\"body\":\"\",\"author\":\"a\",\"createdAt\":\"2024-01-01\","
+                                + "\"isDraft\":false},\"diff\":\"\",\"ciStatus\":\"\"}}")
+                        .getBytes(StandardCharsets.UTF_8));
+    }
+
+    private JsonNode invokeGenerateNotification() {
+        return server.handle(
+                ("{\"jsonrpc\":\"2.0\",\"method\":\"reviews/generate\",\"params\":{"
+                                + "\"operationId\":\"notification-1\",\"provider\":\"claude\",\"model\":\"\",\"effort\":\"\",\"inheritMcp\":false,"
                                 + "\"pr\":{\"title\":\"T\",\"htmlUrl\":\"\",\"owner\":\"o\",\"repo\":\"r\","
                                 + "\"number\":1,\"body\":\"\",\"author\":\"a\",\"createdAt\":\"2024-01-01\","
                                 + "\"isDraft\":false},\"diff\":\"\",\"ciStatus\":\"\"}}")

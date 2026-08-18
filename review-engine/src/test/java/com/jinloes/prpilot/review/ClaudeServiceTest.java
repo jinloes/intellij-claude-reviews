@@ -17,6 +17,12 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
@@ -95,6 +101,17 @@ class ClaudeServiceTest {
         }
     }
 
+    private static final class ConcurrentChatClaudeService extends ClaudeService {
+        ConcurrentChatClaudeService(Executor executor) {
+            super(null, new CancellationToken(), executor);
+        }
+
+        @Override
+        Process buildProcess(String... extraArgs) throws IOException {
+            return new ProcessBuilder("sh", "-c", "cat").start();
+        }
+    }
+
     @Nested
     class Cancellation {
 
@@ -130,6 +147,51 @@ class ClaudeServiceTest {
                     .isInstanceOf(IOException.class)
                     .hasMessageContaining("Chat timed out");
             assertThat(service.spawnedProcess.isAlive()).isFalse();
+        }
+    }
+
+    @Nested
+    class BlockingIoExecutor {
+
+        @Test
+        void twoConcurrentChatsCanStartAllStreamTasksWithoutStarvation() throws Exception {
+            ExecutorService ioThreads = Executors.newFixedThreadPool(6);
+            ExecutorService callers = Executors.newFixedThreadPool(2);
+            CountDownLatch allStreamTasksStarted = new CountDownLatch(6);
+            Executor barrierExecutor =
+                    task ->
+                            ioThreads.execute(
+                                    () -> {
+                                        allStreamTasksStarted.countDown();
+                                        try {
+                                            if (!allStreamTasksStarted.await(2, TimeUnit.SECONDS)) {
+                                                throw new AssertionError(
+                                                        "stream tasks did not start concurrently");
+                                            }
+                                        } catch (InterruptedException exception) {
+                                            Thread.currentThread().interrupt();
+                                            return;
+                                        }
+                                        task.run();
+                                    });
+            try {
+                ConcurrentChatClaudeService first =
+                        new ConcurrentChatClaudeService(barrierExecutor);
+                ConcurrentChatClaudeService second =
+                        new ConcurrentChatClaudeService(barrierExecutor);
+
+                Future<String> firstResult =
+                        callers.submit(() -> first.chatWithPrompt("first", ignored -> {}));
+                Future<String> secondResult =
+                        callers.submit(() -> second.chatWithPrompt("second", ignored -> {}));
+
+                assertThat(allStreamTasksStarted.await(2, TimeUnit.SECONDS)).isTrue();
+                assertThat(firstResult.get(2, TimeUnit.SECONDS)).isEqualTo("first");
+                assertThat(secondResult.get(2, TimeUnit.SECONDS)).isEqualTo("second");
+            } finally {
+                callers.shutdownNow();
+                ioThreads.shutdownNow();
+            }
         }
     }
 

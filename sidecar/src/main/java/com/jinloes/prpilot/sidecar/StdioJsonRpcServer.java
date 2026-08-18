@@ -176,6 +176,7 @@ final class StdioJsonRpcServer {
         if (!submitReviewOperation(
                 params.operationId(),
                 id,
+                request.has("id"),
                 "Review interrupted.",
                 operation -> {
                     try {
@@ -227,6 +228,7 @@ final class StdioJsonRpcServer {
         if (!submitReviewOperation(
                 params.operationId(),
                 id,
+                request.has("id"),
                 "Chat interrupted.",
                 operation -> {
                     try {
@@ -276,6 +278,7 @@ final class StdioJsonRpcServer {
     private boolean submitReviewOperation(
             String operationId,
             JsonNode requestId,
+            boolean responseRequired,
             String cancellationMessage,
             java.util.function.Consumer<ScheduledOperation> operation) {
         synchronized (operationLock) {
@@ -283,7 +286,8 @@ final class StdioJsonRpcServer {
                 return false;
             }
             ScheduledOperation scheduled =
-                    new ScheduledOperation(requestId, cancellationMessage, operation);
+                    new ScheduledOperation(
+                            requestId, responseRequired, cancellationMessage, operation);
             Future<?> future =
                     reviewExecutor.submit(
                             () -> {
@@ -334,6 +338,7 @@ final class StdioJsonRpcServer {
 
     private final class ScheduledOperation {
         private final JsonNode requestId;
+        private final boolean responseRequired;
         private final String cancellationMessage;
         private final java.util.function.Consumer<ScheduledOperation> operation;
         private final AtomicBoolean completed = new AtomicBoolean();
@@ -343,9 +348,11 @@ final class StdioJsonRpcServer {
 
         private ScheduledOperation(
                 JsonNode requestId,
+                boolean responseRequired,
                 String cancellationMessage,
                 java.util.function.Consumer<ScheduledOperation> operation) {
             this.requestId = requestId;
+            this.responseRequired = responseRequired;
             this.cancellationMessage = cancellationMessage;
             this.operation = operation;
         }
@@ -365,7 +372,9 @@ final class StdioJsonRpcServer {
                 terminalResponse =
                         isCancelled() ? error(requestId, -32000, cancellationMessage) : response;
             }
-            send(terminalResponse);
+            if (responseRequired) {
+                send(terminalResponse);
+            }
         }
 
         private void completeCancellation() {

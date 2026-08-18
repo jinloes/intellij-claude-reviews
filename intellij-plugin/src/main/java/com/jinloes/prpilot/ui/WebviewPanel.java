@@ -54,6 +54,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import javax.swing.JComponent;
 import javax.swing.JPanel;
@@ -1190,7 +1191,7 @@ public class WebviewPanel implements Disposable {
                                 reviewService = resolvePrClaudeService(promptPr);
                             } catch (Exception e) {
                                 log.warn(
-                                        "Worktree resolution for PR #{} failed:",
+                                        "Worktree resolution for PR #{} failed: {}",
                                         number,
                                         e.getMessage());
                                 synchronized (WebviewPanel.this) {
@@ -2014,7 +2015,7 @@ public class WebviewPanel implements Disposable {
                     log.warn("Failed to remove incomplete worktree at {}", wt);
                 }
             }
-            log.warn("Worktree creation for PR #{} failed:", pr.getNumber(), e.getMessage());
+            log.warn("Worktree creation for PR #{} failed: {}", pr.getNumber(), e.getMessage());
             throw new IllegalStateException(
                     "Unable to create an isolated pull request worktree.", e);
         }
@@ -2079,13 +2080,27 @@ public class WebviewPanel implements Disposable {
             versioned.put("protocolVersion", BridgeMessageValidator.PROTOCOL_VERSION);
             String json = mapper.writeValueAsString(versioned);
             String safe = json.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029");
-            browser.getCefBrowser()
-                    .executeJavaScript(
-                            "if(window.__handleMessage){window.__handleMessage(" + safe + ");}",
-                            browser.getCefBrowser().getURL(),
-                            0);
+            publishIfActive(
+                    this,
+                    () -> disposed,
+                    () -> {
+                        CefBrowser cefBrowser = browser.getCefBrowser();
+                        cefBrowser.executeJavaScript(
+                                "if(window.__handleMessage){window.__handleMessage(" + safe + ");}",
+                                cefBrowser.getURL(),
+                                0);
+                    });
         } catch (JsonProcessingException e) {
             log.warn("pushMessage serialization failed: {}", e.getMessage());
+        }
+    }
+
+    static void publishIfActive(
+            Object lifecycleLock, BooleanSupplier disposed, Runnable browserCall) {
+        synchronized (lifecycleLock) {
+            if (!disposed.getAsBoolean()) {
+                browserCall.run();
+            }
         }
     }
 

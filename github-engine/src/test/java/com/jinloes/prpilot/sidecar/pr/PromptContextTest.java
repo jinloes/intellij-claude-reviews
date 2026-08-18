@@ -66,6 +66,12 @@ class PromptContextTest {
         }
 
         @Test
+        void doesNotSplitASurrogatePairAtTheLimit() {
+            assertThat(PromptContext.oneLine("abc😀z", 4)).isEqualTo("abc…");
+            assertThat(PromptContext.oneLine("😀z", 1)).isEqualTo("…");
+        }
+
+        @Test
         void treatsNullAndBlankAsEmpty() {
             assertThat(PromptContext.oneLine(null, 10)).isEmpty();
             assertThat(PromptContext.oneLine("   \n ", 10)).isEmpty();
@@ -82,6 +88,12 @@ class PromptContextTest {
         @Test
         void appendsATruncationMarkerWhenOverTheLimit() {
             assertThat(PromptContext.bounded("abcdefghij", 4)).isEqualTo("abcd\n…[truncated]");
+        }
+
+        @Test
+        void doesNotSplitASurrogatePairAtTheLimit() {
+            assertThat(PromptContext.bounded("abc😀z", 4)).isEqualTo("abc\n…[truncated]");
+            assertThat(PromptContext.bounded("😀z", 1)).isEqualTo("\n…[truncated]");
         }
 
         @Test

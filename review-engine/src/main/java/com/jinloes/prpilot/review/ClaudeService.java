@@ -23,8 +23,11 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -50,6 +53,18 @@ public class ClaudeService {
 
     private static final Logger log = LoggerFactory.getLogger(ClaudeService.class);
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final AtomicLong IO_THREAD_SEQUENCE = new AtomicLong();
+    private static final Executor IO_EXECUTOR =
+            Executors.newCachedThreadPool(
+                    task -> {
+                        Thread thread =
+                                new Thread(
+                                        task,
+                                        "pr-pilot-claude-io-"
+                                                + IO_THREAD_SEQUENCE.incrementAndGet());
+                        thread.setDaemon(true);
+                        return thread;
+                    });
 
     private static final String STATUS_GENERATING = "Generating review…";
     private static final String STATUS_PARSING = "Parsing review…";
@@ -294,24 +309,30 @@ public class ClaudeService {
 
     private final File workingDir;
     private final CancellationToken cancellationToken;
+    private final Executor ioExecutor;
 
     /** The process currently executing a review or chat request; null when idle. */
     private final AtomicReference<Process> activeProcess = new AtomicReference<>();
 
     public ClaudeService() {
-        this(null, new CancellationToken());
+        this(null, new CancellationToken(), IO_EXECUTOR);
     }
 
     public ClaudeService(String projectDir) {
-        this(projectDir, new CancellationToken());
+        this(projectDir, new CancellationToken(), IO_EXECUTOR);
     }
 
     public ClaudeService(String projectDir, CancellationToken cancellationToken) {
+        this(projectDir, cancellationToken, IO_EXECUTOR);
+    }
+
+    ClaudeService(String projectDir, CancellationToken cancellationToken, Executor ioExecutor) {
         this.workingDir =
                 StringUtils.isNotBlank(projectDir)
                         ? new File(projectDir)
                         : new File(System.getProperty("user.home", "/"));
         this.cancellationToken = Objects.requireNonNull(cancellationToken);
+        this.ioExecutor = Objects.requireNonNull(ioExecutor);
     }
 
     /** Holds the subtype and session ID from an error result event in the stream output. */
@@ -400,7 +421,7 @@ public class ClaudeService {
             Process finalProcess = process;
             CompletableFuture<String> stderrFuture = drainStderr(process);
             CompletableFuture<Void> stdinFuture =
-                    CompletableFuture.runAsync(() -> writeStdin(finalProcess, prompt));
+                    CompletableFuture.runAsync(() -> writeStdin(finalProcess, prompt), ioExecutor);
 
             boolean finished = process.waitFor(reviewTimeoutMillis(), TimeUnit.MILLISECONDS);
             if (!finished) {
@@ -474,7 +495,8 @@ public class ClaudeService {
             Process finalProcess = process;
             CompletableFuture<String> stderrFuture = drainStderr(process);
             CompletableFuture<Void> stdinFuture =
-                    CompletableFuture.runAsync(() -> writeStdin(finalProcess, RESUME_NUDGE));
+                    CompletableFuture.runAsync(
+                            () -> writeStdin(finalProcess, RESUME_NUDGE), ioExecutor);
 
             boolean finished = process.waitFor(resumeTimeoutMillis(), TimeUnit.MILLISECONDS);
             if (!finished) {
@@ -735,10 +757,11 @@ public class ClaudeService {
             }
             Process finalProcess = process;
             CompletableFuture<Void> stdinFuture =
-                    CompletableFuture.runAsync(() -> writeStdin(finalProcess, prompt));
+                    CompletableFuture.runAsync(() -> writeStdin(finalProcess, prompt), ioExecutor);
             CompletableFuture<String> stderrFuture = drainStderr(process);
             CompletableFuture<String> stdoutFuture =
-                    CompletableFuture.supplyAsync(() -> readChatOutput(finalProcess, onChunk));
+                    CompletableFuture.supplyAsync(
+                            () -> readChatOutput(finalProcess, onChunk), ioExecutor);
 
             boolean finished = process.waitFor(chatTimeoutMillis(), TimeUnit.MILLISECONDS);
             if (!finished) {
@@ -1182,7 +1205,7 @@ public class ClaudeService {
         return out.toString();
     }
 
-    private static CompletableFuture<String> drainStderr(Process process) {
+    private CompletableFuture<String> drainStderr(Process process) {
         return CompletableFuture.supplyAsync(
                 () -> {
                     try {
@@ -1190,7 +1213,8 @@ public class ClaudeService {
                     } catch (IOException e) {
                         return "";
                     }
-                });
+                },
+                ioExecutor);
     }
 
     private static String readChatOutput(Process process, Consumer<String> onChunk) {

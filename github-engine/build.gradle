@@ -20,6 +20,7 @@ compileJava {
 
 dependencies {
     api 'com.fasterxml.jackson.core:jackson-databind:2.17.1'
+    implementation 'org.slf4j:slf4j-api:2.0.13'
 
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
     testImplementation 'org.assertj:assertj-core:3.27.7'
@@ -29,4 +30,3 @@ dependencies {
 tasks.named('test') {
     useJUnitPlatform()
 }
-

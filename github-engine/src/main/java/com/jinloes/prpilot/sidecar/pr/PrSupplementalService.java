@@ -286,7 +286,7 @@ public final class PrSupplementalService {
     private static String capContext(String summary) {
         if (summary.length() <= MAX_EXISTING_REVIEWS_CHARS) return summary;
         int end = MAX_EXISTING_REVIEWS_CHARS - CONTEXT_TRUNCATION_MARKER.length();
-        if (end > 0 && Character.isHighSurrogate(summary.charAt(end - 1))) end--;
+        end = PromptContext.safeTruncationEnd(summary, end);
         return summary.substring(0, Math.max(0, end)) + CONTEXT_TRUNCATION_MARKER;
     }
 

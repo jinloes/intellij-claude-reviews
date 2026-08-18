@@ -1,6 +1,7 @@
 package com.jinloes.prpilot.model;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -60,14 +61,50 @@ class PRReviewRequestTest {
 
         @Test
         void copiesCiAnnotationsSoLaterCallerMutationCannotChangeTheRequest() {
-            List<CiAnnotation> source =
-                    new ArrayList<>(List.of(new CiAnnotation("A.java", 1, "warning", "m")));
+            CiAnnotation annotation = new CiAnnotation("A.java", 1, "WARNING", "m");
+            List<CiAnnotation> source = new ArrayList<>(List.of(annotation));
 
             PRReviewRequest request =
                     PRReviewRequest.builder(pr(), "diff").ciAnnotations(source).build();
             source.clear();
+            annotation.setFile("Changed.java");
+            annotation.setLine(99);
+            annotation.setLevel("failure");
+            annotation.setMessage("changed");
 
-            assertThat(request.getCiAnnotations()).hasSize(1);
+            CiAnnotation stored = request.getCiAnnotations().get(0);
+            assertThat(stored.getFile()).isEqualTo("A.java");
+            assertThat(stored.getLine()).isEqualTo(1);
+            assertThat(stored.getLevel()).isEqualTo("warning");
+            assertThat(stored.getMessage()).isEqualTo("m");
+        }
+
+        @Test
+        void accessorMutationCannotChangeTheRequestSnapshot() {
+            PRReviewRequest request =
+                    PRReviewRequest.builder(pr(), "diff")
+                            .ciAnnotations(
+                                    List.of(new CiAnnotation("A.java", 1, "warning", "message")))
+                            .build();
+
+            request.getCiAnnotations().get(0).setMessage("changed");
+
+            assertThat(request.getCiAnnotations().get(0).getMessage()).isEqualTo("message");
+            assertThatThrownBy(() -> request.getCiAnnotations().clear())
+                    .isInstanceOf(UnsupportedOperationException.class);
+        }
+
+        @Test
+        void continuesToRejectNullAnnotationElements() {
+            List<CiAnnotation> annotations = new ArrayList<>();
+            annotations.add(null);
+
+            assertThatThrownBy(
+                            () ->
+                                    PRReviewRequest.builder(pr(), "diff")
+                                            .ciAnnotations(annotations)
+                                            .build())
+                    .isInstanceOf(NullPointerException.class);
         }
     }
 }
