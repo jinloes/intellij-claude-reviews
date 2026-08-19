@@ -167,6 +167,7 @@ code, or sensitive pull-request content.
 - `.github/workflows/release.yml` - Tag-driven release workflow for both plugin artifacts
 - `AGENTS.md` - Agent workflow, test requirements, and parity rules
 - `ARCHITECTURE.md` - Architecture details and design constraints
+- `CODEMAP.md` - Task-oriented implementation and test-file map
 
 ## Development requirements
 
@@ -293,4 +294,5 @@ User-facing behavior must stay aligned between IntelliJ and VS Code. If you upda
 
 - GitHub authentication and API behavior are shared in `github-engine`; hosts never receive or persist GitHub tokens.
 - Review-provider CLI setup remains host-specific, while prompt and review semantics stay aligned.
-- For deeper architecture details and persistence files, see `ARCHITECTURE.md`.
+- For design constraints and persistence files, see `ARCHITECTURE.md`. For implementation entry
+  points and related tests, see `CODEMAP.md`.

@@ -5,19 +5,23 @@ Operational guide for coding agents working in this repository.
 ## Source of truth split
 
 - `AGENTS.md` (this file): workflow, testing, coding conventions, and cross-host sync obligations.
-- `ARCHITECTURE.md`: project layout, design constraints, settings, and local data files.
+- `ARCHITECTURE.md`: system boundaries, design constraints, settings, and local data files.
+- `CODEMAP.md`: implementation locations, task entry points, related tests, and cross-module paths.
 - Treat `AGENTS.md` as the single instruction file for agent workflows in this repo.
+- Read `ARCHITECTURE.md` when a change affects design or crosses module boundaries. Read
+  `CODEMAP.md` when locating implementation and test files. Do not load either file when the task
+  does not need that context.
 
 ## Maintenance rule
 
 Update docs as part of each coding task:
 
-- Update `ARCHITECTURE.md` "Project layout" when files are added/renamed in documented areas.
+- Update `CODEMAP.md` when documented files, task entry points, or cross-module paths change.
 - Add to `ARCHITECTURE.md` "Key design decisions" only for non-obvious constraints future code must respect.
 - Update `ARCHITECTURE.md` "Settings persistence" when new persisted settings are added.
 - Update `ARCHITECTURE.md` "Local data files" when persistent files are added.
 - Keep this file focused on workflow rules; keep implementation details in code.
-- Prefer updating `ARCHITECTURE.md` over adding architectural detail here.
+- Keep file/class inventories out of `ARCHITECTURE.md`; put them in `CODEMAP.md`.
 
 ## Host parity obligations
 
@@ -158,4 +162,5 @@ Test framework and location rules:
 
 ## Scope reminder
 
-- Keep this file short and operational; put architecture and version details in `ARCHITECTURE.md`.
+- Keep this file short and operational; put design constraints in `ARCHITECTURE.md` and
+  implementation navigation in `CODEMAP.md`.
