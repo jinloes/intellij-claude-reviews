@@ -20,6 +20,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import javax.swing.*;
 import javax.swing.event.ChangeEvent;
 
@@ -55,8 +56,8 @@ public class PluginSettingsComponent {
     /** Caps the settings form width (logical px, before HiDPI scaling) so fields don't sprawl. */
     private static final int MAX_FORM_WIDTH = 560;
 
-    /** Caps the model dropdown width so it doesn't stretch to match the hint below it. */
-    private static final int MODEL_COMBO_WIDTH = 320;
+    /** Shared content width (logical px, before HiDPI scaling) for primary settings fields. */
+    private static final int CONTENT_WIDTH = 320;
 
     private final JPanel mainPanel;
     private JPanel rootPanel;
@@ -71,11 +72,11 @@ public class PluginSettingsComponent {
             new JCheckBox("Always enable MCP for Copilot reviews");
     private final JBTextField copilotConfigDirField = new JBTextField();
     private final JBTextField reviewFocusAreasField = new JBTextField();
-    private final JBTextArea reviewCustomInstructionsArea = new JBTextArea(3, 0);
+    private final JBTextArea reviewCustomInstructionsArea = new JBTextArea(4, 0);
     private final JBTextArea reviewGuidanceGlobsArea = new JBTextArea(3, 0);
     private final JComboBox<PluginSettings.ReviewGuidanceProfile> reviewGuidanceProfileCombo =
             new JComboBox<>();
-    private final JButton addReviewGuidanceProfileButton = new JButton("Save current as…");
+    private final JButton addReviewGuidanceProfileButton = new JButton("Save as…");
     private final JButton renameReviewGuidanceProfileButton = new JButton("Rename");
     private final JButton deleteReviewGuidanceProfileButton = new JButton("Delete");
     private List<PluginSettings.ReviewGuidanceProfile> reviewGuidanceProfiles = new ArrayList<>();
@@ -85,20 +86,21 @@ public class PluginSettingsComponent {
     private String defaultReviewGuidanceGlobs = "";
     private boolean updatingReviewGuidanceProfile;
     private final JCheckBox reviewSelfCritiqueBox =
-            new JCheckBox("Run a self-critique validation pass (slower, higher precision)");
+            new JCheckBox("Validate findings with a second pass");
     private final JComboBox<ReviewProvider> providerCombo =
             new JComboBox<>(ReviewProvider.values());
+    private final JBLabel modelLabel = new JBLabel("Model:");
 
     private final JPanel modelComboPanel = new JPanel(new java.awt.CardLayout());
     private final JPanel copilotModelCard = new JPanel();
     private final JCheckBox showAdvancedCopilotBox = new JCheckBox("Show advanced Copilot options");
     private final JPanel advancedCopilotSection = new JPanel();
     private final JPanel advancedCopilotPanel = new JPanel();
-    private JPanel effortRowPanel;
 
     private final JLabel statusLabel = new JBLabel("Checking…");
     private final JButton checkButton = new JButton("Check Status");
     private final AuthCheckCoordinator authChecks;
+    private final Supplier<String> pollStatusSupplier;
 
     // Notification settings
     private final JCheckBox notificationsEnabledBox =
@@ -122,7 +124,20 @@ public class PluginSettingsComponent {
             Function<String, CheckAuthResult> authChecker,
             Consumer<Runnable> backgroundExecutor,
             Consumer<Runnable> uiExecutor) {
+        this(
+                authChecker,
+                backgroundExecutor,
+                uiExecutor,
+                () -> PRNotificationService.getInstance().getLastPollStatus());
+    }
+
+    PluginSettingsComponent(
+            Function<String, CheckAuthResult> authChecker,
+            Consumer<Runnable> backgroundExecutor,
+            Consumer<Runnable> uiExecutor,
+            Supplier<String> pollStatusSupplier) {
         this.authChecks = new AuthCheckCoordinator(authChecker, backgroundExecutor, uiExecutor);
+        this.pollStatusSupplier = pollStatusSupplier;
         checkButton.addActionListener(e -> checkStatus());
 
         providerCombo.setRenderer(
@@ -140,11 +155,12 @@ public class PluginSettingsComponent {
                         return this;
                     }
                 });
+        providerCombo.setPrototypeDisplayValue(ReviewProvider.COPILOT);
+        boundContentWidth(providerCombo);
 
         copilotModelCombo.setEditable(true);
-        copilotModelCombo.setAlignmentX(Component.LEFT_ALIGNMENT);
-        boundComboWidth(copilotModelCombo);
-        boundComboWidth(claudeModelCombo);
+        boundContentWidth(copilotModelCombo);
+        boundContentWidth(claudeModelCombo);
         JLabel copilotHint =
                 hintLabel(
                         "<html><small>Auto-populated from <code>copilot help config</code>;"
@@ -156,15 +172,15 @@ public class PluginSettingsComponent {
         // Probe the CLI off the EDT — its first call can take up to 10 seconds. The dropdown
         // starts with the hardcoded suggestions so users see something immediately; results from
         // the probe (cached for the session) augment the list when they arrive.
-        ApplicationManager.getApplication()
-                .executeOnPooledThread(
-                        () -> {
-                            List<String> discovered = CopilotModelDiscovery.listModels();
-                            if (discovered.isEmpty()) return;
-                            SwingUtilities.invokeLater(() -> mergeCopilotModelOptions(discovered));
-                        });
+        backgroundExecutor.accept(
+                () -> {
+                    List<String> discovered = CopilotModelDiscovery.listModels();
+                    if (discovered.isEmpty()) return;
+                    uiExecutor.accept(() -> mergeCopilotModelOptions(discovered));
+                });
 
         copilotModelCard.setLayout(new BoxLayout(copilotModelCard, BoxLayout.Y_AXIS));
+        copilotModelCard.setFocusable(false);
         copilotModelCard.add(copilotModelCombo);
         copilotModelCard.add(copilotHint);
 
@@ -172,23 +188,19 @@ public class PluginSettingsComponent {
         // maximumSize and would otherwise stretch the bare combo to the full panel width.
         JPanel claudeModelCard = new JPanel();
         claudeModelCard.setLayout(new BoxLayout(claudeModelCard, BoxLayout.Y_AXIS));
+        claudeModelCard.setFocusable(false);
         claudeModelCard.add(claudeModelCombo);
 
         modelComboPanel.add(claudeModelCard, ReviewProvider.CLAUDE.getId());
         modelComboPanel.add(copilotModelCard, ReviewProvider.COPILOT.getId());
+        modelLabel.setLabelFor(claudeModelCombo);
         providerCombo.addActionListener(e -> updateActiveModelCombo());
 
-        // Effort lives on its own FormBuilder row so the "Reasoning effort:" label aligns with
-        // "Review provider:" / "Review model:" in the left column. Combo is disabled when the
-        // active provider is Claude (since `claude` doesn't support --reasoning-effort) rather
-        // than hidden, so the form doesn't reflow as the user toggles providers.
-        effortRowPanel = new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 4, 0));
-        effortRowPanel.add(copilotEffortCombo);
         JLabel effortHint =
                 hintLabel(
                         "<html><small>Higher effort = deeper review, slower."
                                 + " Applies only to GitHub Copilot.</small></html>");
-        effortRowPanel.add(effortHint);
+        JPanel effortField = fieldWithHint(copilotEffortCombo, effortHint);
 
         JLabel mcpHint =
                 hintLabel(
@@ -209,12 +221,17 @@ public class PluginSettingsComponent {
         JPanel advancedFormPanel =
                 FormBuilder.createFormBuilder()
                         .addLabeledComponent(
-                                new JBLabel("Reasoning effort:"), effortRowPanel, 1, false)
-                        .addComponent(copilotInheritMcpBox, 1)
-                        .addComponent(copilotAutoEnableMcpOnReviewBox, 1)
+                                fieldLabel("Reasoning effort:", copilotEffortCombo),
+                                effortField,
+                                1,
+                                false)
+                        .addComponentToRightColumn(fieldWithHint(copilotInheritMcpBox, mcpHint), 1)
+                        .addComponentToRightColumn(copilotAutoEnableMcpOnReviewBox, 1)
                         .addLabeledComponent(
-                                new JBLabel("Copilot config dir:"), copilotConfigDirField, 1, false)
-                        .addComponent(mcpHint, 1)
+                                fieldLabel("Copilot config dir:", copilotConfigDirField),
+                                copilotConfigDirField,
+                                1,
+                                false)
                         .getPanel();
         advancedFormPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
 
@@ -224,8 +241,7 @@ public class PluginSettingsComponent {
         advancedCopilotPanel.add(advancedFormPanel);
 
         advancedCopilotSection.setLayout(new BoxLayout(advancedCopilotSection, BoxLayout.Y_AXIS));
-        advancedCopilotSection.add(showAdvancedCopilotBox);
-        advancedCopilotSection.add(advancedHint);
+        advancedCopilotSection.add(fieldWithHint(showAdvancedCopilotBox, advancedHint));
         advancedCopilotSection.add(advancedCopilotPanel);
 
         JLabel note =
@@ -272,69 +288,93 @@ public class PluginSettingsComponent {
                         return this;
                     }
                 });
+        boundContentWidth(baseUrlField);
+        boundContentWidth(reviewGuidanceProfileCombo);
+        boundContentWidth(reviewFocusAreasField);
         reviewGuidanceProfileCombo.addActionListener(e -> selectReviewGuidanceProfile());
         addReviewGuidanceProfileButton.addActionListener(e -> addReviewGuidanceProfile());
         renameReviewGuidanceProfileButton.addActionListener(e -> renameReviewGuidanceProfile());
         deleteReviewGuidanceProfileButton.addActionListener(e -> deleteReviewGuidanceProfile());
         rebuildReviewGuidanceProfileCombo();
 
-        JPanel reviewGuidanceProfilePanel =
+        JPanel reviewGuidanceProfileActions =
                 new JPanel(new java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 4, 0));
+        reviewGuidanceProfileActions.add(addReviewGuidanceProfileButton);
+        reviewGuidanceProfileActions.add(renameReviewGuidanceProfileButton);
+        reviewGuidanceProfileActions.add(deleteReviewGuidanceProfileButton);
+        reviewGuidanceProfileActions.setFocusable(false);
+        reviewGuidanceProfileActions.setAlignmentX(Component.LEFT_ALIGNMENT);
+        reviewGuidanceProfileActions.setMaximumSize(
+                reviewGuidanceProfileActions.getPreferredSize());
+
+        JPanel reviewGuidanceProfilePanel = new JPanel();
+        reviewGuidanceProfilePanel.setLayout(
+                new BoxLayout(reviewGuidanceProfilePanel, BoxLayout.Y_AXIS));
+        reviewGuidanceProfilePanel.setFocusable(false);
+        reviewGuidanceProfilePanel.setAlignmentX(Component.LEFT_ALIGNMENT);
         reviewGuidanceProfilePanel.add(reviewGuidanceProfileCombo);
-        reviewGuidanceProfilePanel.add(addReviewGuidanceProfileButton);
-        reviewGuidanceProfilePanel.add(renameReviewGuidanceProfileButton);
-        reviewGuidanceProfilePanel.add(deleteReviewGuidanceProfileButton);
+        reviewGuidanceProfilePanel.add(reviewGuidanceProfileActions);
+
+        JBScrollPane customInstructionsScrollPane = boundedTextArea(reviewCustomInstructionsArea);
+        JPanel baseUrlFieldBlock = fieldWithHint(baseUrlField, note);
+        JPanel profileField =
+                fieldWithHint(
+                        reviewGuidanceProfilePanel,
+                        hintLabel(
+                                "<html><small>Save and reuse focus areas and custom"
+                                        + " instructions as one named profile.</small></html>"));
+        JPanel focusAreasField =
+                fieldWithHint(
+                        reviewFocusAreasField,
+                        hintLabel(
+                                "<html><small>Comma-separated areas to prioritize (for example"
+                                        + " security, performance, or test coverage).</small></html>"));
+        JPanel customInstructionsField =
+                fieldWithHint(
+                        customInstructionsScrollPane,
+                        hintLabel(
+                                "<html><small>Extra instructions appended to every review"
+                                        + " prompt, such as team conventions.</small></html>"));
+        JPanel validationField =
+                fieldWithHint(
+                        reviewSelfCritiqueBox,
+                        hintLabel(
+                                "<html><small>Re-checks each finding against the diff to improve"
+                                        + " precision; roughly doubles review time.</small></html>"));
+        JPanel providerField = contentField(providerCombo);
 
         mainPanel =
                 FormBuilder.createFormBuilder()
                         .addComponent(sectionTitle("GitHub connection"), 1)
-                        .addLabeledComponent(new JBLabel("Base URL:"), baseUrlField, 1, false)
-                        .addComponent(note, 1)
+                        .addLabeledComponent(
+                                fieldLabel("Base URL:", baseUrlField), baseUrlFieldBlock, 1, false)
                         .addComponent(statusPanel, 1)
                         .addSeparator(8)
-                        .addComponent(sectionTitle("Review settings"), 1)
+                        .addComponent(sectionTitle("Review provider"), 1)
                         .addLabeledComponent(
-                                new JBLabel("Review provider:"), providerCombo, 1, false)
-                        .addLabeledComponent(
-                                new JBLabel("Review model:"), modelComboPanel, 1, false)
-                        .addComponent(advancedCopilotSection, 1)
+                                fieldLabel("Provider:", providerCombo), providerField, 1, false)
+                        .addLabeledComponent(modelLabel, modelComboPanel, 1, false)
+                        .addComponentToRightColumn(advancedCopilotSection, 1)
                         .addSeparator(8)
-                        .addComponent(sectionTitle("Review defaults"), 1)
+                        .addComponent(sectionTitle("Review guidance"), 1)
                         .addLabeledComponent(
-                                new JBLabel("Guidance profile:"),
-                                reviewGuidanceProfilePanel,
+                                fieldLabel("Profile:", reviewGuidanceProfileCombo),
+                                profileField,
                                 1,
                                 false)
-                        .addComponent(
-                                hintLabel(
-                                        "<html><small>Save and reuse focus areas and custom"
-                                                + " instructions as one named profile.</small></html>"),
-                                1)
                         .addLabeledComponent(
-                                new JBLabel("Review focus areas:"), reviewFocusAreasField, 1, false)
-                        .addComponent(
-                                hintLabel(
-                                        "<html><small>Comma-separated areas to prioritize (for example"
-                                                + " security, performance, or test coverage).</small></html>"),
-                                1)
-                        .addLabeledComponent(
-                                new JBLabel("Custom review instructions:"),
-                                new JBScrollPane(reviewCustomInstructionsArea),
+                                fieldLabel("Focus areas:", reviewFocusAreasField),
+                                focusAreasField,
                                 1,
                                 false)
-                        .addComponent(
-                                hintLabel(
-                                        "<html><small>Extra instructions appended to every review"
-                                                + " prompt, such as team conventions.</small></html>"),
-                                1)
-                        .addComponent(reviewSelfCritiqueBox, 1)
-                        .addComponent(
-                                hintLabel(
-                                        "<html><small>Runs a second pass that re-checks each finding"
-                                                + " against the diff and drops misattributed ones."
-                                                + " Higher precision, but roughly doubles review"
-                                                + " time.</small></html>"),
-                                1)
+                        .addLabeledComponent(
+                                fieldLabel("Custom instructions:", reviewCustomInstructionsArea),
+                                customInstructionsField,
+                                1,
+                                false)
+                        .addSeparator(8)
+                        .addComponent(sectionTitle("Review validation"), 1)
+                        .addComponentToRightColumn(validationField, 1)
                         .addSeparator(8)
                         .addComponent(sectionTitle("Notifications"), 1)
                         .addComponent(notificationsEnabledBox, 1)
@@ -679,12 +719,53 @@ public class PluginSettingsComponent {
         loadActiveReviewGuidanceProfile();
     }
 
-    /** Left-aligns a model combo and caps its width so it doesn't stretch to the row/hint width. */
-    private static void boundComboWidth(JComboBox<?> combo) {
-        combo.setAlignmentX(Component.LEFT_ALIGNMENT);
-        combo.setMaximumSize(
+    private static void boundContentWidth(JComponent component) {
+        component.setAlignmentX(Component.LEFT_ALIGNMENT);
+        java.awt.Dimension size =
                 new java.awt.Dimension(
-                        JBUI.scale(MODEL_COMBO_WIDTH), combo.getPreferredSize().height));
+                        JBUI.scale(CONTENT_WIDTH), component.getPreferredSize().height);
+        component.setPreferredSize(size);
+        component.setMinimumSize(size);
+        component.setMaximumSize(size);
+    }
+
+    private static JBScrollPane boundedTextArea(JBTextArea textArea) {
+        JBScrollPane scrollPane =
+                new JBScrollPane(
+                        textArea,
+                        ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED,
+                        ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+        java.awt.Dimension viewportSize = textArea.getPreferredScrollableViewportSize();
+        scrollPane
+                .getViewport()
+                .setPreferredSize(
+                        new java.awt.Dimension(JBUI.scale(CONTENT_WIDTH), viewportSize.height));
+        boundContentWidth(scrollPane);
+        return scrollPane;
+    }
+
+    private static JPanel fieldWithHint(JComponent control, JLabel hint) {
+        JPanel field = contentField(control);
+        hint.setAlignmentX(Component.LEFT_ALIGNMENT);
+        hint.setFocusable(false);
+        field.add(hint);
+        return field;
+    }
+
+    private static JPanel contentField(JComponent control) {
+        control.setAlignmentX(Component.LEFT_ALIGNMENT);
+        JPanel field = new JPanel();
+        field.setLayout(new BoxLayout(field, BoxLayout.Y_AXIS));
+        field.setFocusable(false);
+        field.setAlignmentX(Component.LEFT_ALIGNMENT);
+        field.add(control);
+        return field;
+    }
+
+    private static JBLabel fieldLabel(String text, JComponent control) {
+        JBLabel label = new JBLabel(text);
+        label.setLabelFor(control);
+        return label;
     }
 
     private static JBLabel hintLabel(String html) {
@@ -706,12 +787,15 @@ public class PluginSettingsComponent {
                                 + inner
                                 + "</div></html>");
         label.setBorder(JBUI.Borders.emptyTop(2));
+        label.setFocusable(false);
         return label;
     }
 
     private void updateActiveModelCombo() {
         ReviewProvider active = getReviewProvider();
         ((java.awt.CardLayout) modelComboPanel.getLayout()).show(modelComboPanel, active.getId());
+        modelLabel.setLabelFor(
+                active == ReviewProvider.COPILOT ? copilotModelCombo : claudeModelCombo);
         updateAdvancedCopilotOptionsVisibility();
     }
 
@@ -792,8 +876,7 @@ public class PluginSettingsComponent {
     }
 
     private void refreshPollStatus() {
-        PRNotificationService svc = PRNotificationService.getInstance();
-        String status = svc.getLastPollStatus();
+        String status = pollStatusSupplier.get();
         if (status == null) {
             pollStatusLabel.setText(" ");
             return;
