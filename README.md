@@ -48,8 +48,12 @@ claude --version    # if using Claude
 copilot --version   # if using Copilot
 ```
 
-If `gh auth status` fails, run `gh auth login`. Launch the selected provider CLI directly and
-complete its sign-in flow before opening PR Pilot.
+If `gh auth status` fails, run `gh auth login`. For provider sign-in, run `claude auth login` or
+`copilot login`. PR Pilot's first-run checklist verifies the selected binary before loading the PR
+list. When a provider has no safe non-interactive authentication status command, the checklist
+labels authentication as **unverified** instead of claiming it is ready. Claude probe timeouts,
+execution failures, and unsupported commands also remain non-blocking and unverified; only a
+conclusive signed-out response blocks onboarding.
 
 ### IntelliJ IDEA
 
@@ -81,8 +85,9 @@ complete its sign-in flow before opening PR Pilot.
 - **VS Code:** run **PR Pilot: Open Settings** or use the settings button in the PR Pilot view.
 
 Select **Claude** or **Copilot** as the review provider. Keep the default model initially; model,
-reasoning-effort, and MCP options are advanced controls. PR Pilot checks that the selected provider
-CLI is available before generating a review.
+reasoning-effort, and MCP options are advanced controls. PR Pilot checks the selected provider CLI
+during onboarding and again before generating a review. Settings remain available from the setup
+screen so you can switch providers.
 
 ## Complete your first review
 
@@ -172,7 +177,7 @@ code, or sensitive pull-request content.
 ## Development requirements
 
 - Java 17+ (for Gradle builds and at VS Code extension runtime)
-- Node.js 20+ (Node 20.17+ recommended by extension engines)
+- Node.js 20.17 or newer
 - npm
 - GitHub CLI (`gh`) authenticated (`gh auth login`)
 - Optional for runtime review providers:
@@ -263,10 +268,21 @@ Releases are tag-driven via `.github/workflows/release.yml`.
 
 What the workflow does:
 
-1. Sets up Java 17 and Node 20
-2. Builds IntelliJ plugin artifact
-3. Builds and packages VS Code extension artifact
-4. Creates a GitHub Release and uploads both artifacts
+1. Sets up Java 17 and Node 20.17+ for the exact tagged commit
+2. Runs Gradle formatting/checks and JVM tests
+3. Runs webview lint, typecheck, unit tests, accessibility tests, and build
+4. Runs VS Code extension lint, typecheck, unit tests, build, and the sidecar protocol smoke test
+5. Builds both installable artifacts and verifies their packaged contents
+6. Creates a GitHub Release and uploads both artifacts only after every verification step passes
+
+If verification fails, the workflow stops before the GitHub Release upload. Fix the failure on a new
+commit and create a new tag; do not move or reuse a published tag.
+
+Release tags must be `vX.Y.Z` or `vX.Y.Z-rc.N`. The workflow derives that version once and injects it
+into both the IntelliJ plugin and VSIX manifests. Linux runs the full verification suite; Windows and
+macOS CI run targeted provider-binary, worktree-path, extension test, and packaging checks. These
+portable checks invoke npm through its JavaScript CLI and Gradle through the wrapper main class, so
+Node 20 never needs to spawn Windows `.cmd` or `.bat` shims.
 
 ### RC vs final release tags
 

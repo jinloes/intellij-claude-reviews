@@ -11,6 +11,7 @@ import {
   SidecarClient,
   encodeFrame,
   extractFrames,
+  parseCommitContext,
   parseDraftReviewMutationResult,
   parseDraftReviewResult,
   parseExistingReviewsResult,
@@ -50,13 +51,13 @@ function createSidecarHarness(
   children: ChildProcessWithoutNullStreams[];
   commands: Array<{ command: string; args: string[] }>;
   methods: string[];
-  requests: Array<{ method: string; params: unknown }>;
+  requests: Array<{ id: number; method: string; params: unknown }>;
   killCount: { value: number };
 } {
   const children: ChildProcessWithoutNullStreams[] = [];
   const commands: Array<{ command: string; args: string[] }> = [];
   const methods: string[] = [];
-  const requests: Array<{ method: string; params: unknown }> = [];
+  const requests: Array<{ id: number; method: string; params: unknown }> = [];
   const killCount = { value: 0 };
   const spawnSidecar: SidecarSpawn = (command, args) => {
     commands.push({ command, args });
@@ -78,7 +79,7 @@ function createSidecarHarness(
       requestBuffer = extractFrames(Buffer.concat([requestBuffer, chunk]), (body) => {
         const request = JSON.parse(body) as { id: number; method: string; params: unknown };
         methods.push(request.method);
-        requests.push({ method: request.method, params: request.params });
+        requests.push({ id: request.id, method: request.method, params: request.params });
         const result = responder(request.method, request.params);
         if (result === NO_RESPONSE) return;
         queueMicrotask(() => stdout.write(encodeFrame(JSON.stringify({
@@ -335,29 +336,30 @@ test('parseDraftReviewResult rejects malformed successful and unknown results', 
 
 test('parseDraftReviewMutationResult accepts a successful save result', () => {
   assert.deepEqual(
-    parseDraftReviewMutationResult({ status: 'ok', message: 'Draft review saved.', reviewId: '42', commentsDropped: true }),
-    { status: 'ok', message: 'Draft review saved.', reviewId: '42', commentsDropped: true },
+    parseDraftReviewMutationResult({ status: 'ok', message: 'Draft review saved.', reviewId: '42', commentsDropped: true, recoveryRequired: false }),
+    { status: 'ok', message: 'Draft review saved.', reviewId: '42', commentsDropped: true, recoveryRequired: false },
   );
 });
 
 test('parseDraftReviewMutationResult accepts a successful result with a null reviewId', () => {
   assert.deepEqual(
-    parseDraftReviewMutationResult({ status: 'ok', message: 'Review submitted.', reviewId: null, commentsDropped: false }),
-    { status: 'ok', message: 'Review submitted.', reviewId: null, commentsDropped: false },
+    parseDraftReviewMutationResult({ status: 'ok', message: 'Review submitted.', reviewId: null, commentsDropped: false, recoveryRequired: false }),
+    { status: 'ok', message: 'Review submitted.', reviewId: null, commentsDropped: false, recoveryRequired: false },
   );
 });
 
 test('parseDraftReviewMutationResult accepts a token-free domain failure', () => {
   assert.deepEqual(
-    parseDraftReviewMutationResult({ status: 'not_authenticated', message: 'x', reviewId: null, commentsDropped: false }),
-    { status: 'not_authenticated', message: 'x', reviewId: null, commentsDropped: false },
+    parseDraftReviewMutationResult({ status: 'not_authenticated', message: 'x', reviewId: null, commentsDropped: false, recoveryRequired: false }),
+    { status: 'not_authenticated', message: 'x', reviewId: null, commentsDropped: false, recoveryRequired: false },
   );
 });
 
 test('parseDraftReviewMutationResult rejects malformed or unknown-status results', () => {
-  assert.equal(parseDraftReviewMutationResult({ status: 'unknown', message: 'x', reviewId: null, commentsDropped: false }), null);
-  assert.equal(parseDraftReviewMutationResult({ status: 'ok', message: 'x', reviewId: 42, commentsDropped: false }), null);
-  assert.equal(parseDraftReviewMutationResult({ status: 'ok', message: 'x', reviewId: null, commentsDropped: 'no' }), null);
+  assert.equal(parseDraftReviewMutationResult({ status: 'unknown', message: 'x', reviewId: null, commentsDropped: false, recoveryRequired: false }), null);
+  assert.equal(parseDraftReviewMutationResult({ status: 'ok', message: 'x', reviewId: 42, commentsDropped: false, recoveryRequired: false }), null);
+  assert.equal(parseDraftReviewMutationResult({ status: 'ok', message: 'x', reviewId: null, commentsDropped: 'no', recoveryRequired: false }), null);
+  assert.equal(parseDraftReviewMutationResult({ status: 'ok', message: 'x', reviewId: null, commentsDropped: false }), null);
   assert.equal(parseDraftReviewMutationResult(null), null);
 });
 
@@ -446,21 +448,21 @@ test('SidecarClient throws when a capability returns a malformed result', async 
   client.dispose();
 });
 
-test('SidecarClient terminates and fails a transport after a request timeout', async () => {
+test('SidecarClient keeps the transport available after a request timeout', async () => {
   const harness = createSidecarHarness((method) => method === 'initialize' ? initializeResult : NO_RESPONSE);
   const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar, 5);
 
   await assert.rejects(
     client.checkGitHubAuth('https://github.com'),
-    /request "github\/checkAuth" timed out.*Select Retry/,
+    /request "github\/checkAuth" timed out.*Try the request again/,
   );
-  assert.equal(harness.killCount.value, 1);
+  assert.equal(harness.killCount.value, 0);
   await assert.rejects(client.checkGitHubAuth('https://github.com'), /timed out/);
   assert.equal(harness.commands.length, 1);
   client.dispose();
 });
 
-test('SidecarClient restarts and reinitializes after a timed-out request', async () => {
+test('SidecarClient accepts another request after a timed-out request', async () => {
   let timedOut = false;
   const harness = createSidecarHarness((method) => {
     if (method === 'initialize') return initializeResult;
@@ -472,13 +474,47 @@ test('SidecarClient restarts and reinitializes after a timed-out request', async
   });
   const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar, 5);
 
-  await assert.rejects(client.checkGitHubAuth('https://github.com'), /Select Retry/);
-  await client.restart();
+  await assert.rejects(client.checkGitHubAuth('https://github.com'), /Try the request again/);
   const result = await client.checkGitHubAuth('https://github.com');
 
   assert.equal(result.username, 'octocat');
-  assert.equal(harness.commands.length, 2);
-  assert.equal(harness.killCount.value, 1);
+  assert.equal(harness.commands.length, 1);
+  assert.equal(harness.killCount.value, 0);
+  client.dispose();
+});
+
+test('SidecarClient times out one request without aborting a pending review', async () => {
+  const harness = createSidecarHarness((method) => method === 'initialize' ? initializeResult : NO_RESPONSE);
+  const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar, 5);
+  const chunks: string[] = [];
+  const review = client.chatReview({
+    operationId: 'review-1',
+    provider: 'claude',
+    effort: 'medium',
+    inheritMcp: false,
+    userMessage: 'Review this change',
+  }, (chunk) => chunks.push(chunk));
+
+  while (!harness.methods.includes('reviews/chat')) await new Promise((resolve) => setTimeout(resolve, 0));
+  await assert.rejects(client.checkGitHubAuth('https://github.com'), /timed out/);
+
+  const reviewRequest = harness.requests.find(({ method }) => method === 'reviews/chat');
+  assert.ok(reviewRequest);
+  const stdout = harness.children[0].stdout as PassThrough;
+  stdout.write(encodeFrame(JSON.stringify({
+    jsonrpc: '2.0',
+    method: 'reviews/chatChunk',
+    params: { requestId: reviewRequest.id, text: 'still running' },
+  })));
+  stdout.write(encodeFrame(JSON.stringify({
+    jsonrpc: '2.0',
+    id: reviewRequest.id,
+    result: { content: 'completed' },
+  })));
+
+  assert.equal(await review, 'completed');
+  assert.deepEqual(chunks, ['still running']);
+  assert.equal(harness.killCount.value, 0);
   client.dispose();
 });
 
@@ -520,6 +556,28 @@ test('getCheckStatus returns the rendered summary and structured annotations', a
   client.dispose();
 });
 
+test('getCommits retains validated closing issue numbers with the rendered summary', async () => {
+  const harness = createSidecarHarness((method) => method === 'initialize'
+    ? initializeResult
+    : { summary: '- Fix login', closingIssueNumbers: [7, 8] });
+  const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar);
+
+  assert.deepEqual(
+    await client.getCommits('https://github.com', 'acme', 'widgets', 42),
+    { summary: '- Fix login', closingIssueNumbers: [7, 8] },
+  );
+  assert.equal(harness.methods.filter((method) => method === 'prs/getCommits').length, 1);
+  client.dispose();
+});
+
+test('parseCommitContext rejects malformed or unbounded issue-number arrays', () => {
+  assert.equal(parseCommitContext({ summary: 'x', closingIssueNumbers: '7' }), null);
+  assert.equal(parseCommitContext({ summary: 'x', closingIssueNumbers: [7, '8'] }), null);
+  assert.equal(parseCommitContext({ summary: 'x', closingIssueNumbers: [0] }), null);
+  assert.equal(parseCommitContext({ summary: 'x', closingIssueNumbers: [7, 7] }), null);
+  assert.equal(parseCommitContext({ summary: 'x', closingIssueNumbers: [1, 2, 3, 4] }), null);
+});
+
 // Prompt context is purely additive: a review without it is exactly as good as before it existed,
 // so every one of these must degrade to empty rather than reject. A missing jar is used because it
 // fails fast and is a real deployment failure — throwing inside the responder would instead leave
@@ -531,8 +589,10 @@ test('context reads degrade to empty instead of rejecting when the sidecar is un
   assert.deepEqual(await client.getCheckStatus('https://github.com', 'o', 'r', 'sha'), {
     summary: '', annotations: [],
   });
-  assert.equal(await client.getCommits('https://github.com', 'o', 'r', 1), '');
-  assert.equal(await client.getLinkedIssues('https://github.com', 'o', 'r', 'Closes #1'), '');
+  assert.deepEqual(await client.getCommits('https://github.com', 'o', 'r', 1), {
+    summary: '', closingIssueNumbers: [],
+  });
+  assert.equal(await client.getLinkedIssues('https://github.com', 'o', 'r', 'Closes #1', []), '');
   assert.equal(await client.getRepoProfile('/tmp/x'), '');
   assert.equal(harness.commands.length, 0);
   client.dispose();
@@ -550,7 +610,9 @@ test('context reads tolerate a malformed payload without throwing', async () => 
   assert.deepEqual(status.annotations, [
     { path: 'ok.java', startLine: 0, endLine: 0, level: 'warning', message: 'm' },
   ]);
-  assert.equal(await client.getCommits('https://github.com', 'o', 'r', 1), '');
+  assert.deepEqual(await client.getCommits('https://github.com', 'o', 'r', 1), {
+    summary: '', closingIssueNumbers: [],
+  });
   client.dispose();
 });
 
@@ -561,7 +623,13 @@ test('getLinkedIssues sends the PR body required by the engine contract', async 
   const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar);
 
   assert.equal(
-    await client.getLinkedIssues('https://github.com', 'acme', 'widgets', 'Fixes #7'),
+    await client.getLinkedIssues(
+      'https://github.com',
+      'acme',
+      'widgets',
+      'Fixes #7',
+      [8, 9],
+    ),
     'Issue #7',
   );
   const request = harness.requests.find(({ method }) => method === 'prs/getLinkedIssues');
@@ -570,6 +638,7 @@ test('getLinkedIssues sends the PR body required by the engine contract', async 
     owner: 'acme',
     repo: 'widgets',
     prBody: 'Fixes #7',
+    commitIssueNumbers: [8, 9],
   });
   client.dispose();
 });

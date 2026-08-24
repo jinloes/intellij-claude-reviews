@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { execFile } from 'node:child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import { randomUUID } from 'crypto';
@@ -25,6 +26,8 @@ import { resolveWebviewDistPath } from './webviewAssets';
 import { buildErrorHtml, buildLauncherHtml, buildMainWebviewHtml } from './webviewHtml';
 import { classifyHostTheme, type HostTheme } from './hostTheme';
 import { SidecarClient, resolveSidecarJarPath, type OutcomeComment } from './sidecar';
+import { DraftRecoveryStore } from './draftRecovery';
+import { probeClaudeAuthentication } from './providerSetup';
 import type { LineComment, PR, PRSearchScope, ReviewResult } from './models';
 import {
     canPersistDraft,
@@ -69,7 +72,7 @@ export function activate(context: vscode.ExtensionContext) {
         });
     });
     void initializeSidecar();
-    const provider = new ClaudeReviewsViewProvider(context.extensionUri);
+    const provider = new ClaudeReviewsViewProvider(context.extensionUri, new DraftRecoveryStore(context.globalState));
     const notificationPoller = new PRNotificationPoller(context, (pr) => provider.openPullRequest(pr));
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider('pr-pilot.main', provider, {
@@ -296,7 +299,10 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
     private state: ViewState | undefined;
     private pendingActivation: { pr: PR; source: 'notification' } | null = null;
 
-    constructor(extensionUri: vscode.Uri) {
+    constructor(
+        extensionUri: vscode.Uri,
+        private readonly draftRecoveryStore: DraftRecoveryStore,
+    ) {
         this.distUri = vscode.Uri.file(resolveWebviewDistPath(extensionUri.fsPath, fs.existsSync));
     }
 
@@ -385,6 +391,7 @@ class ClaudeReviewsViewProvider implements vscode.WebviewViewProvider {
             worktreeEpoch: 0,
             worktreeCreation: null,
             disposed: false,
+            draftRecoveryStore: this.draftRecoveryStore,
         };
         this.state = state;
 
@@ -560,17 +567,50 @@ interface ViewState {
     worktreeEpoch: number;
     worktreeCreation: { key: string; promise: Promise<string> } | null;
     disposed: boolean;
+    draftRecoveryStore: DraftRecoveryStore;
 }
 
-function providerReadiness(): { provider: Provider; available: boolean; detail: string } {
+function providerReadiness(): {
+    provider: Provider;
+    available: boolean;
+    detail: string;
+    binaryStatus: 'ready' | 'missing';
+    authenticationStatus: 'ready' | 'unavailable' | 'unverified';
+    authCommand: string;
+} {
     const current = provider();
     const available = current === 'copilot' ? copilot.copilotBinaryAvailable() : claude.claudeBinaryAvailable();
     return {
         provider: current,
         available,
+        binaryStatus: available ? 'ready' : 'missing',
+        authenticationStatus: available ? 'unverified' : 'unavailable',
+        authCommand: current === 'copilot' ? 'copilot login' : 'claude auth login',
         detail: available
-            ? 'Ready to generate reviews with the configured CLI.'
+            ? 'Provider CLI found. Authentication cannot be verified without starting a provider session.'
             : providerNotInstalledMessage(current),
+    };
+}
+
+async function providerSetupReadiness(): Promise<ReturnType<typeof providerReadiness>> {
+    const readiness = providerReadiness();
+    if (!readiness.available || readiness.provider === 'copilot') return readiness;
+    const authenticationStatus = await probeClaudeAuthentication((complete) => {
+        execFile(
+            claude.findClaudeBinary(),
+            ['auth', 'status', '--text'],
+            { timeout: 5_000, windowsHide: true },
+            (error, stdout, stderr) => complete(error, String(stdout), String(stderr)),
+        );
+    });
+    return {
+        ...readiness,
+        authenticationStatus,
+        detail: authenticationStatus === 'ready'
+            ? 'Provider CLI and authentication are ready.'
+            : authenticationStatus === 'unavailable'
+                ? `Claude authentication is unavailable. Run '${readiness.authCommand}' and check again.`
+                : `Claude authentication could not be verified non-interactively; run '${readiness.authCommand}' if sign-in is required.`,
     };
 }
 
@@ -807,6 +847,25 @@ async function handleRefreshPRs(state: ViewState, msg: Record<string, unknown>):
                 : pr;
         });
         prs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        const readiness = await providerSetupReadiness();
+        if (!readiness.available) {
+            push(state, {
+                type: 'setupRequired',
+                reason: 'provider_not_installed',
+                detail: readiness.detail,
+                providerReadiness: readiness,
+            });
+            return;
+        }
+        if (readiness.authenticationStatus === 'unavailable') {
+            push(state, {
+                type: 'setupRequired',
+                reason: 'provider_not_authenticated',
+                detail: readiness.detail,
+                providerReadiness: readiness,
+            });
+            return;
+        }
         push(state, {
             type: 'prListLoaded',
             prs,
@@ -817,6 +876,7 @@ async function handleRefreshPRs(state: ViewState, msg: Record<string, unknown>):
                 resultLimit: found.resultLimit,
                 limited: found.limited,
             },
+            providerReadiness: readiness,
         });
     } catch (err) {
         if (state.refreshRevision !== refreshRevision || state.disposed) return;
@@ -826,7 +886,12 @@ async function handleRefreshPRs(state: ViewState, msg: Record<string, unknown>):
             : reason === 'gh_not_authenticated'
                 ? "Run 'gh auth login' in a terminal to authenticate, then click Refresh."
                 : toUserFacingError(err, 'load pull requests');
-        push(state, { type: 'setupRequired', reason, detail });
+        push(state, {
+            type: 'setupRequired',
+            reason,
+            detail,
+            providerReadiness: providerReadiness(),
+        });
     }
 }
 
@@ -877,12 +942,20 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
         if (draftResult.status !== 'ok' && draftResult.status !== 'none') throw new Error(draftResult.message);
         const diff = diffResult.diff;
         const detail = detailResult.detail;
-        const draft = draftResult.status === 'ok' && draftResult.review ? {
+        const remoteDraft = draftResult.status === 'ok' && draftResult.review ? {
             id: draftResult.id ?? '',
             commitId: draftResult.commitId ?? '',
             result: draftResult.review as ReviewResult,
             importedFromGitHub: draftResult.review.importedFromGitHub,
         } : null;
+        const recovery = state.draftRecoveryStore.get(key);
+        const draft = recovery ? {
+            id: remoteDraft?.id ?? '',
+            commitId: remoteDraft?.commitId ?? '',
+            result: recovery.result,
+            importedFromGitHub: false,
+            recoveryPending: true,
+        } : remoteDraft ? { ...remoteDraft, recoveryPending: false } : null;
         const validationDiff = diff;
 
         if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
@@ -897,10 +970,11 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
         state.activeDiff = diff;
         state.activeValidationDiff = validationDiff;
         state.activeReviewResult = draft?.result ?? null;
-        state.pendingReviewId = draft?.id ?? null;
-        state.pendingReviewKey = draft ? key : null;
+        state.pendingReviewId = draft?.id || null;
+        state.pendingReviewKey = draft?.id ? key : null;
 
         if (detail.merged) {
+            await state.draftRecoveryStore.clear(key);
             push(state, { type: 'prDraftStatusUpdated', number, owner, repo, hasReviewDraft: false });
             push(state, { type: 'draftLoaded', prKey: key, prState: 'MERGED', diff, validationDiff, providerReadiness: readiness });
         } else if (draft) {
@@ -916,6 +990,7 @@ async function handleSelectPR(state: ViewState, msg: Record<string, unknown>): P
                 validationDiff,
                 staleCommits,
                 importedFromGitHub: draft.importedFromGitHub,
+                recoveryPending: draft.recoveryPending,
                 providerReadiness: readiness,
             });
         } else {
@@ -1054,12 +1129,20 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
             .getPullRequestDetail(base, owner, repo, number)
             .then((d) => (d.status === 'ok' ? d.detail?.head?.sha ?? '' : ''))
             .catch(() => '');
+        const commitsPromise = sidecarClient.getCommits(base, owner, repo, number);
         const [checkStatus, commits, linkedIssue, repoProfile] = await Promise.all([
             headSha
                 ? sidecarClient.getCheckStatus(base, owner, repo, headSha)
                 : Promise.resolve({ summary: '', annotations: [] }),
-            sidecarClient.getCommits(base, owner, repo, number),
-            sidecarClient.getLinkedIssues(base, owner, repo, body),
+            commitsPromise,
+            commitsPromise.then((commitContext) =>
+                sidecarClient.getLinkedIssues(
+                    base,
+                    owner,
+                    repo,
+                    body,
+                    commitContext.closingIssueNumbers,
+                )),
             sidecarClient.getRepoProfile(reviewDir),
         ]);
         if (!isCurrentGeneration()) return;
@@ -1087,6 +1170,7 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
                 inheritMcp: settings.inheritMcp,
                 configDir: isCopilot ? settings.configDir : undefined,
                 selfCritique: settings.selfCritique,
+                chunkedReview: msg.chunkedReview === true,
                 pr: {
                     title,
                     // htmlUrl/author/createdAt/isDraft aren't used by ClaudeService/CopilotService's
@@ -1111,7 +1195,7 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
                 focusAreas,
                 customInstructions,
                 ciStatus: checkStatus.summary,
-                commits,
+                commits: commits.summary,
                 linkedIssue,
                 repoProfile,
                 ciAnnotations: checkStatus.annotations.map((a) => ({
@@ -1173,12 +1257,14 @@ async function handleSaveDraft(state: ViewState, msg: Record<string, unknown>): 
     const selectionRevision = state.selectionRevision;
 
     try {
+        await state.draftRecoveryStore.save(key, review, orphansFromMsg);
         const mutation = await sidecarClient.saveDraftReview(
             githubBaseUrl(), owner, repo, number, review.summary, review.verdict,
             review.lineComments, orphansFromMsg,
         );
         if (mutation.status !== 'ok' || !mutation.reviewId) throw new Error(mutation.message);
         const { reviewId, commentsDropped } = mutation;
+        await state.draftRecoveryStore.clear(key);
         const tracked = state.generatedReviews.get(key);
         if (tracked) {
             state.generatedReviews.set(key, {
@@ -1226,6 +1312,7 @@ async function handleSubmitReview(state: ViewState, msg: Record<string, unknown>
         const mutation = await sidecarClient.submitReview(
             githubBaseUrl(), owner, repo, number, reviewId, verdict, comment);
         if (mutation.status !== 'ok') throw new Error(mutation.message);
+        await state.draftRecoveryStore.clear(key);
         if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
         void recordReviewOutcome(state, key);
         if (state.pendingReviewId === reviewId && state.pendingReviewKey === key) {
@@ -1294,6 +1381,7 @@ async function handleDeleteDraft(state: ViewState, msg: Record<string, unknown>)
         const mutation = await sidecarClient.deleteDraftReview(
             githubBaseUrl(), owner, repo, number, reviewId);
         if (mutation.status !== 'ok') throw new Error(mutation.message);
+        await state.draftRecoveryStore.clear(key);
         state.generatedReviews.delete(key);
         if (prKey(state.activePR) !== key || state.selectionRevision !== selectionRevision) return;
         if (state.pendingReviewId === reviewId && state.pendingReviewKey === key) {

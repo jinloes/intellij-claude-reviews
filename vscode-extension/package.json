@@ -11,7 +11,7 @@
   "version": "0.1.0",
   "engines": {
     "vscode": "^1.90.0",
-    "node": ">=24.15.0"
+    "node": ">=20.17.0"
   },
   "categories": [
     "Other"
@@ -230,11 +230,11 @@
     "watch": "tsc -watch -p tsconfig.json",
     "lint": "eslint .",
     "build:test": "tsc -p tsconfig.test.json",
-    "test:unit": "sh -c 'npm run build:test && node --test dist-test/test/*.test.js; rc=$?; rm -rf dist-test; exit $rc'",
+    "test:unit": "node ./scripts/run-unit-tests.mjs",
     "test:sidecar": "node ./scripts/smoke-sidecar.mjs",
     "stage:webview": "node ./scripts/stage-webview.mjs",
     "stage:sidecar": "node ./scripts/stage-sidecar.mjs",
-    "package:vsix": "npm --prefix ../webview run build && ../gradlew :sidecar:bootJar && npm run build && npm run stage:webview && npm run stage:sidecar && npx --yes @vscode/vsce package"
+    "package:vsix": "node ./scripts/package-vsix.mjs"
   },
   "dependencies": {
     "@github/copilot-sdk": "^1.0.6",
@@ -250,6 +250,6 @@
     "typescript-eslint": "^8.59.4"
   },
   "volta": {
-    "node": "24.15.0"
+    "node": "20.20.2"
   }
 }

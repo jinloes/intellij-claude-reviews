@@ -1,6 +1,8 @@
 import { act, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import App from './App'
 import type { PR } from './bridge/types'
 
@@ -32,7 +34,6 @@ describe('App pull-request transitions', () => {
     const user = userEvent.setup()
     const cefQuery = vi.fn()
     ;(window as unknown as { cefQuery?: typeof cefQuery }).cefQuery = cefQuery
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
     render(<App />)
 
     act(() => hostMessage({ type: 'prListLoaded', prs: [firstPr, secondPr] }))
@@ -55,6 +56,9 @@ describe('App pull-request transitions', () => {
     cefQuery.mockClear()
 
     await user.click(screen.getByRole('button', { name: /Second pull request/ }))
+    const switchDialog = screen.getByRole('alertdialog')
+    expect(within(switchDialog).getByRole('heading', { name: /discard unsaved review changes/i })).toBeInTheDocument()
+    await user.click(within(switchDialog).getByRole('button', { name: 'Discard and switch' }))
 
     const outgoing = cefQuery.mock.calls.map(([arg]) => JSON.parse(arg.request) as { type: string; number?: number })
     expect(outgoing).toContainEqual(expect.objectContaining({ type: 'selectPR', number: 43 }))
@@ -65,7 +69,6 @@ describe('App pull-request transitions', () => {
     const user = userEvent.setup()
     const cefQuery = vi.fn()
     ;(window as unknown as { cefQuery?: typeof cefQuery }).cefQuery = cefQuery
-    vi.spyOn(window, 'confirm').mockReturnValue(false)
     render(<App />)
 
     act(() => hostMessage({ type: 'prListLoaded', prs: [firstPr, secondPr] }))
@@ -88,11 +91,48 @@ describe('App pull-request transitions', () => {
     cefQuery.mockClear()
 
     await user.click(screen.getByRole('button', { name: /Second pull request/ }))
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Keep reviewing' }))
 
-    expect(window.confirm).toHaveBeenCalled()
     expect(cefQuery).not.toHaveBeenCalled()
     expect(screen.getByRole('button', { name: /First pull request/ })).toHaveAttribute('aria-current', 'page')
   })
+
+  it('blocks switching while a draft save is in progress', async () => {
+    const user = userEvent.setup()
+    const cefQuery = vi.fn()
+    ;(window as unknown as { cefQuery?: typeof cefQuery }).cefQuery = cefQuery
+    render(<App />)
+
+    act(() => hostMessage({ type: 'prListLoaded', prs: [firstPr, secondPr] }))
+    await user.click(screen.getByRole('button', { name: /First pull request/ }))
+    act(() => hostMessage({
+      type: 'draftLoaded',
+      prKey: 'acme/widget#42',
+      prState: 'DRAFT_PRESENT',
+      reviewId: 'draft-1',
+      result: {
+        summary: 'Saved review.',
+        verdict: 'COMMENT',
+        lineComments: [{ file: 'missing.ts', line: 1, type: 'issue', body: 'Keep me.' }],
+      },
+      diff: '',
+      validationDiff: '',
+    }))
+    await user.click(screen.getByRole('button', { name: 'Delete unanchored comment' }))
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Delete' }))
+    await user.click(screen.getByRole('button', { name: 'Save now' }))
+    cefQuery.mockClear()
+
+    await user.click(screen.getByRole('button', { name: /Second pull request/ }))
+    const switchDialog = screen.getByRole('alertdialog')
+    await user.click(within(switchDialog).getByRole('button', { name: 'Discard and switch' }))
+
+    expect(within(switchDialog).getByRole('alert')).toHaveTextContent(/save is already in progress/i)
+    expect(cefQuery).not.toHaveBeenCalled()
+  })
 })
 
-
+it('does not use native browser dialogs for shared-webview flows', () => {
+  const source = readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf8')
+  expect(source).not.toMatch(/window\.(?:prompt|confirm|alert)\(/)
+})

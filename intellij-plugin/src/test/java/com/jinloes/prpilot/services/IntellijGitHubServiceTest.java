@@ -319,18 +319,43 @@ class IntellijGitHubServiceTest {
         }
 
         @Test
-        void commitsSummaryReturnsEmptyRatherThanThrowing() {
+        void commitContextReturnsEmptyValuesRatherThanThrowing() {
             IntellijGitHubService service =
                     serviceOver(
                             new StubEngine() {
                                 @Override
                                 public PrCommitsResult getCommits(
                                         PrSupplementalService.IdentityParams params) {
-                                    return new PrCommitsResult("api_failed", "boom", 0, "");
+                                    return new PrCommitsResult(
+                                            "api_failed", "boom", 0, "", List.of());
                                 }
                             });
 
-            assertThat(service.getCommitsSummary("acme", "widgets", 42)).isEmpty();
+            IntellijGitHubService.CommitContext context =
+                    service.getCommitContext("acme", "widgets", 42);
+
+            assertThat(context.summary()).isEmpty();
+            assertThat(context.closingIssueNumbers()).isEmpty();
+        }
+
+        @Test
+        void commitContextCarriesClosingIssueNumbersFromTheEngine() {
+            IntellijGitHubService service =
+                    serviceOver(
+                            new StubEngine() {
+                                @Override
+                                public PrCommitsResult getCommits(
+                                        PrSupplementalService.IdentityParams params) {
+                                    return new PrCommitsResult(
+                                            "ok", "loaded", 1, "- Fix", List.of(7, 8));
+                                }
+                            });
+
+            IntellijGitHubService.CommitContext context =
+                    service.getCommitContext("acme", "widgets", 42);
+
+            assertThat(context.summary()).isEqualTo("- Fix");
+            assertThat(context.closingIssueNumbers()).containsExactly(7, 8);
         }
 
         @Test
@@ -347,8 +372,10 @@ class IntellijGitHubServiceTest {
                                 }
                             });
 
-            assertThat(service.getLinkedIssueSummary("acme", "widgets", "Closes #1")).isEmpty();
+            assertThat(service.getLinkedIssueSummary("acme", "widgets", "Closes #1", List.of(7, 8)))
+                    .isEmpty();
             assertThat(seen[0].prBody()).isEqualTo("Closes #1");
+            assertThat(seen[0].commitIssueNumbers()).containsExactly(7, 8);
         }
     }
 

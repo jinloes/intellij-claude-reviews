@@ -15,7 +15,7 @@ Lookup guide for implementation work. Read this file when locating code or tests
 | Change VS Code host behavior | `vscode-extension/src/extension.ts` | `sidecar.ts`, `settings.ts`, `settingsView.ts` | `vscode-extension/test/` |
 | Change settings | `intellij-plugin/.../settings/PluginSettings.java` | Both settings UIs, `vscode-extension/package.json`, host readers | IntelliJ settings tests and VS Code settings tests |
 | Change notifications | `intellij-plugin/.../PRNotificationService.java` | `vscode-extension/src/notifications.ts`, both host lifecycle entry points | Notification tests in both hosts |
-| Change local draft/index persistence | `PendingReviewIndex.java`, `SeenPRSet.java` | Callers in IntelliJ host; persistence contract in `ARCHITECTURE.md` | Matching IntelliJ service tests |
+| Change local draft/index persistence | `PendingReviewIndex.java`, `DraftRecoveryStore.java`, `SeenPRSet.java`, `vscode-extension/src/draftRecovery.ts` | Both host lifecycle callers; persistence contract in `ARCHITECTURE.md` | Matching IntelliJ and VS Code service tests |
 | Change packaging or releases | `.github/workflows/`, module build files | VS Code staging scripts, root Gradle configuration | CI workflow commands and sidecar smoke test |
 
 Paths below omit `src/main/java/com/jinloes/prpilot/` and equivalent test roots where the module
@@ -30,6 +30,8 @@ context makes them unambiguous.
 - `ARCHITECTURE.md` - Stable design constraints, settings persistence, and local data.
 - `.github/workflows/ci.yml` - Push/PR checks, Java 17 sidecar smoke test, and packaged-VSIX assertion.
 - `.github/workflows/release.yml` - Tag-driven IntelliJ ZIP and VSIX GitHub releases.
+- `scripts/portable-process.mjs` and `run-gradle.mjs` - Shell-free npm and Gradle wrapper
+  invocation used by portable packaging/tests and targeted host CI.
 
 ### `core/`
 
@@ -52,12 +54,14 @@ guidance.
 - `engine/ReviewSessionService.java` - Provider dispatch and operation-scoped cancellation.
 - `review/ClaudeService.java` - Claude CLI execution and canonical review/chat prompts.
 - `review/CopilotService.java` - Copilot SDK execution with the same review API.
+- `review/ChunkedReviewService.java` - Shared diff batching and mandatory global reconciliation.
 - `review/CancellationToken.java` - Shared cancellation state.
 - `review/BoundedProcessRunner.java` - Bounded subprocess lifecycle and output draining.
 - `review/CopilotModelDiscovery.java` - Session-cached Copilot model probing.
 - `review/GitWorktreeService.java` - Temporary PR-head worktree lifecycle.
 - `review/RepoGuidelinesReader.java` - Bounded repository-guidance discovery.
 - `review/BinaryLocator.java` - Provider binary-path probing.
+- `review/ProviderSetupProbe.java` - Bounded provider authentication readiness for onboarding.
 - `review/stream/` - Jackson DTOs for Claude stream-json events.
 - Tests: `review-engine/src/test/java/com/jinloes/prpilot/`.
 
@@ -106,6 +110,7 @@ IntelliJ host integration. Depends directly on `core`, `github-engine`, and `rev
 - `services/IntellijClaudeService.java` - Provider adapter with pooled I/O and EDT callbacks.
 - `services/UserFacingErrors.java` - Actionable host error copy.
 - `services/PendingReviewIndex.java` - Saved-draft index.
+- `services/DraftRecoveryStore.java` - Token-free local recovery snapshots for interrupted draft replacement.
 - `services/PendingReviewIndexNotifications.java` - Corrupt-index warning and quarantine action.
 - `services/SeenPRSet.java` - Notification deduplication state.
 - `services/PRNotificationService.java` - PR polling, source labels, and merge behavior.
@@ -127,7 +132,7 @@ Shared Vite/React/TypeScript UI used by both IDE hosts.
 - `src/App.tsx` - Application state and top-level host workflow.
 - `src/bridge/types.ts` - Cross-host message schemas.
 - `src/components/` - PR discovery, diff, review, chat, settings-adjacent UI, and reusable controls.
-- `src/lib/reviewQuality.ts` - Quality heuristics, repairs, and diff chunk planning.
+- `src/lib/reviewQuality.ts` - Quality heuristics and in-memory repair suggestions.
 - `src/lib/autosave.ts` - Draft dirty-check, snapshot, and debounce decisions.
 - `src/lib/validateComments.ts` - Inline-comment validation.
 - `src/lib/keyboard.ts`, `layout.ts`, `motion.ts` - Shared interaction/layout policies.
@@ -145,10 +150,12 @@ Shared Vite/React/TypeScript UI used by both IDE hosts.
 VS Code host integration. All GitHub and review generation routes through the Java sidecar.
 
 - `src/extension.ts` - Activation, commands, webview bridge, and host lifecycle.
+- `src/draftRecovery.ts` - Token-free `globalState` snapshots used until GitHub confirms a draft save.
 - `src/sidecar.ts` - Mandatory JSON-RPC client and notification dispatch.
 - `src/models.ts` - Host-neutral PR/review view models.
 - `src/claude.ts` - Claude preflight and remaining mirrored prompt helpers.
 - `src/copilot.ts` - Copilot model discovery and binary preflight.
+- `src/providerSetup.ts` - Conservative Claude authentication probe classification for onboarding.
 - `src/settings.ts` and `settingsView.ts` - Settings controller and pure webview rendering.
 - `src/reviewGuidanceProfiles.ts` - Guidance-profile validation and resolution.
 - `src/operationCorrelation.ts` - Async selection/generation/chat invalidation.
@@ -168,8 +175,9 @@ VS Code host integration. All GitHub and review generation routes through the Ja
 
 ### Review generation
 
-`ReviewPane`/`App.tsx` -> host bridge -> `ReviewEngineApi` -> `ReviewSessionService` -> provider service
--> status/chunk notifications -> host bridge -> shared webview.
+`ReviewPane`/`App.tsx` -> host bridge -> `ReviewEngineApi` -> `ReviewSessionService` ->
+`ChunkedReviewService` when opted in -> provider service -> status/chunk notifications -> host bridge
+-> shared webview.
 
 ### GitHub operations
 

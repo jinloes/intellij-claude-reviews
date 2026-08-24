@@ -107,6 +107,36 @@ void test('validates PR list metadata', () => {
   }), null)
 })
 
+void test('validates provider setup readiness states', () => {
+  assert.notEqual(parseIncomingMessage({
+    ...version,
+    type: 'setupRequired',
+    reason: 'provider_not_authenticated',
+    detail: 'Sign in.',
+    providerReadiness: {
+      provider: 'claude',
+      available: true,
+      detail: 'Sign in.',
+      binaryStatus: 'ready',
+      authenticationStatus: 'unavailable',
+      authCommand: 'claude auth login',
+    },
+  }), null)
+  assert.equal(parseIncomingMessage({
+    ...version,
+    type: 'setupRequired',
+    reason: 'provider_not_installed',
+    detail: 'Missing.',
+    providerReadiness: {
+      provider: 'claude',
+      available: false,
+      detail: 'Missing.',
+      binaryStatus: 'ready',
+      authenticationStatus: 'unknown',
+    },
+  }), null)
+})
+
 void test('validates all optional draft metadata', () => {
   assert.notEqual(parseIncomingMessage({
     ...version,

@@ -29,7 +29,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "20.17.0"
           cache: npm
           cache-dependency-path: |
             webview/package-lock.json
@@ -62,7 +62,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "20.17.0"
           cache: npm
           cache-dependency-path: |
             webview/package-lock.json
@@ -131,3 +131,50 @@ jobs:
         working-directory: vscode-extension
         run: unzip -l pr-pilot-ci.vsix | grep -q 'extension/sidecar/pr-pilot-sidecar.jar'
 
+  targeted-host-checks:
+    name: Targeted Host Checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20.17.0"
+          cache: npm
+          cache-dependency-path: vscode-extension/package-lock.json
+
+      - name: Verify provider binary and worktree path handling
+        run: node scripts/run-gradle.mjs :review-engine:test --tests '*BinaryLocatorTest' --tests '*GitWorktreeServiceTest'
+
+      - name: Install webview and VS Code extension dependencies
+        run: |
+          npm --prefix webview ci
+          npm --prefix vscode-extension ci
+
+      - name: Test VS Code extension
+        working-directory: vscode-extension
+        run: |
+          npm run test:unit
+          npm run build
+
+      - name: Package VS Code extension
+        working-directory: vscode-extension
+        run: npm run package:vsix -- --out pr-pilot-host-check.vsix
+
+      - name: Smoke check packaged extension
+        working-directory: vscode-extension
+        run: node -e "if (!require('fs').existsSync('pr-pilot-host-check.vsix')) process.exit(1)"

@@ -8,6 +8,7 @@ export interface PRListLoadedMessage {
   prs: PR[]
   defaultRepo?: string
   listStatus?: PRListStatus
+  providerReadiness?: ProviderReadiness
 }
 
 export interface PRListStatus {
@@ -36,6 +37,7 @@ export interface DraftLoadedMessage {
   validationDiff?: string
   staleCommits?: boolean
   importedFromGitHub?: boolean
+  recoveryPending?: boolean
   status?: string
   providerReadiness?: ProviderReadiness
 }
@@ -144,9 +146,9 @@ export interface ChatErrorMessage {
 
 export interface SetupRequiredMessage {
   type: 'setupRequired'
-  /** 'gh_not_installed' | 'gh_not_authenticated' | 'load_failed' */
-  reason: 'gh_not_installed' | 'gh_not_authenticated' | 'load_failed'
+  reason: 'gh_not_installed' | 'gh_not_authenticated' | 'provider_not_installed' | 'provider_not_authenticated' | 'load_failed'
   detail: string
+  providerReadiness?: ProviderReadiness
 }
 
 export type HostTheme = 'light' | 'dark' | 'highContrastLight' | 'highContrastDark'
@@ -196,6 +198,9 @@ export interface ProviderReadiness {
   provider: 'claude' | 'copilot'
   available: boolean
   detail: string
+  binaryStatus?: 'ready' | 'missing'
+  authenticationStatus?: 'ready' | 'unavailable' | 'unverified'
+  authCommand?: string
 }
 
 export interface ReviewResult {
@@ -245,8 +250,10 @@ export interface GenerateReviewRequest {
   number: number
   owner: string
   repo: string
-  /** Optional batch-scoped diff; omitted for a normal full review. */
+  /** Optional complete validation diff used by engine-owned chunking. */
   diff?: string
+  /** Runs bounded batches plus a mandatory engine-owned global reconciliation pass. */
+  chunkedReview?: boolean
   /** Optional per-review override of the focus areas; falls back to the saved setting. */
   focusAreas?: string
   /** Optional per-review override of custom instructions; falls back to the saved setting. */

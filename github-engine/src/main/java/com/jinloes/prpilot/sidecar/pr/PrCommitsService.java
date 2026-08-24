@@ -9,14 +9,17 @@ import com.jinloes.prpilot.sidecar.github.GitHubResponse;
 import com.jinloes.prpilot.sidecar.github.GitHubSession;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Reads the commit messages on a pull request.
  *
  * <p>Only the subject line and a bounded body are kept per commit: the value is the author's stated
- * intent, and full bodies on a long-lived branch would crowd out the diff itself.
+ * intent, and full bodies on a long-lived branch would crowd out the diff itself. Same-repository
+ * closing references are extracted from each raw message before that display truncation.
  */
 public final class PrCommitsService {
 
@@ -73,12 +76,16 @@ public final class PrCommitsService {
                 return PrCommitsResult.failure(GitHubFailure.INVALID_RESPONSE);
             }
             List<String> lines = new ArrayList<>();
+            Set<Integer> closingIssueNumbers = new LinkedHashSet<>();
             int count = 0;
             int examined = 0;
             for (JsonNode commit : commits) {
-                if (count >= MAX_COMMITS) break;
-                examined++;
                 String message = commit.path("commit").path("message").asText("");
+                if (!message.isBlank()) {
+                    addClosingIssueNumbers(message, closingIssueNumbers);
+                }
+                if (count >= MAX_COMMITS) continue;
+                examined++;
                 if (message.isBlank()) continue;
                 count++;
                 lines.add("- " + subject(message));
@@ -93,9 +100,17 @@ public final class PrCommitsService {
             if (dropped > 0) {
                 lines.add("…and " + dropped + " more commits.");
             }
-            return PrCommitsResult.success(count, String.join("\n", lines));
+            return PrCommitsResult.success(
+                    count, String.join("\n", lines), List.copyOf(closingIssueNumbers));
         } catch (IOException exception) {
             return PrCommitsResult.failure(GitHubFailure.INVALID_RESPONSE);
+        }
+    }
+
+    private static void addClosingIssueNumbers(String message, Set<Integer> issueNumbers) {
+        for (int number : LinkedIssueService.referencedIssueNumbers(message)) {
+            if (issueNumbers.size() >= LinkedIssueService.MAX_ISSUES) return;
+            issueNumbers.add(number);
         }
     }
 

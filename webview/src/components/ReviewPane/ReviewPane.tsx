@@ -10,10 +10,7 @@ import {
 import { validateComments } from '@/lib/validateComments'
 import {
   applyReviewQualityRepairs,
-  buildDiffBatches,
-  estimateFileConfidence,
   runReviewQualityCheck,
-  type DiffBatch,
   type ReviewQualityAction,
   type ReviewQualityReport,
 } from '@/lib/reviewQuality'
@@ -127,41 +124,9 @@ type PaneState =
   | { kind: 'submitError'; message: string; result: ReviewResult | null; diff: string; validationDiff: string }
   | { kind: 'deleteError'; message: string; draft: DraftPresentState }
 
-interface ChunkedProgress {
-  running: boolean
-  currentBatch: number
-  totalBatches: number
-  activeLabel: string
-  completed: Array<{
-    label: string
-    confidence: number
-    comments: number
-    fileConfidence: Array<{ file: string; confidence: number }>
-  }>
-}
-
 interface DiffPreflight {
   fileCount: number
   changedLines: number
-}
-
-interface ChunkSession {
-  prKey: string
-  operationId: string
-  startedAtMs: number
-  batches: DiffBatch[]
-  nextBatchIndex: number
-  aggregated: Array<{ result: ReviewResult; files: string[] }>
-  completed: Array<{
-    label: string
-    confidence: number
-    comments: number
-    fileConfidence: Array<{ file: string; confidence: number }>
-  }>
-  diff: string
-  validationDiff: string
-  focusAreas: string
-  customInstructions: string
 }
 
 function newOperationId(): string {
@@ -265,15 +230,6 @@ function prKey(pr: Pick<PR, 'owner' | 'repo' | 'number'>): string {
   return `${pr.owner}/${pr.repo}#${pr.number}`
 }
 
-function chunkInstructions(batch: DiffBatch, index: number, total: number): string {
-  return [
-    `Chunked review mode is enabled: process batch ${index + 1}/${total}.`,
-    'Only emit findings for the following files in this batch:',
-    ...batch.files.map((file) => `- ${file}`),
-    'If a potential finding is outside this file set, ignore it for this batch.',
-  ].join('\n')
-}
-
 function summarizeDiffPreflight(diff: string): DiffPreflight | null {
   if (!diff.trim()) return null
   const rows = diff.split(/\r?\n/)
@@ -310,33 +266,6 @@ function chunkRecommendation(preflight: DiffPreflight | null, truncated: boolean
   return { recommendChunked: false, reason: 'Single-pass review is likely sufficient.' }
 }
 
-function mergeChunkResults(results: ReviewResult[]): ReviewResult {
-  const lineCommentSeen = new Set<string>()
-  const lineComments: LineComment[] = []
-  const summaryParts: string[] = []
-  let verdict: ReviewResult['verdict'] = 'APPROVE'
-
-  for (const result of results) {
-    if (result.verdict === 'REQUEST_CHANGES') verdict = 'REQUEST_CHANGES'
-    else if (verdict === 'APPROVE' && result.verdict === 'COMMENT') verdict = 'COMMENT'
-
-    if (result.summary.trim()) summaryParts.push(result.summary.trim())
-
-    for (const comment of result.lineComments) {
-      const key = `${comment.file}|${comment.line}|${comment.type}|${comment.body}`
-      if (lineCommentSeen.has(key)) continue
-      lineCommentSeen.add(key)
-      lineComments.push(comment)
-    }
-  }
-
-  const combinedSummary = summaryParts.length > 0
-    ? `## Overview\nChunked review completed across ${results.length} batch${results.length === 1 ? '' : 'es'}.\n\n${summaryParts.join('\n\n')}`.slice(0, 790)
-    : '## Overview\nChunked review completed.'
-
-  return { summary: combinedSummary, lineComments, verdict }
-}
-
 export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPane(
   { pr, onDirtyStateChange },
   ref,
@@ -352,7 +281,6 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
   const [selectedContext, setSelectedContext] = useState('')
   const [pendingChatMessage, setPendingChatMessage] = useState<{ q: string; ctx: string; id: number; token?: string } | null>(null)
   const [chunkedMode, setChunkedMode] = useState(false)
-  const [chunkedProgress, setChunkedProgress] = useState<ChunkedProgress | null>(null)
   const [qualityExpanded, setQualityExpanded] = useState(false)
   const [chatHeight, setChatHeight] = useState(() => loadChatHeight(localStorage, window.innerHeight))
   const [chatAvailableHeight, setChatAvailableHeight] = useState(window.innerHeight)
@@ -368,7 +296,6 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
   // either the save-then-submit or direct-submit path begins.
   const submitInFlightRef = useRef(false)
   const currentPrRef = useRef(pr)
-  const chunkSessionRef = useRef<ChunkSession | null>(null)
   const activeReviewOperationIdRef = useRef<string | null>(null)
   // Autosave bookkeeping. The draft IS the autosave target: a generated review
   // is saved to GitHub immediately, and subsequent edits are flushed on a 30s
@@ -428,8 +355,6 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
     setSelectedContext('')
     setPendingChatMessage(null)
     setQualityExpanded(false)
-    setChunkedProgress(null)
-    chunkSessionRef.current = null
     activeReviewOperationIdRef.current = null
     lastSavedSnapshotRef.current = null
     generatedBaselineRef.current = null
@@ -461,9 +386,9 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
             const diff = msg.diff ?? msg.validationDiff ?? ''
             const validationDiff = msg.validationDiff ?? diff
             const result = withSortedComments(withValidatedComments(msg.result, validationDiff))
-            // A freshly loaded draft is already on GitHub: treat it as the saved
-            // baseline so autosave only fires on subsequent edits.
-            lastSavedSnapshotRef.current = reviewSnapshot(result)
+            // A recovery snapshot was durable locally but was not confirmed on GitHub. Keep it
+            // dirty so the normal autosave path reconciles it without discarding reviewer edits.
+            lastSavedSnapshotRef.current = msg.recoveryPending ? null : reviewSnapshot(result)
             setFocusedCommentIdx(0)
             setState({
               kind: 'draftPresent',
@@ -487,15 +412,6 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
           break
 
         case 'reviewGenerating':
-          if (chunkSessionRef.current) {
-            setState((prev) => ({
-              kind: 'generating',
-              messages: prev.kind === 'generating' ? [...prev.messages, msg.message] : [msg.message],
-              chunks: prev.kind === 'generating' ? prev.chunks : [],
-              startedAtMs: prev.kind === 'generating' ? prev.startedAtMs : Date.now(),
-            }))
-            break
-          }
           setState((prev) => ({
             kind: 'generating',
             messages: prev.kind === 'generating' ? [...prev.messages, msg.message] : [msg.message],
@@ -505,13 +421,6 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
           break
 
         case 'reviewChunk':
-          if (chunkSessionRef.current) {
-            setState((prev) => {
-              if (prev.kind !== 'generating') return prev
-              return { ...prev, chunks: [...prev.chunks, { kind: msg.kind, content: msg.chunk }] }
-            })
-            break
-          }
           setState((prev) => {
             if (prev.kind !== 'generating') return prev
             return { ...prev, chunks: [...prev.chunks, { kind: msg.kind, content: msg.chunk }] }
@@ -522,92 +431,6 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
           const diff = msg.diff ?? msg.validationDiff ?? ''
           const validationDiff = msg.validationDiff ?? diff
           const result = withSortedComments(withValidatedComments(msg.result, validationDiff))
-
-          const chunkSession = chunkSessionRef.current
-          if (chunkSession) {
-            const batchIdx = chunkSession.nextBatchIndex
-            const batch = chunkSession.batches[batchIdx]
-            if (!batch) {
-              chunkSessionRef.current = null
-              break
-            }
-
-            chunkSession.aggregated.push({ result, files: batch.files })
-            const confidence = estimateFileConfidence(result.lineComments, batch.files)
-            const fileConfidence = batch.files.map((file) => ({
-              file,
-              confidence: estimateFileConfidence(result.lineComments, [file]),
-            }))
-            const completed = [
-              ...chunkSession.completed,
-              { label: batch.label, confidence, comments: result.lineComments.length, fileConfidence },
-            ]
-            chunkSession.completed = completed
-
-            chunkSession.nextBatchIndex += 1
-            if (chunkSession.nextBatchIndex < chunkSession.batches.length) {
-              const nextBatch = chunkSession.batches[chunkSession.nextBatchIndex]
-              setChunkedProgress({
-                running: true,
-                currentBatch: chunkSession.nextBatchIndex + 1,
-                totalBatches: chunkSession.batches.length,
-                activeLabel: nextBatch.label,
-                completed,
-              })
-              setState({
-                kind: 'generating',
-                messages: [`Starting ${nextBatch.label}…`],
-                chunks: [],
-                startedAtMs: chunkSession.startedAtMs,
-              })
-              const activePr = currentPrRef.current
-              if (!activePr || prKey(activePr) !== chunkSession.prKey) {
-                chunkSessionRef.current = null
-                setState({ kind: 'error', message: 'Chunked review cancelled because the selected PR changed.' })
-                break
-              }
-              sendToHost({
-                type: 'generateReview',
-                operationId: chunkSession.operationId,
-                number: activePr.number,
-                owner: activePr.owner,
-                repo: activePr.repo,
-                diff: nextBatch.diff,
-                focusAreas: chunkSession.focusAreas || undefined,
-                customInstructions: [
-                  chunkSession.customInstructions,
-                  chunkInstructions(nextBatch, chunkSession.nextBatchIndex, chunkSession.batches.length),
-                ]
-                  .filter((value) => value.trim().length > 0)
-                  .join('\n\n'),
-              })
-              break
-            }
-
-            const merged = mergeChunkResults(chunkSession.aggregated.map((item) => item.result))
-            const elapsedSec = Math.max(0, Math.round((Date.now() - chunkSession.startedAtMs) / 1000))
-            const finalized = withSortedComments(withValidatedComments(merged, chunkSession.validationDiff))
-            generatedBaselineRef.current = finalized
-            chunkSessionRef.current = null
-            activeReviewOperationIdRef.current = null
-            setChunkedProgress({
-              running: false,
-              currentBatch: chunkSession.batches.length,
-              totalBatches: chunkSession.batches.length,
-              activeLabel: 'Completed',
-              completed,
-            })
-            setFocusedCommentIdx(0)
-            setState({
-              kind: 'reviewUnsaved',
-              result: finalized,
-              diff: chunkSession.diff || chunkSession.validationDiff,
-              validationDiff: chunkSession.validationDiff,
-              generationElapsedSec: elapsedSec,
-            })
-            toast.success(`Chunked review completed across ${chunkSession.batches.length} batches.`)
-            break
-          }
 
           setFocusedCommentIdx(0)
           activeReviewOperationIdRef.current = null
@@ -630,24 +453,6 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
 
         case 'reviewError':
           activeReviewOperationIdRef.current = null
-          if (chunkSessionRef.current) {
-            const session = chunkSessionRef.current
-            chunkSessionRef.current = null
-            setChunkedProgress((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    running: false,
-                    activeLabel: `Failed at batch ${session.nextBatchIndex + 1}`,
-                  }
-                : prev,
-            )
-            setState({
-              kind: 'error',
-              message: `Chunked review failed at batch ${session.nextBatchIndex + 1}/${session.batches.length}: ${msg.message}`,
-            })
-            break
-          }
           setState({ kind: 'error', message: msg.message })
           break
 
@@ -1104,39 +909,6 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
 
   const currentPr = pr
 
-  function sendChunkBatchRequest(session: ChunkSession, batchIndex: number) {
-    const batch = session.batches[batchIndex]
-    if (!batch) return
-    setChunkedProgress({
-      running: true,
-      currentBatch: batchIndex + 1,
-      totalBatches: session.batches.length,
-      activeLabel: batch.label,
-      completed: session.completed,
-    })
-    setState({
-      kind: 'generating',
-      messages: [`Starting ${batch.label}…`],
-      chunks: [],
-      startedAtMs: session.startedAtMs,
-    })
-    sendToHost({
-      type: 'generateReview',
-      operationId: session.operationId,
-      number: currentPr.number,
-      owner: currentPr.owner,
-      repo: currentPr.repo,
-      diff: batch.diff,
-      focusAreas: session.focusAreas || undefined,
-      customInstructions: [
-        session.customInstructions,
-        chunkInstructions(batch, batchIndex, session.batches.length),
-      ]
-        .filter((value) => value.trim().length > 0)
-        .join('\n\n'),
-    })
-  }
-
   function handleGenerate() {
     const focusAreas = focusAreasOverride.trim()
     const customInstructions = customInstructionsOverride.trim()
@@ -1147,34 +919,25 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
         toast.error('Chunked mode needs a loaded diff. Reload the PR and try again.')
         return
       }
-      const batches = buildDiffBatches(sourceDiff)
-      if (batches.length <= 1) {
-        toast.info('Chunked mode skipped: this PR has too few changed files for batching.')
-      } else {
-        const session: ChunkSession = {
-          prKey: prKey(currentPr),
-          operationId: newOperationId(),
-          startedAtMs: Date.now(),
-          batches,
-          nextBatchIndex: 0,
-          aggregated: [],
-          completed: [],
-          diff: diffOf(state) || sourceDiff,
-          validationDiff: sourceDiff,
-          focusAreas,
-          customInstructions,
-        }
-        chunkSessionRef.current = session
-        activeReviewOperationIdRef.current = session.operationId
-        sendChunkBatchRequest(session, 0)
-        return
-      }
+      const operationId = newOperationId()
+      activeReviewOperationIdRef.current = operationId
+      setState({ kind: 'generating', messages: ['Preparing engine-owned review batches…'], chunks: [], startedAtMs: Date.now() })
+      sendToHost({
+        type: 'generateReview',
+        operationId,
+        number: currentPr.number,
+        owner: currentPr.owner,
+        repo: currentPr.repo,
+        diff: sourceDiff,
+        chunkedReview: true,
+        focusAreas: focusAreas || undefined,
+        customInstructions: customInstructions || undefined,
+      })
+      return
     }
 
-    chunkSessionRef.current = null
     const operationId = newOperationId()
     activeReviewOperationIdRef.current = operationId
-    setChunkedProgress(null)
     setState({ kind: 'generating', messages: ['Starting review…'], chunks: [], startedAtMs: Date.now() })
     sendToHost({
       type: 'generateReview',
@@ -1192,8 +955,6 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
     if (!operationId) return
     sendToHost({ type: 'cancelReview', operationId })
     activeReviewOperationIdRef.current = null
-    chunkSessionRef.current = null
-    setChunkedProgress((prev) => (prev ? { ...prev, running: false, activeLabel: 'Cancelled' } : null))
     setState({ kind: 'draftLoading' })
     sendToHost({ type: 'selectPR', number: currentPr.number, owner: currentPr.owner, repo: currentPr.repo })
   }
@@ -1556,11 +1317,6 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
                   />
                 </div>
               )}
-              {chunkedProgress && (
-                <div className="px-4 pt-3">
-                  <ChunkedProgressCard progress={chunkedProgress} />
-                </div>
-              )}
               <PaneContent
                 state={state}
                 focusedCommentIdx={focusedCommentIdx}
@@ -1798,13 +1554,15 @@ function ReviewQualityCheckCard({
   onApplyRepair: (action: ReviewQualityAction) => void
   onCollapse: () => void
 }) {
-  const scoreTone = report.score >= 85 ? 'text-status-approve' : report.score >= 65 ? 'text-status-suggestion' : 'text-status-issue'
+  const riskCount = report.issues.reduce((count, issue) => count + issue.count, 0)
 
   return (
     <div className="rounded border border-border bg-muted/20 px-3 py-2.5">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs font-semibold">Review Quality Check</span>
-        <span className={cn('text-xs font-mono', scoreTone)}>Score {report.score}/100</span>
+        <span className="text-xs text-status-issue">
+          {riskCount} unresolved {riskCount === 1 ? 'risk' : 'risks'}
+        </span>
         <Button variant="ghost" size="sm" className="ml-auto h-6 px-2 text-[11px]" onClick={onCollapse}>
           Hide
         </Button>
@@ -1838,46 +1596,6 @@ function ReviewQualityCheckCard({
             </Button>
           )}
         </div>
-      )}
-    </div>
-  )
-}
-
-function ChunkedProgressCard({ progress }: { progress: ChunkedProgress }) {
-  const percent = progress.totalBatches > 0
-    ? Math.round((progress.completed.length / progress.totalBatches) * 100)
-    : 0
-  return (
-    <div className="rounded border border-border bg-muted/20 px-3 py-2.5">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-semibold">Chunked review progress</span>
-        <span className="text-[11px] font-mono text-muted-foreground">
-          {progress.completed.length}/{progress.totalBatches} ({percent}%)
-        </span>
-      </div>
-      <p className="mt-1 text-[11px] text-muted-foreground">
-        {progress.running
-          ? `Running batch ${progress.currentBatch}/${progress.totalBatches}: ${progress.activeLabel}`
-          : `Last run status: ${progress.activeLabel}`}
-      </p>
-      {progress.completed.length > 0 && (
-        <ul className="mt-2 space-y-1">
-          {progress.completed.map((item) => (
-            <li key={item.label} className="text-[11px] text-muted-foreground">
-              {item.label} · confidence {(item.confidence * 100).toFixed(0)}% · {item.comments} comments
-              {item.fileConfidence.length > 0 && (
-                <ul className="mt-1 space-y-0.5 text-[10px] text-muted-foreground">
-                  {item.fileConfidence.map((file) => (
-                    <li key={file.file} className="flex items-center gap-1.5" title={file.file}>
-                      <span className="truncate max-w-[36rem]">{file.file}</span>
-                      <span className="font-mono">{(file.confidence * 100).toFixed(0)}%</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </li>
-          ))}
-        </ul>
       )}
     </div>
   )

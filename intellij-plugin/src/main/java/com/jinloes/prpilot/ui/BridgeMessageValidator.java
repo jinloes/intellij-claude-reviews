@@ -65,6 +65,7 @@ final class BridgeMessageValidator {
                     validOperationId(node.get("operationId"))
                             && hasValidPrIdentity(node)
                             && optionalText(node.get("diff"), MAX_REVIEW_DIFF)
+                            && optionalBoolean(node.get("chunkedReview"))
                             && optionalText(node.get("focusAreas"), 10_000)
                             && optionalText(node.get("customInstructions"), 20_000);
             case "saveDraft" ->

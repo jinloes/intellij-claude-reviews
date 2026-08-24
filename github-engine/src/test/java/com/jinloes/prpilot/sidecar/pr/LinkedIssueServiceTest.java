@@ -23,7 +23,13 @@ class LinkedIssueServiceTest {
     }
 
     private static LinkedIssueService.Params params(String prBody) {
-        return new LinkedIssueService.Params("https://github.com", "acme", "widgets", prBody);
+        return params(prBody, List.of());
+    }
+
+    private static LinkedIssueService.Params params(
+            String prBody, List<Integer> commitIssueNumbers) {
+        return new LinkedIssueService.Params(
+                "https://github.com", "acme", "widgets", prBody, commitIssueNumbers);
     }
 
     private static GitHubResponse ok(String body) {
@@ -134,6 +140,36 @@ class LinkedIssueServiceTest {
         }
 
         @Test
+        void resolvesACommitOnlyClosingReference() {
+            FakeClient client = new FakeClient();
+            client.responses.add(ok("{\"title\":\"Commit issue\",\"state\":\"open\"}"));
+
+            LinkedIssueResult result = service(client).linkedIssues(params("", List.of(7)));
+
+            assertThat(result.summary()).isEqualTo("#7: Commit issue (open)");
+            assertThat(client.paths).containsExactly("/repos/acme/widgets/issues/7");
+        }
+
+        @Test
+        void givesPrBodyReferencesPrecedenceAndCapsTheMergedList() {
+            FakeClient client = new FakeClient();
+            client.responses.add(ok("{\"title\":\"Body first\"}"));
+            client.responses.add(ok("{\"title\":\"Body second\"}"));
+            client.responses.add(ok("{\"title\":\"Commit fill\"}"));
+
+            LinkedIssueResult result =
+                    service(client)
+                            .linkedIssues(params("Closes #2 and resolves #3", List.of(1, 2, 4)));
+
+            assertThat(result.count()).isEqualTo(LinkedIssueService.MAX_ISSUES);
+            assertThat(client.paths)
+                    .containsExactly(
+                            "/repos/acme/widgets/issues/2",
+                            "/repos/acme/widgets/issues/3",
+                            "/repos/acme/widgets/issues/1");
+        }
+
+        @Test
         void keepsTheIssuesItCouldResolveWhenAnotherLookupFails() {
             FakeClient client = new FakeClient();
             client.responses.add(new GitHubResponse(404, ""));
@@ -160,7 +196,7 @@ class LinkedIssueServiceTest {
             LinkedIssueResult result =
                     service.linkedIssues(
                             new LinkedIssueService.Params(
-                                    "https://github.com", "..", "widgets", "Closes #1"));
+                                    "https://github.com", "..", "widgets", "Closes #1", List.of()));
 
             assertThat(result.status()).isEqualTo("invalid_request");
             assertThat(tokenCalls[0]).isZero();

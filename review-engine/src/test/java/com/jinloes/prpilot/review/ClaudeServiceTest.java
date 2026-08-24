@@ -445,6 +445,11 @@ class ClaudeServiceTest {
     class BuildPrompt {
 
         @Test
+        void promptVersionSegmentsContextConformanceChanges() {
+            assertThat(ClaudeService.PROMPT_VERSION).isEqualTo("2026-08-context-conformance");
+        }
+
+        @Test
         void embedsRepoGuidelinesFocusAreasAndCustomInstructionsWhenProvided() {
             PRReviewRequest request =
                     PRReviewRequest.builder(fakePr(), "")
@@ -474,6 +479,51 @@ class ClaudeServiceTest {
             assertThat(prompt).contains("<commits>").contains("- Fix login");
             assertThat(prompt).contains("<linked_issue>").contains("#7: Login fails (open)");
             assertThat(prompt).contains("<repo_profile>").contains("Languages: Java");
+        }
+
+        @Test
+        void linkedIssueRequiresAnEvidenceGatedConformancePass() {
+            String prompt =
+                    ClaudeService.buildPrompt(
+                            PRReviewRequest.builder(fakePr(), "")
+                                    .linkedIssue(
+                                            "#7: The handler must reject empty input and preserve"
+                                                    + " existing retries.")
+                                    .build());
+
+            assertThat(prompt)
+                    .contains("make one explicit conformance pass")
+                    .contains("requirements that are missing or only partially implemented")
+                    .contains("materially exceeds the stated scope and creates a confirmed risk")
+                    .contains(
+                            "requirements that appear implemented but are implemented incorrectly")
+                    .contains("anchor every comment to a changed line")
+                    .contains("no honest changed-line anchor, do not force a comment")
+                    .contains("In \"rationale\", briefly quote or name the conflicting requirement")
+                    .contains(
+                            "Do not flag harmless supporting work merely because the issue did not"
+                                    + " enumerate it");
+        }
+
+        @Test
+        void repoGuidelinesRequireConcreteImpactAndSourceCitations() {
+            String prompt =
+                    ClaudeService.buildPrompt(
+                            PRReviewRequest.builder(fakePr(), "")
+                                    .repoGuidelines(
+                                            "## ARCHITECTURE.md\n"
+                                                    + "Domain services must not depend on hosts.")
+                                    .build());
+
+            assertThat(prompt)
+                    .contains("intended behavior and review priority, not proof of a defect")
+                    .contains("Re-confirm concrete impact on changed code")
+                    .contains("cite its `## <path>` source and the relevant rule in \"rationale\"")
+                    .contains("Skip style-only, formatting, and tooling-enforced rules")
+                    .contains(
+                            "An explicit repository rule overrides a conflicting generic heuristic")
+                    .contains("## ARCHITECTURE.md")
+                    .contains("Domain services must not depend on hosts");
         }
 
         @Test
@@ -526,6 +576,8 @@ class ClaudeServiceTest {
             assertThat(prompt).doesNotContain("<commits>\n");
             assertThat(prompt).doesNotContain("<linked_issue>\n");
             assertThat(prompt).doesNotContain("<repo_profile>\n");
+            assertThat(prompt).doesNotContain("make one explicit conformance pass");
+            assertThat(prompt).doesNotContain("cite its `## <path>` source");
         }
 
         @Test
@@ -1038,7 +1090,7 @@ class ClaudeServiceTest {
                     new PullRequest(
                             "Fix bug", "", "org", "repo", 7, "Closes #12", "alice", "2024-01-01");
             return com.jinloes.prpilot.model.PRReviewRequest.builder(p, "@@ -1,1 +1,1 @@\n+bad\n")
-                    .repoGuidelines("Prefer Apache Commons helpers.")
+                    .repoGuidelines("## AGENTS.md\nPrefer Apache Commons helpers.")
                     .focusAreas("security, performance")
                     .customInstructions("Enforce our null-handling convention.")
                     .linkedIssue("#12 Crash on empty input")
@@ -1106,11 +1158,25 @@ class ClaudeServiceTest {
         @Test
         void buildCritiquePromptDirectsSuppressionOfFindingsCiAlreadyReports() {
             String prompt = ClaudeService.buildCritiquePrompt(fullContextRequest(), draft());
+            assertThat(prompt).contains("Drop a finding that <ci_status> shows CI already reports");
+        }
+
+        @Test
+        void buildCritiquePromptRechecksGuidelineAndLinkedIssueEvidence() {
+            String prompt = ClaudeService.buildCritiquePrompt(fullContextRequest(), draft());
+
             assertThat(prompt)
-                    .contains("Drop a finding that <ci_status> shows CI already reports")
+                    .doesNotContain("is supported — keep it")
+                    .contains("these establish intended behavior, not proof of a defect")
+                    .contains("re-confirm concrete impact on changed code")
+                    .contains("require \"rationale\" to name its `## <path>` source and rule")
+                    .contains("merely enforces style, formatting, or a tooling-enforced rule")
                     .contains(
-                            "A finding whose justification is a stated repo guideline, focus area,"
-                                    + " or custom instruction is supported");
+                            "Prefer an explicit repository rule over a conflicting generic"
+                                    + " heuristic")
+                    .contains("For a comment justified by <linked_issue>")
+                    .contains("re-confirm the mismatch against the requirement named in")
+                    .contains("drop it if either side is unsupported");
         }
 
         /**

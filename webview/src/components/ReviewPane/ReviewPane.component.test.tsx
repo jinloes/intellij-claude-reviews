@@ -95,6 +95,7 @@ describe('ReviewPane review submission', () => {
         .map(([arg]) => JSON.parse(arg.request) as {
           type: string
           diff?: string
+          chunkedReview?: boolean
           customInstructions?: string
         })
         .filter((message) => message.type === 'generateReview')
@@ -119,10 +120,7 @@ describe('ReviewPane review submission', () => {
       await user.click(screen.getByRole('button', { name: 'Generate Review' }))
 
       expect(generateMessages(cefQuery)).toEqual([
-        expect.not.objectContaining({
-          diff: expect.any(String),
-          customInstructions: expect.stringContaining('Chunked review mode is enabled'),
-        }),
+        expect.not.objectContaining({ diff: expect.any(String), chunkedReview: true }),
       ])
     })
 
@@ -164,8 +162,8 @@ describe('ReviewPane review submission', () => {
 
       expect(generateMessages(cefQuery)).toEqual([
         expect.objectContaining({
-          diff: expect.stringContaining('src/file-0.ts'),
-          customInstructions: expect.stringContaining('Chunked review mode is enabled'),
+          diff: expect.stringMatching(/src\/file-0\.ts[\s\S]*src\/file-7\.ts/),
+          chunkedReview: true,
         }),
       ])
     })
@@ -184,10 +182,7 @@ describe('ReviewPane review submission', () => {
       await user.click(screen.getByRole('button', { name: 'Generate Review' }))
 
       expect(generateMessages(cefQuery)).toEqual([
-        expect.not.objectContaining({
-          diff: expect.any(String),
-          customInstructions: expect.stringContaining('Chunked review mode is enabled'),
-        }),
+        expect.not.objectContaining({ diff: expect.any(String), chunkedReview: true }),
       ])
     })
   })

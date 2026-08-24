@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'com.jinloes.prpilot'
-version = '1.0.4'
+version = providers.gradleProperty('releaseVersion').orElse('1.0.4').get()
 
 repositories {
     mavenCentral()

@@ -104,6 +104,7 @@ export function isValidBridgeRequest(msg: AnyMessage | null | undefined): msg is
       return isOperationId(msg.operationId)
         && hasValidPrIdentity(msg)
         && (msg.diff === undefined || isBoundedString(msg.diff, MAX_REVIEW_DIFF))
+        && (msg.chunkedReview === undefined || typeof msg.chunkedReview === 'boolean')
         && (msg.focusAreas === undefined || isBoundedString(msg.focusAreas, 10_000))
         && (msg.customInstructions === undefined || isBoundedString(msg.customInstructions, 20_000));
     case 'saveDraft':

@@ -25,6 +25,9 @@
             serviceImplementation="com.jinloes.prpilot.services.IntellijGitHubService"/>
 
         <applicationService
+            serviceImplementation="com.jinloes.prpilot.services.DraftRecoveryStore"/>
+
+        <applicationService
             serviceImplementation="com.jinloes.prpilot.services.PRNotificationService"/>
 
         <applicationConfigurable

@@ -24,7 +24,8 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Canonical save/submit/delete orchestration for GitHub pending reviews; tokens never leave the
- * engine. Includes the body-first, per-comment 422 fallback used by both hosts.
+ * engine. A failed replacement remains recoverable because hosts persist the desired token-free
+ * snapshot before calling this service.
  */
 public final class DraftReviewMutationService {
     private static final Logger log = LoggerFactory.getLogger(DraftReviewMutationService.class);
@@ -73,21 +74,7 @@ public final class DraftReviewMutationService {
 
         String basePath = pullPath(params.owner(), params.repo(), params.number());
         String reviewsUrl = basePath + "/reviews";
-        String provisionalReviewId = null;
         try {
-            String existingId = findPendingReviewId(session, basePath);
-            if (existingId != null) {
-                try {
-                    requireSuccess(
-                            client.delete(
-                                    session.apiBase(),
-                                    session.token(),
-                                    basePath + "/reviews/" + existingId));
-                } catch (MutationException ignored) {
-                    // non-fatal: already gone or in a non-deletable state
-                }
-            }
-
             String headSha = getHeadSha(session, basePath);
             List<DraftReviewCodec.LineComment> lineComments = toLineComments(params.lineComments());
             List<DraftReviewCodec.LineComment> orphans = toLineComments(params.orphans());
@@ -97,6 +84,30 @@ public final class DraftReviewMutationService {
                     orphans.isEmpty()
                             ? encodedBody
                             : encodedBody + "\n\n" + codec.buildOrphanSection(orphans);
+
+            PendingReview existing = findPendingReview(session, basePath);
+            if (existing != null) {
+                if (bodyWithOrphans.equals(existing.body())) {
+                    return DraftReviewMutationResult.saved(existing.id(), false);
+                }
+                DraftReviewCodec.DecodedReview decoded = codec.decode(existing.body(), List.of());
+                if (!decoded.importedFromGitHub() && decoded.lineComments().equals(lineComments)) {
+                    ObjectNode updatePayload = mapper.createObjectNode();
+                    updatePayload.put("body", bodyWithOrphans);
+                    requireSuccess(
+                            client.put(
+                                    session.apiBase(),
+                                    session.token(),
+                                    reviewsUrl + "/" + existing.id(),
+                                    writeJson(updatePayload)));
+                    return DraftReviewMutationResult.saved(existing.id(), false);
+                }
+                requireSuccess(
+                        client.delete(
+                                session.apiBase(),
+                                session.token(),
+                                reviewsUrl + "/" + existing.id()));
+            }
 
             ObjectNode payload = mapper.createObjectNode();
             payload.put("commit_id", headSha);
@@ -109,13 +120,17 @@ public final class DraftReviewMutationService {
             boolean commentsDropped = false;
             JsonNode created;
             if (createResponse.statusCode() == 422 && !comments.isEmpty()) {
-                // One or more inline comments reference an invalid path or line. Create the
-                // review body-only first (guaranteed to succeed), then add each comment
-                // individually so only the bad ones are dropped.
+                // GitHub rejected at least one inline position. Keep every comment in the encoded
+                // body and visible detached section instead of relying on the undocumented
+                // per-review comments endpoint.
                 ObjectNode bodyOnlyPayload = payload.deepCopy();
-                String bodyOnly = codec.encodeBody(params.summary(), params.verdict(), List.of());
-                if (!orphans.isEmpty()) {
-                    bodyOnly += "\n\n" + codec.buildOrphanSection(orphans);
+                String bodyOnly = bodyWithOrphans;
+                List<DraftReviewCodec.LineComment> detached =
+                        lineComments.stream()
+                                .filter(comment -> !orphans.contains(comment))
+                                .toList();
+                if (!detached.isEmpty()) {
+                    bodyOnly += "\n\n" + codec.buildOrphanSection(detached);
                 }
                 bodyOnlyPayload.put("body", bodyOnly);
                 bodyOnlyPayload.set("comments", mapper.createArrayNode());
@@ -131,42 +146,7 @@ public final class DraftReviewMutationService {
                 if (reviewId.isBlank()) {
                     throw new MutationException("api_failed", "GitHub API request failed.");
                 }
-                provisionalReviewId = reviewId;
-                String commentsUrl = reviewsUrl + "/" + reviewId + "/comments";
-                List<JsonNode> dropped = new ArrayList<>();
-                for (JsonNode comment : comments) {
-                    RestResponse commentResponse =
-                            client.post(
-                                    session.apiBase(),
-                                    session.token(),
-                                    commentsUrl,
-                                    comment.toString());
-                    if (commentResponse.statusCode() == 422) {
-                        dropped.add(comment);
-                    } else {
-                        requireSuccess(commentResponse);
-                    }
-                }
-                commentsDropped = !dropped.isEmpty();
-                List<DraftReviewCodec.LineComment> acceptedComments =
-                        codec.acceptedComments(lineComments, orphans, comments, dropped);
-                String updatedBody =
-                        codec.encodeBody(params.summary(), params.verdict(), acceptedComments);
-                if (!orphans.isEmpty()) {
-                    updatedBody += "\n\n" + codec.buildOrphanSection(orphans);
-                }
-                if (!dropped.isEmpty()) {
-                    updatedBody += "\n\n" + codec.buildDroppedSection(dropped);
-                }
-                ObjectNode updatePayload = mapper.createObjectNode();
-                updatePayload.put("body", updatedBody);
-                RestResponse updateResponse =
-                        client.put(
-                                session.apiBase(),
-                                session.token(),
-                                reviewsUrl + "/" + reviewId,
-                                writeJson(updatePayload));
-                requireSuccess(updateResponse);
+                commentsDropped = true;
             } else {
                 requireSuccess(createResponse);
                 created = readJson(createResponse.body());
@@ -178,8 +158,8 @@ public final class DraftReviewMutationService {
             }
             return DraftReviewMutationResult.saved(reviewId, commentsDropped);
         } catch (MutationException exception) {
-            deleteProvisionalReview(session, reviewsUrl, provisionalReviewId);
-            return DraftReviewMutationResult.failure(exception.status(), exception.getMessage());
+            return DraftReviewMutationResult.recoveryRequired(
+                    exception.status(), exception.getMessage());
         } catch (RuntimeException exception) {
             log.warn(
                     "Unexpected draft review save failure for {}/{}#{} ({})",
@@ -187,8 +167,8 @@ public final class DraftReviewMutationService {
                     params.repo(),
                     params.number(),
                     exception.getClass().getName());
-            deleteProvisionalReview(session, reviewsUrl, provisionalReviewId);
-            return DraftReviewMutationResult.failure("api_failed", "GitHub API request failed.");
+            return DraftReviewMutationResult.recoveryRequired(
+                    "api_failed", "GitHub API request failed.");
         }
     }
 
@@ -267,7 +247,7 @@ public final class DraftReviewMutationService {
         };
     }
 
-    private String findPendingReviewId(Session session, String basePath) {
+    private PendingReview findPendingReview(Session session, String basePath) {
         RestResponse response =
                 client.get(session.apiBase(), session.token(), basePath + "/reviews");
         requireSuccess(response);
@@ -277,7 +257,9 @@ public final class DraftReviewMutationService {
         for (JsonNode review : reviews) {
             if ("PENDING".equals(review.path("state").asText(null))) {
                 String id = review.path("id").isMissingNode() ? null : review.path("id").asText();
-                return id == null || id.isBlank() ? null : id;
+                return id == null || id.isBlank()
+                        ? null
+                        : new PendingReview(id, review.path("body").asText(""));
             }
         }
         return null;
@@ -316,19 +298,6 @@ public final class DraftReviewMutationService {
                 + URLEncoder.encode(repo, StandardCharsets.UTF_8)
                 + "/pulls/"
                 + number;
-    }
-
-    private void deleteProvisionalReview(Session session, String reviewsUrl, String reviewId) {
-        if (reviewId == null) return;
-        try {
-            client.delete(session.apiBase(), session.token(), reviewsUrl + "/" + reviewId);
-        } catch (RuntimeException exception) {
-            log.debug(
-                    "Unable to clean up provisional draft review {} ({})",
-                    reviewId,
-                    exception.getClass().getName());
-            // Best effort: the original API failure remains the user-visible result.
-        }
     }
 
     private void requireSuccess(RestResponse response) {
@@ -392,6 +361,8 @@ public final class DraftReviewMutationService {
             return new Session(null, null, failure);
         }
     }
+
+    private record PendingReview(String id, String body) {}
 
     /** A single inline or general comment supplied by the caller (host UI). */
     public record CommentInput(

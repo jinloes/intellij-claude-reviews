@@ -92,7 +92,7 @@ public interface GitHubEngineApi {
     /** Loads the pending (draft) review for a PR; {@code none} status is a normal result. */
     DraftReviewResult getDraftReview(String githubBaseUrl, String owner, String repo, int number);
 
-    /** Replaces any existing pending review with a new one. */
+    /** Updates or recoverably replaces an existing pending review. */
     DraftReviewMutationResult saveDraftReview(DraftReviewMutationService.SaveParams params);
 
     /** Submits a pending review with the given event and body. */

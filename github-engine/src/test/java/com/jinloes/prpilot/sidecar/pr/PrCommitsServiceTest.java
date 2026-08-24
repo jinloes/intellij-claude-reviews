@@ -1,6 +1,7 @@
 package com.jinloes.prpilot.sidecar.pr;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jinloes.prpilot.sidecar.github.GitHubApiClient;
@@ -71,6 +72,73 @@ class PrCommitsServiceTest {
         }
 
         @Test
+        void extractsDeduplicatedClosingReferencesFromRawMessages() {
+            FakeClient client = new FakeClient();
+            client.responses.add(
+                    ok(
+                            "["
+                                    + commit("First\\n\\nFixes #7 and mentions #99")
+                                    + ","
+                                    + commit("Closes other/repo#8\\nResolves #7\\nFixed #8")
+                                    + "]"));
+
+            PrCommitsResult result = service(client).commits(params());
+
+            assertThat(result.closingIssueNumbers()).containsExactly(7, 8);
+        }
+
+        @Test
+        void extractsAClosingFooterBeyondTheRenderedBodyLimit() {
+            FakeClient client = new FakeClient();
+            client.responses.add(
+                    ok(
+                            "["
+                                    + commit(
+                                            "Subject\\n"
+                                                    + "x"
+                                                            .repeat(
+                                                                    PrCommitsService.MAX_BODY_CHARS
+                                                                            + 50)
+                                                    + "\\nFixes #42")
+                                    + "]"));
+
+            PrCommitsResult result = service(client).commits(params());
+
+            assertThat(result.summary()).doesNotContain("Fixes #42");
+            assertThat(result.closingIssueNumbers()).containsExactly(42);
+        }
+
+        @Test
+        void boundsClosingReferencesButStillScansCommitsBeyondTheDisplayCap() {
+            StringBuilder body = new StringBuilder("[");
+            for (int i = 0; i < PrCommitsService.MAX_COMMITS; i++) {
+                if (i > 0) body.append(",");
+                body.append(commit("Commit " + i));
+            }
+            body.append(",").append(commit("Fixes #4 closes #5 resolves #6 fixes #7")).append("]");
+            FakeClient client = new FakeClient();
+            client.responses.add(ok(body.toString()));
+
+            PrCommitsResult result = service(client).commits(params());
+
+            assertThat(result.count()).isEqualTo(PrCommitsService.MAX_COMMITS);
+            assertThat(result.summary()).endsWith("…and 1 more commits.");
+            assertThat(result.closingIssueNumbers()).containsExactly(4, 5, 6);
+        }
+
+        @Test
+        void exposesClosingReferencesAsAnImmutableDefensiveCopy() {
+            List<Integer> issueNumbers = new ArrayList<>(List.of(7));
+
+            PrCommitsResult result = new PrCommitsResult("ok", "loaded", 1, "- Fix", issueNumbers);
+            issueNumbers.add(8);
+
+            assertThat(result.closingIssueNumbers()).containsExactly(7);
+            assertThatThrownBy(() -> result.closingIssueNumbers().add(9))
+                    .isInstanceOf(UnsupportedOperationException.class);
+        }
+
+        @Test
         void skipsCommitsWithNoMessage() {
             FakeClient client = new FakeClient();
             client.responses.add(ok("[" + commit("  ") + "," + commit("Real") + "]"));
@@ -133,6 +201,7 @@ class PrCommitsServiceTest {
 
             assertThat(result.status()).isEqualTo("not_authenticated");
             assertThat(result.summary()).isEmpty();
+            assertThat(result.closingIssueNumbers()).isEmpty();
             assertThat(result.toString()).doesNotContain("secret-token");
 
             FakeClient offline = new FakeClient();

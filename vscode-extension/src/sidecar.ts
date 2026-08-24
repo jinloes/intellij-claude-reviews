@@ -18,6 +18,8 @@ const REVIEW_REQUEST_TIMEOUT_MS = 35 * 60 * 1000;
 const WORKTREE_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const HEADER_TERMINATOR = '\r\n\r\n';
 const SIDECAR_PROTOCOL_VERSION = 1;
+const MAX_LINKED_ISSUES = 3;
+const MAX_GITHUB_ISSUE_NUMBER = 999_999_999;
 /**
  * Every capability the sidecar advertises, all of which this client calls. Kept exhaustive on
  * purpose: each of these has a `SidecarClient` method, so a sidecar missing one produces a broken
@@ -162,6 +164,12 @@ export interface SidecarCheckStatus {
     annotations: SidecarCheckAnnotation[];
 }
 
+/** Rendered commits plus validated closing references extracted from their raw messages. */
+export interface SidecarCommitContext {
+    summary: string;
+    closingIssueNumbers: number[];
+}
+
 /**
  * Outcome of a worktree creation request.
  *
@@ -236,6 +244,7 @@ export interface SidecarDraftReviewMutationResult {
     message: string;
     reviewId: string | null;
     commentsDropped: boolean;
+    recoveryRequired: boolean;
 }
 
 // ── Review generation / chat ───────────────────────────────────────────────────
@@ -263,6 +272,7 @@ export interface SidecarGenerateReviewParams {
     inheritMcp: boolean;
     configDir?: string;
     selfCritique: boolean;
+    chunkedReview: boolean;
     pr: SidecarPrInput;
     diff: string;
     priorReview?: string;
@@ -540,6 +550,26 @@ export function parseExistingReviewsResult(value: unknown): SidecarExistingRevie
     };
 }
 
+export function parseCommitContext(value: unknown): SidecarCommitContext | null {
+    if (!value || typeof value !== 'object') return null;
+    const result = value as Record<string, unknown>;
+    if (typeof result.summary !== 'string'
+        || !Array.isArray(result.closingIssueNumbers)
+        || result.closingIssueNumbers.length > MAX_LINKED_ISSUES
+        || result.closingIssueNumbers.some((number) =>
+            typeof number !== 'number'
+            || !Number.isInteger(number)
+            || number <= 0
+            || number > MAX_GITHUB_ISSUE_NUMBER)
+        || new Set(result.closingIssueNumbers).size !== result.closingIssueNumbers.length) {
+        return null;
+    }
+    return {
+        summary: result.summary,
+        closingIssueNumbers: [...result.closingIssueNumbers] as number[],
+    };
+}
+
 /** Validates the token-free result shape returned by `prs/getDetail`. */
 export function parsePrDetailResult(value: unknown): SidecarPrDetailResult | null {
     if (!value || typeof value !== 'object') return null;
@@ -681,7 +711,8 @@ export function parseDraftReviewMutationResult(value: unknown): SidecarDraftRevi
         || !DRAFT_REVIEW_MUTATION_STATUSES.has(result.status as SidecarDraftReviewMutationResult['status'])
         || typeof result.message !== 'string'
         || (result.reviewId !== null && typeof result.reviewId !== 'string')
-        || typeof result.commentsDropped !== 'boolean') {
+        || typeof result.commentsDropped !== 'boolean'
+        || typeof result.recoveryRequired !== 'boolean') {
         return null;
     }
     return {
@@ -689,6 +720,7 @@ export function parseDraftReviewMutationResult(value: unknown): SidecarDraftRevi
         message: result.message,
         reviewId: typeof result.reviewId === 'string' ? result.reviewId : null,
         commentsDropped: result.commentsDropped,
+        recoveryRequired: result.recoveryRequired,
     };
 }
 
@@ -880,6 +912,15 @@ export class SidecarClient {
         this.notificationHandlers.clear();
     }
 
+    private failPending(id: number, err: Error): boolean {
+        const pending = this.pending.get(id);
+        if (!pending) return false;
+        this.pending.delete(id);
+        this.notificationHandlers.delete(id);
+        pending.reject(err);
+        return true;
+    }
+
     /** Restarts the sidecar after a user-visible transport failure and revalidates its capabilities. */
     async restart(): Promise<void> {
         if (this.disposed) throw new Error('PR Pilot Java sidecar has been disposed. Reload VS Code.');
@@ -910,11 +951,9 @@ export class SidecarClient {
         return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
                 const failure = new Error(
-                    `PR Pilot Java sidecar request "${method}" timed out. Select Retry to restart PR Pilot.`,
+                    `PR Pilot Java sidecar request "${method}" timed out. Try the request again.`,
                 );
-                this.startupFailure = failure;
-                this.failAllPending(failure);
-                this.stopChild();
+                this.failPending(id, failure);
             }, timeoutMs);
             this.pending.set(id, {
                 resolve: (value) => { clearTimeout(timer); this.notificationHandlers.delete(id); resolve(value); },
@@ -922,10 +961,10 @@ export class SidecarClient {
             });
             child.stdin.write(encodeFrame(JSON.stringify({ jsonrpc: '2.0', id, method, params })), (err) => {
                 if (err) {
-                    clearTimeout(timer);
-                    this.pending.delete(id);
-                    this.notificationHandlers.delete(id);
-                    reject(err);
+                    const failure = err instanceof Error ? err : new Error(String(err));
+                    this.startupFailure = failure;
+                    this.failAllPending(failure);
+                    this.stopChild();
                 }
             });
         });
@@ -1127,14 +1166,33 @@ export class SidecarClient {
         }
     }
 
-    /** Rendered commit messages, or empty on any failure. */
-    async getCommits(githubBaseUrl: string, owner: string, repo: string, number: number): Promise<string> {
-        return this.contextSummary('prs/getCommits', { githubBaseUrl, owner, repo, number });
+    /** Rendered commit messages and closing references, or empty values on any failure. */
+    async getCommits(
+        githubBaseUrl: string,
+        owner: string,
+        repo: string,
+        number: number,
+    ): Promise<SidecarCommitContext> {
+        try {
+            const value = await this.request('prs/getCommits', { githubBaseUrl, owner, repo, number });
+            return parseCommitContext(value) ?? { summary: '', closingIssueNumbers: [] };
+        } catch {
+            return { summary: '', closingIssueNumbers: [] };
+        }
     }
 
     /** Rendered linked-issue context, or empty on any failure. */
-    async getLinkedIssues(githubBaseUrl: string, owner: string, repo: string, prBody: string): Promise<string> {
-        return this.contextSummary('prs/getLinkedIssues', { githubBaseUrl, owner, repo, prBody });
+    async getLinkedIssues(
+        githubBaseUrl: string,
+        owner: string,
+        repo: string,
+        prBody: string,
+        commitIssueNumbers: readonly number[],
+    ): Promise<string> {
+        return this.contextSummary(
+            'prs/getLinkedIssues',
+            { githubBaseUrl, owner, repo, prBody, commitIssueNumbers },
+        );
     }
 
     /** Rendered language/build profile for a checkout, or empty on any failure. */

@@ -12,7 +12,6 @@ export interface ReviewQualityIssue {
 }
 
 export interface ReviewQualityReport {
-  score: number
   issues: ReviewQualityIssue[]
   suggestions: ReviewQualityAction[]
   orphanComments: LineComment[]
@@ -61,8 +60,7 @@ function parseDiffFileStats(diff: string): DiffFileStat[] {
  * here") was flagged, while a verbose but baseless paragraph passed. `confidence` and `rationale`
  * are the real signals and are now populated on every comment, so the character count is gone.
  */
-function isHighRiskLowEvidence(comment: LineComment, changedFiles: Set<string>): boolean {
-  if (!changedFiles.has(comment.file)) return true
+function isHighRiskLowEvidence(comment: LineComment): boolean {
   const severity = comment.severity ?? 'minor'
   if (severity !== 'blocker' && severity !== 'major') return false
   // A model that rates its own high-severity claim "low" has told us it is unsure.
@@ -71,18 +69,15 @@ function isHighRiskLowEvidence(comment: LineComment, changedFiles: Set<string>):
   return (comment.rationale ?? '').trim().length === 0
 }
 
-function issueWeight(issue: ReviewQualityIssue): number {
-  if (issue.id === 'outdatedAnchors') return issue.count * 12
-  if (issue.id === 'hallucinationRisk') return issue.count * 10
-  return issue.count * 6
-}
-
 export function runReviewQualityCheck(result: ReviewResult, validationDiff: string): ReviewQualityReport {
   const { orphans } = validateComments(validationDiff, result.lineComments)
-  const changedFiles = new Set(parseDiffFileStats(validationDiff).map((f) => f.path))
+  const isOrphan = (comment: LineComment) => orphans.some((orphan) => matchesComment(orphan, comment))
 
-  const riskyComments = result.lineComments.filter((comment) => isHighRiskLowEvidence(comment, changedFiles))
+  const riskyComments = result.lineComments.filter(
+    (comment) => !isOrphan(comment) && isHighRiskLowEvidence(comment),
+  )
   const missingRationaleComments = result.lineComments.filter((comment) => {
+    if (isOrphan(comment) || riskyComments.some((risky) => matchesComment(risky, comment))) return false
     if (comment.type === 'note') return false
     const confidence = comment.confidence ?? 'medium'
     if (confidence === 'low') return false
@@ -96,7 +91,7 @@ export function runReviewQualityCheck(result: ReviewResult, validationDiff: stri
       title: 'Potential hallucination risk',
       severity: 'high',
       count: riskyComments.length,
-      description: 'High-severity comments with weak evidence (low confidence, short body, or file mismatch).',
+      description: 'High-severity comments with weak evidence (low confidence or missing rationale).',
     })
   }
   if (orphans.length > 0) {
@@ -118,15 +113,12 @@ export function runReviewQualityCheck(result: ReviewResult, validationDiff: stri
     })
   }
 
-  const penalty = issues.reduce((acc, issue) => acc + issueWeight(issue), 0)
-  const score = Math.max(0, 100 - penalty)
   const suggestions: ReviewQualityAction[] = []
   if (orphans.length > 0) suggestions.push('removeUnanchored')
   if (missingRationaleComments.length > 0) suggestions.push('dropMissingRationale')
   if (riskyComments.length > 0) suggestions.push('downgradeHighRisk')
 
   return {
-    score,
     issues,
     suggestions,
     orphanComments: orphans,
@@ -249,4 +241,3 @@ export function estimateFileConfidence(comments: LineComment[], files: string[])
 
   return Math.min(1, Math.max(0, score / matched.length))
 }
-

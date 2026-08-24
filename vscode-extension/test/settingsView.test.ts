@@ -131,6 +131,14 @@ test('buildSettingsHtml renders reusable review-guidance profile controls', () =
     assert.doesNotMatch(html, /id="guidanceGlobs"/);
     assert.doesNotMatch(html, /guidance-file selections remain inactive/);
     assert.match(html, /profile \? profile\.guidanceGlobs/);
+    assert.match(html, /id="profileNameDialog".*role="dialog"/);
+    assert.match(html, /id="deleteProfileDialog".*role="alertdialog"/);
+    assert.match(html, /aria-modal="true"/);
+    assert.match(html, /profileNameInput'\)\.focus\(\)/);
+    assert.match(html, /event\.key === 'Escape'/);
+    assert.match(html, /event\.key !== 'Tab'/);
+    assert.match(html, /profileDialogReturnFocus\.focus\(\)/);
+    assert.doesNotMatch(html, /window\.(?:prompt|confirm|alert)\(/);
 });
 
 test('buildSettingsHtml exposes notification health, retry, and dependent controls', () => {

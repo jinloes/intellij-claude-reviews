@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { existsOnPath } from '../src/claude';
+import { classifyClaudeAuthProbe, probeClaudeAuthentication } from '../src/providerSetup';
 import { providerNotInstalledMessage } from '../src/userFacingError';
 
 test('providerNotInstalledMessage names the Copilot CLI and binary', () => {
@@ -45,4 +46,25 @@ test('existsOnPath returns false when PATH is empty', () => {
   }
 });
 
+test('Claude auth probe only marks a conclusive signed-out response unavailable', () => {
+  const responseError = Object.assign(new Error('command failed'), { code: 1 });
+  assert.equal(classifyClaudeAuthProbe(responseError, '', 'Not logged in. Run claude auth login.'), 'unavailable');
+  assert.equal(classifyClaudeAuthProbe(responseError, '', "error: unknown command 'auth'"), 'unverified');
+  assert.equal(classifyClaudeAuthProbe(null, '', "error: unknown command 'auth'"), 'unverified');
+  assert.equal(classifyClaudeAuthProbe(responseError, '', ''), 'unverified');
+  assert.equal(classifyClaudeAuthProbe(null, 'authenticated', ''), 'ready');
+});
 
+test('Claude auth probe execution and timeout failures remain unverified', async () => {
+  assert.equal(await probeClaudeAuthentication(() => {
+    throw new Error('spawn failed');
+  }), 'unverified');
+  assert.equal(await probeClaudeAuthentication((complete) => {
+    const timeout = Object.assign(new Error('timed out'), { killed: true });
+    complete(timeout, '', 'Not logged in.');
+  }), 'unverified');
+  assert.equal(await probeClaudeAuthentication((complete) => {
+    const executionError = Object.assign(new Error('spawn failed'), { code: 'ENOENT' });
+    complete(executionError, '', 'Not logged in.');
+  }), 'unverified');
+});

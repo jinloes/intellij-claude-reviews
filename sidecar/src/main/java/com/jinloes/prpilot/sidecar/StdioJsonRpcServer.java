@@ -762,12 +762,18 @@ final class StdioJsonRpcServer {
         JsonNode params = request.get("params");
         if (params == null
                 || !params.isObject()
-                || !hasOnlyFields(params, Set.of("githubBaseUrl", "owner", "repo", "prBody"))
-                || !hasOnlyTextValues(params)
+                || !hasOnlyFields(
+                        params,
+                        Set.of("githubBaseUrl", "owner", "repo", "prBody", "commitIssueNumbers"))
                 || !params.path("githubBaseUrl").isTextual()
                 || !params.path("owner").isTextual()
                 || !params.path("repo").isTextual()
                 || !params.path("prBody").isTextual()) {
+            return error(requestId(request), -32602, "Invalid params");
+        }
+        List<Integer> commitIssueNumbers =
+                parseCommitIssueNumbers(params.path("commitIssueNumbers"));
+        if (commitIssueNumbers == null) {
             return error(requestId(request), -32602, "Invalid params");
         }
         return result(
@@ -777,7 +783,8 @@ final class StdioJsonRpcServer {
                                 params.path("githubBaseUrl").textValue(),
                                 params.path("owner").textValue(),
                                 params.path("repo").textValue(),
-                                params.path("prBody").textValue())));
+                                params.path("prBody").textValue(),
+                                commitIssueNumbers)));
     }
 
     private ObjectNode getRepoProfile(JsonNode request) {
@@ -1004,6 +1011,24 @@ final class StdioJsonRpcServer {
 
     private boolean hasOnlyTextValues(JsonNode object) {
         return object.properties().stream().allMatch(entry -> entry.getValue().isTextual());
+    }
+
+    private List<Integer> parseCommitIssueNumbers(JsonNode array) {
+        if (!array.isArray() || array.size() > LinkedIssueService.MAX_ISSUES) return null;
+        List<Integer> issueNumbers = new ArrayList<>();
+        for (JsonNode number : array) {
+            if (!number.isIntegralNumber() || !number.canConvertToInt()) {
+                return null;
+            }
+            int value = number.intValue();
+            if (value <= 0
+                    || value > LinkedIssueService.MAX_ISSUE_NUMBER
+                    || issueNumbers.contains(value)) {
+                return null;
+            }
+            issueNumbers.add(value);
+        }
+        return List.copyOf(issueNumbers);
     }
 
     private String optionalText(JsonNode object, String field) {

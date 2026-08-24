@@ -166,6 +166,56 @@ class StdioJsonRpcServerTest {
     }
 
     @Test
+    void acceptsBoundedCommitIssueNumbersForLinkedIssueResolution() {
+        JsonNode response =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":16,\"method\":\"prs/getLinkedIssues\","
+                                        + "\"params\":{\"githubBaseUrl\":\"http://github.com\","
+                                        + "\"owner\":\"acme\",\"repo\":\"widgets\",\"prBody\":\"\","
+                                        + "\"commitIssueNumbers\":[7]}}")
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(response.path("error").isMissingNode()).isTrue();
+        assertThat(response.path("result").path("status").asText()).isEqualTo("invalid_base_url");
+    }
+
+    @Test
+    void rejectsMalformedCommitIssueNumberArrays() {
+        for (String commitIssueNumbers :
+                java.util.List.of(
+                        "null",
+                        "\"7\"",
+                        "[1,\"2\"]",
+                        "[0]",
+                        "[7,7]",
+                        "[1,2,3,4]",
+                        "[1000000000]",
+                        "[2147483648]")) {
+            JsonNode response =
+                    server.handle(
+                            ("{\"jsonrpc\":\"2.0\",\"id\":17,\"method\":\"prs/getLinkedIssues\","
+                                            + "\"params\":{\"githubBaseUrl\":\"https://github.com\","
+                                            + "\"owner\":\"acme\",\"repo\":\"widgets\",\"prBody\":\"\","
+                                            + "\"commitIssueNumbers\":"
+                                            + commitIssueNumbers
+                                            + "}}")
+                                    .getBytes(StandardCharsets.UTF_8));
+
+            assertThat(response.path("error").path("code").asInt())
+                    .as(commitIssueNumbers)
+                    .isEqualTo(-32602);
+        }
+
+        JsonNode missing =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"id\":18,\"method\":\"prs/getLinkedIssues\","
+                                        + "\"params\":{\"githubBaseUrl\":\"https://github.com\","
+                                        + "\"owner\":\"acme\",\"repo\":\"widgets\",\"prBody\":\"\"}}")
+                                .getBytes(StandardCharsets.UTF_8));
+        assertThat(missing.path("error").path("code").asInt()).isEqualTo(-32602);
+    }
+
+    @Test
     void returnsAStructuredResultForAnInvalidPrListBaseUrl() {
         JsonNode response =
                 server.handle(

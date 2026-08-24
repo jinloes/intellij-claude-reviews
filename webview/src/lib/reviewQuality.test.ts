@@ -177,9 +177,20 @@ void test('a low-severity finding without rationale is not flagged', () => {
   assert.equal(report.riskyComments.length, 0)
 })
 
-void test('a finding on a file absent from the diff is always flagged', () => {
+void test('a finding on a file absent from the diff appears in exactly one risk category', () => {
   const report = runReviewQualityCheck(withComment({ file: 'src/never-touched.ts' }), diff)
 
-  assert.equal(report.riskyComments.length, 1)
+  assert.equal(report.riskyComments.length, 0)
+  assert.equal(report.orphanComments.length, 1)
+  assert.equal(report.issues.reduce((count, issue) => count + issue.count, 0), 1)
+  assert.deepEqual(report.issues.map((issue) => issue.id), ['outdatedAnchors'])
 })
 
+void test('a high-severity comment with missing rationale appears in exactly one risk category', () => {
+  const report = runReviewQualityCheck(withComment({ rationale: undefined }), diff)
+
+  assert.equal(report.riskyComments.length, 1)
+  assert.equal(report.missingRationaleComments.length, 0)
+  assert.equal(report.issues.reduce((count, issue) => count + issue.count, 0), 1)
+  assert.deepEqual(report.issues.map((issue) => issue.id), ['hallucinationRisk'])
+})

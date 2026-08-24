@@ -30,7 +30,9 @@ import com.jinloes.prpilot.model.ReviewResult;
 import com.jinloes.prpilot.review.ClaudeService;
 import com.jinloes.prpilot.review.CopilotService;
 import com.jinloes.prpilot.review.GitWorktreeService;
+import com.jinloes.prpilot.review.ProviderSetupProbe;
 import com.jinloes.prpilot.review.ReviewOutcomeLog;
+import com.jinloes.prpilot.services.DraftRecoveryStore;
 import com.jinloes.prpilot.services.IntellijClaudeService;
 import com.jinloes.prpilot.services.IntellijGitHubService;
 import com.jinloes.prpilot.services.PendingReviewIndex;
@@ -111,7 +113,8 @@ public class WebviewPanel implements Disposable {
             String type,
             List<WebviewPr> prs,
             @JsonProperty("defaultRepo") String defaultRepo,
-            @JsonProperty("listStatus") PrListStatus listStatus) {}
+            @JsonProperty("listStatus") PrListStatus listStatus,
+            @JsonProperty("providerReadiness") ProviderReadinessDto providerReadiness) {}
 
     private record DraftLoadingMsg(String type, @JsonProperty("prKey") String prKey) {}
 
@@ -128,6 +131,7 @@ public class WebviewPanel implements Disposable {
             @JsonProperty("validationDiff") String validationDiff,
             boolean staleCommits,
             boolean importedFromGitHub,
+            boolean recoveryPending,
             String status,
             @JsonProperty("providerReadiness") ProviderReadinessDto providerReadiness) {}
 
@@ -170,11 +174,31 @@ public class WebviewPanel implements Disposable {
             String repo,
             @JsonProperty("hasReviewDraft") boolean hasReviewDraft) {}
 
-    record ProviderReadinessDto(String provider, boolean available, String detail) {}
+    record ProviderReadinessDto(
+            String provider,
+            boolean available,
+            String detail,
+            @JsonProperty("binaryStatus") String binaryStatus,
+            @JsonProperty("authenticationStatus") String authenticationStatus,
+            @JsonProperty("authCommand") String authCommand) {
+        ProviderReadinessDto(String provider, boolean available, String detail) {
+            this(
+                    provider,
+                    available,
+                    detail,
+                    available ? "ready" : "missing",
+                    available ? "unverified" : "unavailable",
+                    "copilot".equals(provider) ? "copilot login" : "claude auth login");
+        }
+    }
 
     private record ActivatePrMsg(String type, @JsonProperty("pr") WebviewPr pr, String source) {}
 
-    private record SetupRequiredMsg(String type, String reason, String detail) {}
+    private record SetupRequiredMsg(
+            String type,
+            String reason,
+            String detail,
+            @JsonProperty("providerReadiness") ProviderReadinessDto providerReadiness) {}
 
     private record ReviewGenerationSettings(
             IntellijClaudeService.ReviewRuntimeSettings runtime,
@@ -294,6 +318,7 @@ public class WebviewPanel implements Disposable {
     private final IntellijClaudeService claudeService;
     private final GitWorktreeService worktreeService = new GitWorktreeService();
     private final IntellijGitHubService ghSvc = IntellijGitHubService.getInstance();
+    private final DraftRecoveryStore draftRecoveryStore = DraftRecoveryStore.getInstance();
     private final Project project;
 
     /**
@@ -581,6 +606,7 @@ public class WebviewPanel implements Disposable {
                                 owner,
                                 repo,
                                 node.path("diff").asText(""),
+                                node.path("chunkedReview").asBoolean(false),
                                 node.path("focusAreas").asText(""),
                                 node.path("customInstructions").asText(""),
                                 node.path("operationId").asText());
@@ -694,6 +720,7 @@ public class WebviewPanel implements Disposable {
                             null,
                             null,
                             null,
+                            false,
                             false,
                             false,
                             "Pull request is no longer available. Refresh the pull request list and try again.",
@@ -854,6 +881,7 @@ public class WebviewPanel implements Disposable {
                             }
 
                             if (merged) {
+                                draftRecoveryStore.clear(key);
                                 publishIfCurrentSelection(
                                         key,
                                         revision,
@@ -876,23 +904,30 @@ public class WebviewPanel implements Disposable {
                                                 effectiveValidationDiff,
                                                 false,
                                                 false,
+                                                false,
                                                 "PR is merged.",
                                                 providerReadiness));
                                 return;
                             }
 
-                            if (pending != null) {
+                            DraftRecoveryStore.Snapshot recovery = draftRecoveryStore.get(key);
+                            if (pending != null || recovery != null) {
                                 boolean stale =
-                                        StringUtils.isNotBlank(savedHeadSha)
+                                        pending != null
+                                                && StringUtils.isNotBlank(savedHeadSha)
                                                 && !savedHeadSha.equals(currentHeadSha);
-                                ReviewResultDto dto = ReviewMapper.INSTANCE.toDto(pending.result());
+                                ReviewResult restored =
+                                        recovery != null ? recovery.result() : pending.result();
+                                String reviewId = pending != null ? pending.id() : null;
+                                ReviewResultDto dto = ReviewMapper.INSTANCE.toDto(restored);
                                 synchronized (WebviewPanel.this) {
                                     if (!isCurrentSelectionLocked(key, revision)) {
                                         return;
                                     }
-                                    pendingReviewId = pending.id();
-                                    pendingReviewKey = key;
-                                    lastResult = pending.result();
+                                    pendingReviewId = reviewId;
+                                    pendingReviewKey =
+                                            StringUtils.isNotBlank(reviewId) ? key : null;
+                                    lastResult = restored;
                                 }
                                 publishIfCurrentSelection(
                                         key,
@@ -906,13 +941,16 @@ public class WebviewPanel implements Disposable {
                                                 "draftLoaded",
                                                 key,
                                                 "DRAFT_PRESENT",
-                                                pending.id(),
+                                                reviewId,
                                                 dto,
                                                 fetchedDiff,
                                                 effectiveValidationDiff,
                                                 stale,
-                                                pending.importedFromGitHub(),
-                                                "Loaded pending draft review.",
+                                                pending != null && pending.importedFromGitHub(),
+                                                recovery != null,
+                                                recovery != null
+                                                        ? "Recovered a local draft snapshot; save is pending."
+                                                        : "Loaded pending draft review.",
                                                 providerReadiness));
                                 return;
                             }
@@ -933,6 +971,7 @@ public class WebviewPanel implements Disposable {
                                             null,
                                             fetchedDiff,
                                             effectiveValidationDiff,
+                                            false,
                                             false,
                                             false,
                                             "",
@@ -1008,6 +1047,7 @@ public class WebviewPanel implements Disposable {
             String owner,
             String repo,
             String overrideDiff,
+            boolean chunkedReview,
             String overrideFocusAreas,
             String overrideCustomInstructions,
             String operationId) {
@@ -1165,17 +1205,21 @@ public class WebviewPanel implements Disposable {
                             } catch (Exception e) {
                                 log.warn("getCheckContext failed: {}", e.getMessage());
                             }
-                            String commits = "";
+                            IntellijGitHubService.CommitContext commitContext =
+                                    new IntellijGitHubService.CommitContext("", List.of());
                             try {
-                                commits = ghSvc.getCommitsSummary(owner, repo, number);
+                                commitContext = ghSvc.getCommitContext(owner, repo, number);
                             } catch (Exception e) {
-                                log.warn("getCommitsSummary failed: {}", e.getMessage());
+                                log.warn("getCommitContext failed: {}", e.getMessage());
                             }
                             String linkedIssue = "";
                             try {
                                 linkedIssue =
                                         ghSvc.getLinkedIssueSummary(
-                                                owner, repo, promptPr.getBody());
+                                                owner,
+                                                repo,
+                                                promptPr.getBody(),
+                                                commitContext.closingIssueNumbers());
                             } catch (Exception e) {
                                 log.warn("getLinkedIssueSummary failed: {}", e.getMessage());
                             }
@@ -1258,7 +1302,7 @@ public class WebviewPanel implements Disposable {
                                             : generationSettings.customInstructions();
                             final String finalCiStatus = ciStatus;
                             final List<CiAnnotation> finalCiAnnotations = ciAnnotations;
-                            final String finalCommits = commits;
+                            final String finalCommits = commitContext.summary();
                             final String finalLinkedIssue = linkedIssue;
                             final String finalRepoProfile =
                                     guidelinesDir == null
@@ -1279,6 +1323,7 @@ public class WebviewPanel implements Disposable {
                                             .ciAnnotations(finalCiAnnotations)
                                             .build(),
                                     generationSettings.runtime(),
+                                    chunkedReview,
                                     statusMsg ->
                                             publishIfCurrentGeneration(
                                                     key,
@@ -1387,8 +1432,38 @@ public class WebviewPanel implements Disposable {
                 provider == ReviewProvider.COPILOT ? "copilot" : "claude",
                 available,
                 available
-                        ? "Ready to generate reviews with the configured CLI."
-                        : UserFacingErrors.forProviderNotInstalled(provider));
+                        ? "Provider CLI found. Authentication cannot be verified without starting a provider session."
+                        : UserFacingErrors.forProviderNotInstalled(provider),
+                available ? "ready" : "missing",
+                available ? "unverified" : "unavailable",
+                provider == ReviewProvider.COPILOT ? "copilot login" : "claude auth login");
+    }
+
+    private static ProviderReadinessDto providerReadiness(ProviderSetupProbe.Result setup) {
+        ReviewProvider provider = PluginSettings.getInstance().getReviewProvider();
+        String detail;
+        if (!setup.available()) {
+            detail = UserFacingErrors.forProviderNotInstalled(provider);
+        } else if ("ready".equals(setup.authenticationStatus())) {
+            detail = "Provider CLI and authentication are ready.";
+        } else if ("unavailable".equals(setup.authenticationStatus())) {
+            detail =
+                    "Provider authentication is unavailable. Run '"
+                            + setup.authCommand()
+                            + "' and check again.";
+        } else {
+            detail =
+                    "Provider CLI found. Authentication cannot be verified non-interactively; run '"
+                            + setup.authCommand()
+                            + "' if sign-in is required.";
+        }
+        return new ProviderReadinessDto(
+                provider == ReviewProvider.COPILOT ? "copilot" : "claude",
+                setup.available(),
+                detail,
+                setup.binaryStatus(),
+                setup.authenticationStatus(),
+                setup.authCommand());
     }
 
     // --- saveDraft ---
@@ -1423,7 +1498,9 @@ public class WebviewPanel implements Disposable {
 
         IntellijGitHubService.SaveDraftResult saved;
         try {
+            draftRecoveryStore.save(key, result, orphans);
             saved = ghSvc.saveDraftReview(owner, repo, number, result, orphans);
+            draftRecoveryStore.clear(key);
         } catch (Exception e) {
             pushMessage(
                     new DraftSaveErrorMsg(
@@ -1497,6 +1574,7 @@ public class WebviewPanel implements Disposable {
 
         try {
             ghSvc.submitDraftReview(owner, repo, number, reviewId, verdict, comment);
+            draftRecoveryStore.clear(key);
         } catch (Exception e) {
             pushMessage(
                     new ErrorMsg(
@@ -1571,6 +1649,7 @@ public class WebviewPanel implements Disposable {
 
         try {
             ghSvc.deleteDraftReview(owner, repo, number, reviewId);
+            draftRecoveryStore.clear(key);
         } catch (Exception e) {
             pushMessage(
                     new ErrorMsg(
@@ -2130,8 +2209,20 @@ public class WebviewPanel implements Disposable {
             String defaultRepo,
             String searchScope,
             String currentRepo,
-            boolean limited) {
+            boolean limited,
+            ProviderSetupProbe.Result providerSetup) {
         cachedPRs = prs;
+        ProviderReadinessDto providerReadiness = providerReadiness(providerSetup);
+        if (!providerReadiness.available()) {
+            pushSetupRequired(
+                    "provider_not_installed", providerReadiness.detail(), providerReadiness);
+            return;
+        }
+        if ("unavailable".equals(providerReadiness.authenticationStatus())) {
+            pushSetupRequired(
+                    "provider_not_authenticated", providerReadiness.detail(), providerReadiness);
+            return;
+        }
         Optional<List<PendingReviewIndex.Entry>> pendingEntries = loadHealthyDraftEntries();
         if (pendingEntries.isEmpty()) {
             pushSetupRequired(
@@ -2160,7 +2251,8 @@ public class WebviewPanel implements Disposable {
                         "prListLoaded",
                         dtos,
                         defaultRepo,
-                        new PrListStatus(searchScope, currentRepo, PR_SEARCH_LIMIT, limited)));
+                        new PrListStatus(searchScope, currentRepo, PR_SEARCH_LIMIT, limited),
+                        providerReadiness));
     }
 
     public void setOnPRSelected(Consumer<PullRequest> callback) {
@@ -2173,7 +2265,12 @@ public class WebviewPanel implements Disposable {
 
     /** Pushes a setup-required screen into the webview. Call from the EDT. */
     public void pushSetupRequired(String reason, String detail) {
-        pushMessage(new SetupRequiredMsg("setupRequired", reason, detail));
+        pushSetupRequired(reason, detail, currentProviderReadiness());
+    }
+
+    private void pushSetupRequired(
+            String reason, String detail, ProviderReadinessDto providerReadiness) {
+        pushMessage(new SetupRequiredMsg("setupRequired", reason, detail, providerReadiness));
     }
 
     public void activatePr(PullRequest pr, String source) {

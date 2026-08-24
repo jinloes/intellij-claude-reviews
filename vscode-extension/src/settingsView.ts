@@ -165,6 +165,19 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
   }
   button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
   .hidden { display: none; }
+  .modal[hidden] { display: none; }
+  .modal {
+    position: fixed; inset: 0; z-index: 10; display: grid; place-items: center;
+    padding: 20px; background: rgba(0, 0, 0, .45);
+  }
+  .modal-content {
+    width: min(420px, 100%); box-sizing: border-box; padding: 18px;
+    color: var(--vscode-foreground); background: var(--vscode-editor-background);
+    border: 1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent));
+    border-radius: 4px; box-shadow: 0 8px 24px rgba(0, 0, 0, .3);
+  }
+  .modal-content h2 { margin: 0 0 10px; font-size: 15px; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
   details.advanced {
     margin: 0 0 8px;
     border: 1px solid var(--vscode-panel-border, var(--vscode-input-border, transparent));
@@ -186,6 +199,29 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
   <h1>PR Pilot Settings</h1>
   <p class="sub">Changes are saved immediately to your User settings. Configure review provider, model, MCP access, and notifications from one page.</p>
   <div id="status" class="status" role="status" aria-live="polite"></div>
+
+  <div id="profileNameDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="profileNameDialogTitle" hidden>
+    <div class="modal-content">
+      <h2 id="profileNameDialogTitle">Save guidance profile</h2>
+      <label for="profileNameInput">Profile name</label>
+      <input type="text" id="profileNameInput" autocomplete="off">
+      <div class="modal-actions">
+        <button id="cancelProfileName" class="secondary" type="button">Cancel</button>
+        <button id="confirmProfileName" type="button">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="deleteProfileDialog" class="modal" role="alertdialog" aria-modal="true" aria-labelledby="deleteProfileDialogTitle" aria-describedby="deleteProfileDialogDescription" hidden>
+    <div class="modal-content">
+      <h2 id="deleteProfileDialogTitle">Delete guidance profile?</h2>
+      <p id="deleteProfileDialogDescription"></p>
+      <div class="modal-actions">
+        <button id="cancelDeleteProfile" class="secondary" type="button">Cancel</button>
+        <button id="confirmDeleteProfile" type="button">Delete</button>
+      </div>
+    </div>
+  </div>
 
   <div class="section">
     <div class="section-title">Review backend</div>
@@ -308,6 +344,9 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
   let activeGuidanceProfileId = '';
   let nextSaveRequestId = 0;
   let latestSaveRequestId = 0;
+  let profileDialogMode = 'add';
+  let profileDialogTargetId = '';
+  let profileDialogReturnFocus = null;
 
   function setStatus(message, kind = '') {
     const el = $('status');
@@ -451,6 +490,51 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
     save(defaultKey, state[defaultKey]);
   }
 
+  function closeProfileDialog(id) {
+    $(id).hidden = true;
+    if (profileDialogReturnFocus) profileDialogReturnFocus.focus();
+    profileDialogReturnFocus = null;
+  }
+
+  function keepFocusInDialog(dialog, event) {
+    if (event.key !== 'Tab') return;
+    const focusable = [...dialog.querySelectorAll('button:not([disabled]), input:not([disabled])')];
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  function openProfileNameDialog(mode) {
+    const profile = activeGuidanceProfile();
+    if (mode === 'rename' && !profile) return;
+    profileDialogMode = mode;
+    profileDialogTargetId = profile ? profile.id : '';
+    profileDialogReturnFocus = document.activeElement;
+    $('profileNameDialogTitle').textContent = mode === 'rename' ? 'Rename guidance profile' : 'Save guidance profile';
+    $('confirmProfileName').textContent = mode === 'rename' ? 'Rename' : 'Save';
+    $('profileNameInput').value = profile ? profile.name : '';
+    $('profileNameDialog').hidden = false;
+    $('profileNameInput').focus();
+    $('profileNameInput').select();
+  }
+
+  function openDeleteProfileDialog() {
+    const profile = activeGuidanceProfile();
+    if (!profile) return;
+    profileDialogTargetId = profile.id;
+    profileDialogReturnFocus = document.activeElement;
+    $('deleteProfileDialogDescription').textContent = 'Delete guidance profile "' + profile.name + '"?';
+    $('deleteProfileDialog').hidden = false;
+    $('cancelDeleteProfile').focus();
+  }
+
   $('provider').addEventListener('change', () => {
     const p = $('provider').value;
     applyProviderVisibility(p);
@@ -470,35 +554,51 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
     loadGuidanceFields();
   });
   $('addGuidanceProfile').addEventListener('click', () => {
-    const entered = window.prompt('Profile name:');
-    const name = entered ? entered.trim() : '';
-    if (!name) return;
-    const values = guidanceValues();
-    const id = 'profile-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
-    guidanceProfiles.push({ id, name, ...values });
-    activeGuidanceProfileId = id;
-    saveGuidanceState();
-    renderGuidanceProfileOptions();
+    openProfileNameDialog('add');
   });
   $('renameGuidanceProfile').addEventListener('click', () => {
-    const profile = activeGuidanceProfile();
-    if (!profile) return;
-    const entered = window.prompt('Profile name:', profile.name);
-    const name = entered ? entered.trim() : '';
+    openProfileNameDialog('rename');
+  });
+  $('cancelProfileName').addEventListener('click', () => closeProfileDialog('profileNameDialog'));
+  $('confirmProfileName').addEventListener('click', () => {
+    const name = $('profileNameInput').value.trim();
     if (!name) return;
-    profile.name = name;
+    if (profileDialogMode === 'rename') {
+      const profile = guidanceProfiles.find((candidate) => candidate.id === profileDialogTargetId);
+      if (!profile) return;
+      profile.name = name;
+    } else {
+      const values = guidanceValues();
+      const id = 'profile-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+      guidanceProfiles.push({ id, name, ...values });
+      activeGuidanceProfileId = id;
+    }
     saveGuidanceState();
     renderGuidanceProfileOptions();
+    closeProfileDialog('profileNameDialog');
+  });
+  $('profileNameInput').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') $('confirmProfileName').click();
+    if (event.key === 'Escape') closeProfileDialog('profileNameDialog');
   });
   $('deleteGuidanceProfile').addEventListener('click', () => {
-    const profile = activeGuidanceProfile();
-    if (!profile || !window.confirm('Delete guidance profile "' + profile.name + '"?')) return;
-    guidanceProfiles = guidanceProfiles.filter((candidate) => candidate.id !== profile.id);
+    openDeleteProfileDialog();
+  });
+  $('cancelDeleteProfile').addEventListener('click', () => closeProfileDialog('deleteProfileDialog'));
+  $('confirmDeleteProfile').addEventListener('click', () => {
+    guidanceProfiles = guidanceProfiles.filter((candidate) => candidate.id !== profileDialogTargetId);
     activeGuidanceProfileId = '';
     saveGuidanceState();
     renderGuidanceProfileOptions();
     loadGuidanceFields();
+    closeProfileDialog('deleteProfileDialog');
   });
+  for (const id of ['profileNameDialog', 'deleteProfileDialog']) {
+    $(id).addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') closeProfileDialog(id);
+      keepFocusInDialog($(id), event);
+    });
+  }
   $('focusAreas').addEventListener('change', () => saveGuidanceField('reviewFocusAreas'));
   $('customInstructions').addEventListener('change', () => saveGuidanceField('reviewCustomInstructions'));
   $('reviewSelfCritique').addEventListener('change', () => save('reviewSelfCritique', $('reviewSelfCritique').checked));

@@ -27,11 +27,46 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "20.17.0"
           cache: npm
           cache-dependency-path: |
             webview/package-lock.json
             vscode-extension/package-lock.json
+
+      - name: Derive installable versions from tag
+        id: version
+        run: node scripts/release-version.mjs "$GITHUB_REF_NAME" vscode-extension/package.json "$GITHUB_OUTPUT" "$GITHUB_ENV"
+
+      - name: Verify Gradle formatting and tests
+        run: ./gradlew spotlessCheck check :core:test :intellij-plugin:unitTest
+
+      - name: Install webview dependencies
+        working-directory: webview
+        run: npm ci
+
+      - name: Verify webview
+        working-directory: webview
+        run: npm run lint && npx tsc --noEmit && npm run test:unit
+
+      - name: Install Playwright Chromium
+        working-directory: webview
+        run: npx playwright install --with-deps chromium
+
+      - name: Verify webview accessibility
+        working-directory: webview
+        run: npm run test:a11y
+
+      - name: Build webview
+        working-directory: webview
+        run: npm run build
+
+      - name: Install VS Code extension dependencies
+        working-directory: vscode-extension
+        run: npm ci
+
+      - name: Verify VS Code extension
+        working-directory: vscode-extension
+        run: npm run lint && npx tsc --noEmit && npm run test:unit
 
       - name: Build IntelliJ plugin
         run: ./gradlew :intellij-plugin:buildPlugin
@@ -39,9 +74,9 @@ jobs:
       - name: Build sidecar jar
         run: ./gradlew :sidecar:bootJar
 
-      - name: Install VS Code extension dependencies
+      - name: Smoke test Java sidecar protocol
         working-directory: vscode-extension
-        run: npm ci
+        run: npm run stage:sidecar && npm run test:sidecar
 
       - name: Compile VS Code extension
         working-directory: vscode-extension
@@ -54,6 +89,17 @@ jobs:
       - name: Package VS Code extension
         working-directory: vscode-extension
         run: npm run stage:webview && npm run stage:sidecar && npx --yes @vscode/vsce package --out pr-pilot-${{ github.ref_name }}.vsix
+
+      - name: Verify packaged artifacts
+        run: |
+          test -n "$(find intellij-plugin/build/distributions -maxdepth 1 -type f -name '*.zip' -print -quit)"
+          unzip -l "vscode-extension/pr-pilot-${GITHUB_REF_NAME}.vsix" | grep -q 'extension/sidecar/pr-pilot-sidecar.jar'
+          unzip -l "vscode-extension/pr-pilot-${GITHUB_REF_NAME}.vsix" | grep -q 'extension/webview-dist/index.html'
+          unzip -p "vscode-extension/pr-pilot-${GITHUB_REF_NAME}.vsix" extension/package.json | node -e "let s='';process.stdin.on('data',c=>s+=c).on('end',()=>{if(JSON.parse(s).version!==process.argv[1])process.exit(1)})" "${{ steps.version.outputs.version }}"
+          rm -rf /tmp/pr-pilot-plugin-check
+          mkdir -p /tmp/pr-pilot-plugin-check
+          unzip -q "intellij-plugin/build/distributions/intellij-plugin-${{ steps.version.outputs.version }}.zip" -d /tmp/pr-pilot-plugin-check
+          unzip -p "/tmp/pr-pilot-plugin-check/intellij-plugin/lib/intellij-plugin-${{ steps.version.outputs.version }}.jar" META-INF/plugin.xml | grep -q "<version>${{ steps.version.outputs.version }}</version>"
 
       - name: Mark release channel from tag
         id: channel
@@ -74,7 +120,4 @@ jobs:
           files: |
             intellij-plugin/build/distributions/*
             vscode-extension/*.vsix
-
-
-
 

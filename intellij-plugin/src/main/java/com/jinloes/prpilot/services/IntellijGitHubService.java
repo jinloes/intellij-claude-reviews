@@ -243,19 +243,28 @@ public final class IntellijGitHubService {
     /** Rendered CI state and the structured findings behind it. */
     public record CheckContext(String summary, List<CiAnnotation> annotations) {}
 
-    /** Rendered commit messages for a PR, or empty when they could not be read. */
-    public String getCommitsSummary(String owner, String repo, int number) {
+    /** Rendered commit messages and validated closing references, or empty on failure. */
+    public CommitContext getCommitContext(String owner, String repo, int number) {
         PrCommitsResult result =
                 engine.getCommits(
                         new PrSupplementalService.IdentityParams(baseUrl(), owner, repo, number));
-        return result.summary();
+        return new CommitContext(result.summary(), result.closingIssueNumbers());
+    }
+
+    /** Prompt-ready commit context returned by the shared engine. */
+    public record CommitContext(String summary, List<Integer> closingIssueNumbers) {
+        public CommitContext {
+            closingIssueNumbers = List.copyOf(closingIssueNumbers);
+        }
     }
 
     /** Rendered issues the PR declares it closes, or empty when there are none. */
-    public String getLinkedIssueSummary(String owner, String repo, String prBody) {
+    public String getLinkedIssueSummary(
+            String owner, String repo, String prBody, List<Integer> commitIssueNumbers) {
         LinkedIssueResult result =
                 engine.getLinkedIssues(
-                        new LinkedIssueService.Params(baseUrl(), owner, repo, prBody));
+                        new LinkedIssueService.Params(
+                                baseUrl(), owner, repo, prBody, commitIssueNumbers));
         return result.summary();
     }
 

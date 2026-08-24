@@ -7,6 +7,16 @@ import { BRIDGE_PROTOCOL_VERSION } from './bridge/validation'
 import { AccessibleResizer } from './components/layout/AccessibleResizer'
 import { applyHostTheme } from './theme/hostTheme'
 import { Button } from './components/ui/button'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from './components/ui/alert-dialog'
 import { useI18n } from './i18n/I18nProvider'
 import { clampLeftWidth, maxLeftWidth, MIN_LEFT_PANE_WIDTH } from './lib/layout'
 
@@ -93,10 +103,16 @@ export default function App() {
   const [selectedPR, setSelectedPR] = useState<PR | null>(null)
   const [hasUnsavedReview, setHasUnsavedReview] = useState(false)
   const [leftWidth, setLeftWidth] = useState(loadSavedWidth)
-  const [setup, setSetup] = useState<{ reason: SetupReason; detail: string } | null>(null)
+  const [setup, setSetup] = useState<{
+    reason: SetupReason
+    detail: string
+    providerReadiness?: import('./bridge/types').ProviderReadiness
+  } | null>(null)
   const [setupRefreshing, setSetupRefreshing] = useState(false)
   const [narrow, setNarrow] = useState(() => window.innerWidth < 640)
   const [activePane, setActivePane] = useState<'list' | 'review'>('list')
+  const [pendingPrSelection, setPendingPrSelection] = useState<PR | null>(null)
+  const [selectionBlockedMessage, setSelectionBlockedMessage] = useState('')
   const dragging = useRef(false)
   const dragStartX = useRef(0)
   const dragStartW = useRef(0)
@@ -126,16 +142,26 @@ export default function App() {
       && currentPr.owner === nextPr.owner
       && currentPr.repo === nextPr.repo
     if (samePr || !unsavedReviewRef.current) return true
-    const confirmed = window.confirm(
-      'You have unsaved review changes for the currently selected PR. Switch anyway and discard those unsaved edits?',
-    )
-    if (!confirmed) return false
+    setSelectionBlockedMessage('')
+    setPendingPrSelection(nextPr)
+    return false
+  }, [])
+
+  const confirmPrSelection = useCallback((): boolean => {
+    if (!pendingPrSelection) return false
     if (reviewPaneRef.current?.discardPendingChanges() === false) {
-      window.alert('A draft save is already in progress. Wait for it to finish, then switch pull requests.')
+      setSelectionBlockedMessage('A draft save is already in progress. Wait for it to finish, then switch pull requests.')
       return false
     }
+    const nextPr = pendingPrSelection
+    setPendingPrSelection(null)
+    setSelectionBlockedMessage('')
+    selectedPrRef.current = nextPr
+    setSelectedPR(nextPr)
+    if (window.innerWidth < 640) setActivePane('review')
+    sendToHost({ type: 'selectPR', number: nextPr.number, owner: nextPr.owner, repo: nextPr.repo })
     return true
-  }, [])
+  }, [pendingPrSelection])
 
   useEffect(() => {
     const id = setTimeout(seedDevData, 100)
@@ -157,7 +183,7 @@ export default function App() {
 
   useEffect(() => onHostMessage((msg) => {
     if (msg.type === 'setupRequired') {
-      setSetup({ reason: msg.reason, detail: msg.detail })
+      setSetup({ reason: msg.reason, detail: msg.detail, providerReadiness: msg.providerReadiness })
       setSetupRefreshing(false)
     } else if (msg.type === 'prLoading') {
       setSetupRefreshing(true)
@@ -219,11 +245,45 @@ export default function App() {
   return (
     <>
     <Toaster theme="system" position="bottom-right" richColors />
+    <AlertDialog
+      open={pendingPrSelection !== null}
+      onOpenChange={(open) => {
+        if (!open) {
+          setPendingPrSelection(null)
+          setSelectionBlockedMessage('')
+        }
+      }}
+    >
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Discard unsaved review changes?</AlertDialogTitle>
+          <AlertDialogDescription>
+            You have unsaved review changes for the currently selected PR. Switching pull requests will discard them.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        {selectionBlockedMessage && (
+          <p role="alert" className="text-sm text-status-issue">{selectionBlockedMessage}</p>
+        )}
+        <AlertDialogFooter>
+          <AlertDialogCancel>Keep reviewing</AlertDialogCancel>
+          <AlertDialogAction
+            onClick={(event) => {
+              if (!confirmPrSelection()) {
+                event.preventDefault()
+              }
+            }}
+          >
+            Discard and switch
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
     {setup ? (
       <main className="fixed inset-0 min-h-0 overflow-clip bg-background" aria-label="PR Pilot setup">
         <SetupScreen
           reason={setup.reason}
           detail={setup.detail}
+          providerReadiness={setup.providerReadiness}
           refreshing={setupRefreshing}
           onRefresh={() => {
             setSetupRefreshing(true)

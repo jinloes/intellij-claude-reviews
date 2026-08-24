@@ -1,1 +1,2 @@
-export { PRList, SetupScreen, type SetupReason } from './PRList'
+export { PRList, SetupScreen } from './PRList'
+export type { SetupReason } from './setupSteps'

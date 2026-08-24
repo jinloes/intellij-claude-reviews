@@ -118,3 +118,21 @@ test('REQUIRED_CAPABILITIES matches the sidecar capability groups exactly', () =
     assert.deepEqual([...REQUIRED_CAPABILITIES].sort(), [...declaredCapabilities()].sort());
 });
 
+test('review generation reuses one commit fetch for linked-issue resolution', () => {
+    const source = readSource('vscode-extension', 'src', 'extension.ts');
+    const start = source.indexOf('async function handleGenerateReview');
+    const end = source.indexOf('\nasync function handleSaveDraft', start);
+    assert.ok(start >= 0 && end > start, 'could not isolate handleGenerateReview');
+    const generateReview = source.slice(start, end);
+
+    assert.equal(
+        [...generateReview.matchAll(/sidecarClient\.getCommits\(/g)].length,
+        1,
+        'handleGenerateReview must fetch commits exactly once',
+    );
+    assert.match(
+        generateReview,
+        /const commitsPromise = sidecarClient\.getCommits\([\s\S]*commitsPromise\.then\(\(commitContext\) =>[\s\S]*sidecarClient\.getLinkedIssues\([\s\S]*commitContext\.closingIssueNumbers/,
+    );
+    assert.match(generateReview, /commits:\s*commits\.summary/);
+});

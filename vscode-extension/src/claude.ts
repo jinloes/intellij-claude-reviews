@@ -31,7 +31,7 @@ const MAX_USER_MESSAGE_CHARS = 4_000;
 
 // ── Binary resolution ──────────────────────────────────────────────────────────
 
-function findClaudeBinary(): string {
+export function findClaudeBinary(): string {
     const home = process.env.HOME || os.homedir();
     const candidates = [
         `${home}/.local/bin/claude`,
@@ -91,4 +91,3 @@ export function buildFocusedChatPrompt(focusedContext: string, question: string)
     prompt += `<user_message>\n${escapeClosingTag(truncatePromptContent(question, MAX_USER_MESSAGE_CHARS), 'user_message')}\n</user_message>\n`;
     return prompt;
 }
-

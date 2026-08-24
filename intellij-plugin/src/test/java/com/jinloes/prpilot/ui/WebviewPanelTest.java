@@ -540,6 +540,7 @@ class WebviewPanelTest {
                             "full validation diff",
                             false,
                             false,
+                            false,
                             "",
                             new WebviewPanel.ProviderReadinessDto("claude", true, "Ready"));
 
@@ -562,6 +563,7 @@ class WebviewPanelTest {
                             null,
                             null,
                             null,
+                            false,
                             false,
                             false,
                             "PR is merged.",

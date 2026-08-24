@@ -5,6 +5,7 @@ import com.jinloes.prpilot.model.ChatMessage;
 import com.jinloes.prpilot.model.PRReviewRequest;
 import com.jinloes.prpilot.model.ReviewProvider;
 import com.jinloes.prpilot.model.ReviewResult;
+import com.jinloes.prpilot.review.ChunkedReviewService;
 import com.jinloes.prpilot.review.ClaudeService;
 import com.jinloes.prpilot.review.CopilotService;
 import com.jinloes.prpilot.settings.PluginSettings;
@@ -68,6 +69,7 @@ public class IntellijClaudeService {
 
     private final ClaudeService claude;
     private final CopilotService copilot;
+    private final ChunkedReviewService chunkedReviewService = new ChunkedReviewService();
 
     public IntellijClaudeService() {
         this.claude = new ClaudeService();
@@ -99,6 +101,7 @@ public class IntellijClaudeService {
     public void reviewPR(
             PRReviewRequest request,
             ReviewRuntimeSettings settings,
+            boolean chunkedReview,
             Consumer<String> onStatus,
             BiConsumer<String, String> onChunk,
             Consumer<ReviewResult> onComplete,
@@ -110,25 +113,42 @@ public class IntellijClaudeService {
                 "generate review",
                 "Review interrupted.",
                 onError,
-                () ->
-                        settings.provider == ReviewProvider.COPILOT
-                                ? copilot.reviewPR(
-                                        request,
-                                        settings.model,
-                                        settings.effort,
-                                        wrappedStatus,
-                                        wrappedChunk,
-                                        resolveReviewInheritMcp(
-                                                settings.inheritMcp, settings.forceMcpOnReview),
-                                        settings.configDir,
-                                        settings.selfCritique)
-                                : claude.reviewPR(
-                                        request,
-                                        settings.model,
-                                        settings.selfCritique,
-                                        wrappedStatus,
-                                        wrappedChunk),
+                () -> {
+                    ChunkedReviewService.ProviderCall call =
+                            chunkRequest ->
+                                    settings.provider == ReviewProvider.COPILOT
+                                            ? copilot.reviewPR(
+                                                    chunkRequest,
+                                                    settings.model,
+                                                    settings.effort,
+                                                    wrappedStatus,
+                                                    wrappedChunk,
+                                                    resolveReviewInheritMcp(
+                                                            settings.inheritMcp,
+                                                            settings.forceMcpOnReview),
+                                                    settings.configDir,
+                                                    settings.selfCritique)
+                                            : claude.reviewPR(
+                                                    chunkRequest,
+                                                    settings.model,
+                                                    settings.selfCritique,
+                                                    wrappedStatus,
+                                                    wrappedChunk);
+                    return chunkedReview
+                            ? chunkedReviewService.review(request, wrappedStatus, call)
+                            : call.review(request);
+                },
                 onComplete);
+    }
+
+    public void reviewPR(
+            PRReviewRequest request,
+            ReviewRuntimeSettings settings,
+            Consumer<String> onStatus,
+            BiConsumer<String, String> onChunk,
+            Consumer<ReviewResult> onComplete,
+            Consumer<String> onError) {
+        reviewPR(request, settings, false, onStatus, onChunk, onComplete, onError);
     }
 
     public void chat(

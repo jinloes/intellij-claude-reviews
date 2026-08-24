@@ -15,8 +15,11 @@ import com.intellij.ui.content.Content;
 import com.intellij.ui.content.ContentFactory;
 import com.intellij.ui.jcef.JBCefApp;
 import com.jinloes.prpilot.model.PullRequest;
+import com.jinloes.prpilot.model.ReviewProvider;
+import com.jinloes.prpilot.review.ProviderSetupProbe;
 import com.jinloes.prpilot.services.IntellijGitHubService;
 import com.jinloes.prpilot.services.UserFacingErrors;
+import com.jinloes.prpilot.settings.PluginSettings;
 import com.jinloes.prpilot.settings.PluginSettingsConfigurable;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -201,6 +204,8 @@ public class PRToolWindowFactory implements ToolWindowFactory {
                             : starred.isEmpty() ? null : starred.get(0);
 
             boolean finalLimited = limited;
+            ReviewProvider provider = PluginSettings.getInstance().getReviewProvider();
+            ProviderSetupProbe.Result providerSetup = new ProviderSetupProbe().probe(provider);
             ApplicationManager.getApplication()
                     .invokeLater(
                             () -> {
@@ -209,7 +214,8 @@ public class PRToolWindowFactory implements ToolWindowFactory {
                                         defaultRepo,
                                         webviewPanel.getSearchScope(),
                                         currentRepo,
-                                        finalLimited);
+                                        finalLimited,
+                                        providerSetup);
                             });
         } catch (Exception e) {
             log.warn("Failed to load PR list for webview: {}", e.getMessage());

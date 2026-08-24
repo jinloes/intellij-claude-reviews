@@ -80,7 +80,8 @@ public interface ReviewEngineApi {
             String commits,
             String linkedIssue,
             String repoProfile,
-            List<CiAnnotationParam> ciAnnotations) {}
+            List<CiAnnotationParam> ciAnnotations,
+            boolean chunkedReview) {}
 
     /** One prior conversation turn. */
     record ChatMessageParam(String role, String content) {}

@@ -15,7 +15,8 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { cn } from '@/lib/utils'
 import { shouldFocusPrFilter } from '@/lib/keyboard'
 import { useI18n } from '@/i18n/I18nProvider'
-import { onHostMessage, sendToHost, type PR, type PRListStatus, type PRSearchScope } from '../../bridge/types'
+import { onHostMessage, sendToHost, type PR, type PRListStatus, type PRSearchScope, type ProviderReadiness } from '../../bridge/types'
+import { setupSteps, type SetupReason } from './setupSteps'
 
 interface Props {
   onSelect?: (pr: PR) => boolean | void
@@ -23,7 +24,6 @@ interface Props {
 }
 
 type StateFilter = 'open' | 'closed' | 'all'
-export type SetupReason = 'gh_not_installed' | 'gh_not_authenticated' | 'load_failed'
 const FIRST_SUCCESS_KEY = 'pr-pilot:first-success-coach-shown'
 
 function prKey(pr: Pick<PR, 'owner' | 'repo' | 'number'>): string {
@@ -55,6 +55,7 @@ export function PRList({ onSelect, selectedPr }: Props) {
   const [stateFilter, setStateFilter] = useState<StateFilter>('open')
   const [searchScope, setSearchScope] = useState<PRSearchScope>('currentRepo')
   const [listStatus, setListStatus] = useState<PRListStatus | null>(null)
+  const [providerReadiness, setProviderReadiness] = useState<ProviderReadiness | null>(null)
   const [coachVisible, setCoachVisible] = useState(false)
   const [coachRecoveredSetup, setCoachRecoveredSetup] = useState(false)
   const [scopeHelpVisible, setScopeHelpVisible] = useState(false)
@@ -75,6 +76,7 @@ export function PRList({ onSelect, selectedPr }: Props) {
           setListStatus(msg.listStatus)
           setSearchScope(msg.listStatus.searchScope)
         }
+        setProviderReadiness(msg.providerReadiness ?? null)
         setLoading(false)
         setRefreshing(false)
         const shouldCoach = sawSetupScreenRef.current || !localStorage.getItem(FIRST_SUCCESS_KEY)
@@ -199,7 +201,11 @@ export function PRList({ onSelect, selectedPr }: Props) {
             <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-status-approve" />
             <div className="min-w-0 flex-1">
               <p className="text-xs font-semibold text-foreground">
-                {coachRecoveredSetup ? 'GitHub is connected — PR Pilot is ready.' : 'PR Pilot is ready.'}
+                {providerReadiness?.authenticationStatus === 'unverified'
+                  ? `${providerReadiness.provider === 'copilot' ? 'Copilot' : 'Claude'} CLI found — authentication is unverified.`
+                  : coachRecoveredSetup
+                    ? 'GitHub and the review provider are ready.'
+                    : 'PR Pilot is ready to review.'}
               </p>
               <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
                 Start with a PR from this list, switch scope if the PR you want is elsewhere, and look for
@@ -591,24 +597,33 @@ function ScopeHelpCard({
 // ── SetupScreen ──────────────────────────────────────────────────────────────
 
 interface SetupScreenProps {
-  reason: 'gh_not_installed' | 'gh_not_authenticated' | 'load_failed'
+  reason: SetupReason
   detail: string
+  providerReadiness?: ProviderReadiness
   refreshing: boolean
   onRefresh: () => void
 }
 
-export function SetupScreen({ reason, detail, refreshing, onRefresh }: SetupScreenProps) {
-  const title = reason === 'load_failed' ? 'Could not load pull requests' : 'GitHub not connected'
+export function SetupScreen({ reason, detail, providerReadiness, refreshing, onRefresh }: SetupScreenProps) {
+  const title = reason === 'load_failed'
+    ? 'Could not load pull requests'
+    : reason === 'provider_not_installed' || reason === 'provider_not_authenticated'
+      ? 'Review provider not ready'
+      : 'GitHub not connected'
   const host = typeof (window as { acquireVsCodeApi?: unknown }).acquireVsCodeApi === 'function'
     ? 'VS Code'
     : 'IntelliJ'
-  const steps = setupSteps(reason)
+  const steps = setupSteps(reason, providerReadiness)
   const [copyLabel, setCopyLabel] = useState<'copy' | 'copied' | 'failed'>('copy')
   const [lastCheckedAt, setLastCheckedAt] = useState<number | null>(null)
 
+  const authCommand = reason === 'provider_not_installed' || reason === 'provider_not_authenticated'
+    ? providerReadiness?.authCommand ?? `${providerReadiness?.provider ?? 'claude'} --help`
+    : 'gh auth login'
+
   async function handleCopyAuthCommand() {
     try {
-      await navigator.clipboard.writeText('gh auth login')
+      await navigator.clipboard.writeText(authCommand)
       setCopyLabel('copied')
       window.setTimeout(() => setCopyLabel('copy'), 1200)
     } catch {
@@ -618,7 +633,7 @@ export function SetupScreen({ reason, detail, refreshing, onRefresh }: SetupScre
   }
 
   function runAuthFlow() {
-    if (host === 'VS Code') {
+    if (host === 'VS Code' && reason !== 'provider_not_installed' && reason !== 'provider_not_authenticated') {
       sendToHost({ type: 'runAuthLogin' })
       return
     }
@@ -655,9 +670,9 @@ export function SetupScreen({ reason, detail, refreshing, onRefresh }: SetupScre
       </div>
       <div className="w-full max-w-72 rounded border border-border bg-muted/20 px-3 py-2.5 text-left space-y-2">
         <p className="text-[11px] font-semibold text-foreground">Guided setup</p>
-        <p className="text-[11px] font-mono text-foreground">gh auth login</p>
+        <p className="text-[11px] font-mono text-foreground">{authCommand}</p>
         <p className="mt-1 text-[11px] text-muted-foreground">
-          {host === 'VS Code'
+          {host === 'VS Code' && reason !== 'provider_not_installed' && reason !== 'provider_not_authenticated'
             ? 'Open the integrated terminal and run GitHub CLI auth automatically.'
             : 'Copy the command, run it in your terminal, then re-check status.'}
         </p>
@@ -668,8 +683,8 @@ export function SetupScreen({ reason, detail, refreshing, onRefresh }: SetupScre
             className="h-6 px-2 text-[11px] gap-1.5"
             onClick={runAuthFlow}
           >
-            {host === 'VS Code' ? <Terminal className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-            {host === 'VS Code' ? 'Run in terminal' : copyLabel === 'copied' ? 'Copied' : copyLabel === 'failed' ? 'Copy failed' : 'Copy command'}
+            {host === 'VS Code' && reason !== 'provider_not_installed' && reason !== 'provider_not_authenticated' ? <Terminal className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+            {host === 'VS Code' && reason !== 'provider_not_installed' && reason !== 'provider_not_authenticated' ? 'Run in terminal' : copyLabel === 'copied' ? 'Copied' : copyLabel === 'failed' ? 'Copy failed' : 'Copy command'}
           </Button>
         </div>
         {lastCheckedAt && (
@@ -742,24 +757,4 @@ function visibilityBullets(
   if (status.limited) bullets.push(`Only the first ${status.resultLimit} matching PRs are shown.`)
   bullets.push('Notification-opened PRs can be pinned into the list even if they are outside the current scope.')
   return bullets
-}
-
-function setupSteps(reason: SetupReason): Array<{ label: string; detail: string; done: boolean }> {
-  return [
-    {
-      label: 'Install GitHub CLI',
-      detail: 'PR Pilot uses gh for GitHub authentication and PR access.',
-      done: reason !== 'gh_not_installed',
-    },
-    {
-      label: 'Authenticate GitHub',
-      detail: 'Run gh auth login for github.com or your Enterprise host.',
-      done: reason === 'load_failed',
-    },
-    {
-      label: 'Load pull requests',
-      detail: 'Refresh after setup; choose a search scope if the list is empty.',
-      done: false,
-    },
-  ]
 }

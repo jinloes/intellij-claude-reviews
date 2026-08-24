@@ -18,7 +18,7 @@ import java.util.regex.Pattern;
 
 /**
  * Resolves the issues a pull request declares it closes, by parsing GitHub's closing keywords out
- * of the PR body and fetching each referenced issue.
+ * of the PR body and merging validated closing references extracted from its commit messages.
  *
  * <p>Only same-repository {@code #N} references are followed. Cross-repository forms ({@code
  * owner/repo#N}) and full URLs are deliberately ignored: resolving them would mean issuing requests
@@ -37,7 +37,8 @@ public final class LinkedIssueService {
             Pattern.compile(
                     "(?i)\\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\b\\s*:?\\s+#(\\d{1,9})");
 
-    static final int MAX_ISSUES = 3;
+    public static final int MAX_ISSUES = 3;
+    public static final int MAX_ISSUE_NUMBER = 999_999_999;
     static final int MAX_TITLE_CHARS = 200;
     static final int MAX_BODY_CHARS = 1500;
 
@@ -65,7 +66,7 @@ public final class LinkedIssueService {
         if (!PromptContext.validRepo(params.owner(), params.repo())) {
             return LinkedIssueResult.failure(GitHubFailure.INVALID_REQUEST);
         }
-        Set<Integer> numbers = referencedIssueNumbers(params.prBody());
+        Set<Integer> numbers = referencedIssueNumbers(params.prBody(), params.commitIssueNumbers());
         if (numbers.isEmpty()) {
             return LinkedIssueResult.none();
         }
@@ -102,6 +103,20 @@ public final class LinkedIssueService {
         while (matcher.find() && numbers.size() < MAX_ISSUES) {
             int number = Integer.parseInt(matcher.group(1));
             if (number > 0) numbers.add(number);
+        }
+        return numbers;
+    }
+
+    /**
+     * Merges commit references after PR-body references, preserving order and the global issue cap.
+     */
+    static Set<Integer> referencedIssueNumbers(String prBody, List<Integer> commitIssueNumbers) {
+        Set<Integer> numbers = referencedIssueNumbers(prBody);
+        for (Integer number : commitIssueNumbers) {
+            if (numbers.size() >= MAX_ISSUES) break;
+            if (number != null && number > 0 && number <= MAX_ISSUE_NUMBER) {
+                numbers.add(number);
+            }
         }
         return numbers;
     }
@@ -143,6 +158,18 @@ public final class LinkedIssueService {
         return String.join(", ", names);
     }
 
-    /** The PR body is supplied by the caller, which has already fetched the PR detail. */
-    public record Params(String githubBaseUrl, String owner, String repo, String prBody) {}
+    /**
+     * The PR body and validated commit issue numbers are supplied by the caller, which has already
+     * fetched the PR detail and commits.
+     */
+    public record Params(
+            String githubBaseUrl,
+            String owner,
+            String repo,
+            String prBody,
+            List<Integer> commitIssueNumbers) {
+        public Params {
+            commitIssueNumbers = List.copyOf(commitIssueNumbers);
+        }
+    }
 }

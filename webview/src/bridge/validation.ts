@@ -83,6 +83,10 @@ function isProviderReadiness(value: unknown): boolean {
   return ['claude', 'copilot'].includes(value.provider as string)
     && typeof value.available === 'boolean'
     && isString(value.detail)
+    && (value.binaryStatus === undefined || ['ready', 'missing'].includes(value.binaryStatus as string))
+    && (value.authenticationStatus === undefined
+      || ['ready', 'unavailable', 'unverified'].includes(value.authenticationStatus as string))
+    && (value.authCommand === undefined || isString(value.authCommand))
 }
 
 function hasMessage(value: Record<string, unknown>): boolean {
@@ -110,6 +114,7 @@ export function parseIncomingMessage(value: unknown): IncomingMessage | null {
         && value.prs.every(isPR)
         && isOptionalString(value.defaultRepo, 512)
         && (value.listStatus === undefined || isListStatus(value.listStatus))
+        && (value.providerReadiness === undefined || isProviderReadiness(value.providerReadiness))
       break
     case 'draftLoaded':
       valid = ['NO_DRAFT', 'DRAFT_PRESENT', 'MERGED'].includes(value.prState as string)
@@ -119,6 +124,7 @@ export function parseIncomingMessage(value: unknown): IncomingMessage | null {
         && isOptionalString(value.validationDiff, MAX_DIFF)
         && (value.staleCommits === undefined || typeof value.staleCommits === 'boolean')
         && (value.importedFromGitHub === undefined || typeof value.importedFromGitHub === 'boolean')
+        && (value.recoveryPending === undefined || typeof value.recoveryPending === 'boolean')
         && isOptionalString(value.status)
         && (value.providerReadiness === undefined || isProviderReadiness(value.providerReadiness))
       break
@@ -166,8 +172,9 @@ export function parseIncomingMessage(value: unknown): IncomingMessage | null {
       valid = isString(value.response)
       break
     case 'setupRequired':
-      valid = ['gh_not_installed', 'gh_not_authenticated', 'load_failed'].includes(value.reason as string)
+      valid = ['gh_not_installed', 'gh_not_authenticated', 'provider_not_installed', 'provider_not_authenticated', 'load_failed'].includes(value.reason as string)
         && isString(value.detail)
+        && (value.providerReadiness === undefined || isProviderReadiness(value.providerReadiness))
       break
     case 'themeChanged':
       valid = ['light', 'dark', 'highContrastLight', 'highContrastDark'].includes(value.theme as string)
