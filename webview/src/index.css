@@ -58,7 +58,7 @@
     --popover: 240 5% 10%;
     --popover-foreground: 0 0% 94%;
     --primary: 262 83% 68%;
-    --primary-foreground: 0 0% 100%;
+    --primary-foreground: 240 6% 5%;
     --secondary: 240 4% 14%;
     --secondary-foreground: 0 0% 90%;
     --muted: 240 4% 14%;
@@ -111,6 +111,24 @@
   }
 }
 
+html.high-contrast [data-sonner-toaster][data-sonner-theme] {
+  --normal-bg: hsl(var(--background));
+  --normal-border: hsl(var(--foreground));
+  --normal-text: hsl(var(--foreground));
+  --success-bg: hsl(var(--background));
+  --success-border: hsl(var(--foreground));
+  --success-text: hsl(var(--foreground));
+  --info-bg: hsl(var(--background));
+  --info-border: hsl(var(--foreground));
+  --info-text: hsl(var(--foreground));
+  --warning-bg: hsl(var(--background));
+  --warning-border: hsl(var(--foreground));
+  --warning-text: hsl(var(--foreground));
+  --error-bg: hsl(var(--background));
+  --error-border: hsl(var(--foreground));
+  --error-text: hsl(var(--foreground));
+}
+
 @layer base {
   * {
     @apply border-border;
@@ -126,6 +144,23 @@ body,
   height: 100vh;
   width: 100%;
   overflow: hidden;
+}
+
+.pr-list-toolbar {
+  container-name: pr-list-toolbar;
+  container-type: inline-size;
+}
+
+@container pr-list-toolbar (max-width: 300px) {
+  .pr-list-toolbar-label {
+    display: none;
+  }
+
+  .pr-list-toolbar-action {
+    width: 1.5rem;
+    padding-left: 0;
+    padding-right: 0;
+  }
 }
 
 @keyframes progress-slide {

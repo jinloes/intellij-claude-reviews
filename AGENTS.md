@@ -143,10 +143,34 @@ Test framework and location rules:
 ```bash
 (cd webview && npm run lint)
 (cd webview && npx tsc --noEmit)
+(cd webview && npm run test:unit)
+(cd webview && npm run test:a11y)
 (cd vscode-extension && npm run lint)
 (cd vscode-extension && npx tsc --noEmit)
 (cd vscode-extension && npm run test:unit)
 ```
+
+The visual snapshots are canonical Ubuntu/Chromium artifacts and must not be verified natively on
+other operating systems. Run the required visual verification with the Playwright version pinned by
+`webview/package-lock.json`; for the current lockfile, use:
+
+```bash
+mkdir -p /tmp/pr-pilot-playwright-node-modules /tmp/pr-pilot-playwright-npm-cache
+docker run --rm --ipc=host \
+  --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp -e npm_config_cache=/tmp/npm-cache -e CI=1 \
+  -v "$PWD:/work" \
+  -v /tmp/pr-pilot-playwright-node-modules:/work/webview/node_modules \
+  -v /tmp/pr-pilot-playwright-npm-cache:/tmp/npm-cache \
+  -w /work/webview \
+  mcr.microsoft.com/playwright:v1.61.1-noble \
+  bash -lc "npm ci && npm run test:visual -- --reporter=line"
+```
+
+For an intentional baseline regeneration, use the same command and image but change the final
+command to `npm ci && npm run test:visual -- --update-snapshots --reporter=line`. Review every image
+diff, then rerun the non-update command before accepting the baseline. Never raise visual tolerances
+merely to make a changed baseline pass.
 
 ## Coding rules
 

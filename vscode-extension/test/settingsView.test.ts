@@ -8,6 +8,7 @@ import {
     mergeCopilotModelOptions,
     normalizeGithubBaseUrl,
     normalizeProvider,
+    profileNameError,
 } from '../src/settingsView';
 
 // ── normalizeProvider ─────────────────────────────────────────────────────────
@@ -39,6 +40,11 @@ test('normalizeGithubBaseUrl rejects non-origin and unsafe values', () => {
     ]) {
         assert.throws(() => normalizeGithubBaseUrl(value), /must be an HTTPS origin/);
     }
+});
+
+test('profileNameError rejects blank names and accepts a visible name', () => {
+    assert.equal(profileNameError(' \t '), 'Enter a profile name.');
+    assert.equal(profileNameError('Security review'), null);
 });
 
 // ── mergeCopilotModelOptions ──────────────────────────────────────────────────
@@ -135,6 +141,14 @@ test('buildSettingsHtml renders reusable review-guidance profile controls', () =
     assert.match(html, /id="deleteProfileDialog".*role="alertdialog"/);
     assert.match(html, /aria-modal="true"/);
     assert.match(html, /profileNameInput'\)\.focus\(\)/);
+    assert.match(html, /id="profileNameError".*role="alert"/);
+    assert.match(html, /aria-describedby="profileNameError"/);
+    assert.match(html, /setAttribute\('aria-invalid', 'true'\)/);
+    assert.match(html, /Enter a profile name\./);
+    assert.match(html, /function profileNameError\(value\)\s*\{/);
+    assert.match(html, /const nameError = profileNameError\(input\.value\)/);
+    assert.match(html, /addEventListener\('input', clearProfileNameError\)/);
+    assert.match(html, /showProfileNameError\(nameError\);\s+return;/);
     assert.match(html, /event\.key === 'Escape'/);
     assert.match(html, /event\.key !== 'Tab'/);
     assert.match(html, /profileDialogReturnFocus\.focus\(\)/);
@@ -150,6 +164,18 @@ test('buildSettingsHtml exposes notification health, retry, and dependent contro
     assert.match(html, /applyNotificationVisibility\(state\.notificationsEnabled\)/);
     assert.match(html, /Notifications are partially working:/);
     assert.match(html, /Notification polling failed:/);
+    assert.match(html, /input\[type=number\]/);
+    assert.match(html, /id="notificationPollMinutes" class="short-field" min="1" max="60" step="1"/);
+    assert.match(html, /\.row input\.short-field, input\.short-field \{ width: 88px; flex: 0 0 88px; \}/);
+});
+
+test('buildSettingsHtml gives disabled settings actions a distinct non-interactive state', () => {
+    const html = buildSettingsHtml('csp', 'n');
+
+    assert.match(html, /button:disabled \{\s+cursor: not-allowed; opacity: \.6;/);
+    assert.match(html, /button\.secondary:disabled:hover \{ background: var\(--vscode-button-secondaryBackground\); \}/);
+    assert.match(html, /\$\('renameGuidanceProfile'\)\.disabled = !named/);
+    assert.match(html, /\$\('deleteGuidanceProfile'\)\.disabled = !named/);
 });
 
 test('buildSettingsHtml lists the Claude model presets and effort levels', () => {

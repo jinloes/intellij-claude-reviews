@@ -36,6 +36,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
   AlertDialog,
@@ -1174,6 +1175,40 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
     },
   }
 
+  const reviewOverrides = showReviewOverrides ? (
+    <ReviewOverrides
+      focusAreas={focusAreasOverride}
+      customInstructions={customInstructionsOverride}
+      chunkedMode={chunkedMode}
+      preflight={preflight}
+      recommendation={recommendation}
+      onFocusAreasChange={setFocusAreasOverride}
+      onCustomInstructionsChange={setCustomInstructionsOverride}
+      onChunkedModeChange={setChunkedMode}
+    />
+  ) : null
+
+  const paneContent = (
+    <PaneContent
+      state={state}
+      focusedCommentIdx={focusedCommentIdx}
+      onGenerate={handleGenerate}
+      onVerifyComment={hasReview ? handleVerifyComment : undefined}
+      onSuggestFixComment={hasReview ? handleSuggestFixComment : undefined}
+      editCommentHandlers={editCommentHandlers}
+      inlineComments={inlineComments}
+      orphanComments={orphanComments}
+      onEditOrphan={orphanHandlers.onEditOrphan}
+      onDeleteOrphan={orphanHandlers.onDeleteOrphan}
+      onReloadDraft={handleReloadDraft}
+      onRetryDelete={handleDelete}
+      onKeepDraft={handleKeepDraft}
+      onReanchor={handleReanchorDraft}
+      onOpenSettings={() => sendToHost({ type: 'openSettings' })}
+      onOpenAuthGuide={() => sendToHost({ type: 'openUrl', url: 'https://cli.github.com/manual/gh_auth_login' })}
+    />
+  )
+
   return (
     <TooltipProvider delayDuration={400}>
       <div ref={paneRef} data-testid="review-pane-content" className="flex min-h-0 flex-1 flex-col bg-background">
@@ -1291,18 +1326,8 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
         <ContextMenu>
           <ContextMenuTrigger asChild>
             <div ref={reviewBodyRef} data-testid="review-scroll-body" className="flex-1 overflow-y-auto min-h-0">
-              {showReviewOverrides && (
-                <ReviewOverrides
-                  focusAreas={focusAreasOverride}
-                  customInstructions={customInstructionsOverride}
-                  chunkedMode={chunkedMode}
-                  preflight={preflight}
-                  recommendation={recommendation}
-                  onFocusAreasChange={setFocusAreasOverride}
-                  onCustomInstructionsChange={setCustomInstructionsOverride}
-                  onChunkedModeChange={setChunkedMode}
-                />
-              )}
+              {state.kind === 'noDraft' && paneContent}
+              {reviewOverrides}
               {result && qualityReport && qualityRiskCount > 0 && !qualityExpanded && (
                 <div className="px-4 pt-3">
                   <QualityCheckBadge count={qualityRiskCount} onReview={() => setQualityExpanded(true)} />
@@ -1317,24 +1342,7 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
                   />
                 </div>
               )}
-              <PaneContent
-                state={state}
-                focusedCommentIdx={focusedCommentIdx}
-                onGenerate={handleGenerate}
-                onVerifyComment={hasReview ? handleVerifyComment : undefined}
-                onSuggestFixComment={hasReview ? handleSuggestFixComment : undefined}
-                editCommentHandlers={editCommentHandlers}
-                inlineComments={inlineComments}
-                orphanComments={orphanComments}
-                onEditOrphan={orphanHandlers.onEditOrphan}
-                onDeleteOrphan={orphanHandlers.onDeleteOrphan}
-                onReloadDraft={handleReloadDraft}
-                onRetryDelete={handleDelete}
-                onKeepDraft={handleKeepDraft}
-                onReanchor={handleReanchorDraft}
-                onOpenSettings={() => sendToHost({ type: 'openSettings' })}
-                onOpenAuthGuide={() => sendToHost({ type: 'openUrl', url: 'https://cli.github.com/manual/gh_auth_login' })}
-              />
+              {state.kind !== 'noDraft' && paneContent}
             </div>
           </ContextMenuTrigger>
           <ContextMenuContent>
@@ -1453,77 +1461,91 @@ function ReviewOverrides({
   onCustomInstructionsChange,
   onChunkedModeChange,
 }: ReviewOverridesProps) {
-  const hasOverrides = focusAreas.trim().length > 0 || customInstructions.trim().length > 0
+  const overrideCount = Number(focusAreas.trim().length > 0) + Number(customInstructions.trim().length > 0)
+  const hasOverrides = overrideCount > 0
   const t = useI18n()
   return (
     <div className="px-4 pt-3">
-      <div className="rounded border border-border bg-muted/20 px-3 py-2.5">
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-xs font-medium text-foreground">Per-review instructions (optional)</p>
+      <details
+        data-testid="review-overrides-disclosure"
+        className="rounded border border-border bg-muted/20 px-3 py-2.5"
+      >
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-foreground">
+          <span>Review instructions (optional)</span>
           {hasOverrides && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-6 px-2 text-[11px]"
-              onClick={() => {
-                onFocusAreasChange('')
-                onCustomInstructionsChange('')
-              }}
-            >
-              Clear
-            </Button>
+            <Badge variant="outline" className="px-1.5 py-0 text-[10px] font-normal">
+              {overrideCount} {overrideCount === 1 ? 'override' : 'overrides'} applied
+            </Badge>
           )}
-        </div>
-        <p className="mt-1 text-[11px] text-muted-foreground">
-          Leave blank to use defaults from Settings.
-        </p>
-        <p className="mt-1 text-[11px] text-muted-foreground" role="note">
-          {t('review.guidanceStatus')}
-        </p>
-        <label htmlFor="review-focus-areas" className="mt-2 block text-xs font-medium text-foreground">{t('review.focusAreas')}</label>
-        <input
-          id="review-focus-areas"
-          className="mt-2 w-full rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-ring"
-          placeholder="Focus areas (e.g. security, performance, tests)"
-          value={focusAreas}
-          onChange={(e) => onFocusAreasChange(e.target.value)}
-        />
-        <details className="mt-2 rounded border border-border/70 p-2">
-          <summary className="cursor-pointer text-xs font-medium text-foreground">{t('review.advanced')}</summary>
-        <label htmlFor="review-custom-instructions" className="mt-2 block text-xs font-medium text-foreground">{t('review.customInstructions')}</label>
-        <textarea
-          id="review-custom-instructions"
-          className="mt-2 w-full rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-ring resize-y"
-          rows={2}
-          placeholder="Custom instructions for this review only"
-          value={customInstructions}
-          onChange={(e) => onCustomInstructionsChange(e.target.value)}
-        />
-        <label className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+        </summary>
+        <div className="mt-3">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-xs font-medium text-foreground">Per-review instructions</p>
+            {hasOverrides && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-[11px]"
+                onClick={() => {
+                  onFocusAreasChange('')
+                  onCustomInstructionsChange('')
+                }}
+              >
+                Clear
+              </Button>
+            )}
+          </div>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            Leave blank to use defaults from Settings.
+          </p>
+          <p className="mt-1 text-[11px] text-muted-foreground" role="note">
+            {t('review.guidanceStatus')}
+          </p>
+          <label htmlFor="review-focus-areas" className="mt-2 block text-xs font-medium text-foreground">{t('review.focusAreas')}</label>
           <input
-            type="checkbox"
-            checked={chunkedMode}
-            onChange={(e) => onChunkedModeChange(e.target.checked)}
+            id="review-focus-areas"
+            className="mt-2 w-full rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-ring"
+            placeholder="Focus areas (e.g. security, performance, tests)"
+            value={focusAreas}
+            onChange={(e) => onFocusAreasChange(e.target.value)}
           />
-          Use chunked review mode as an advanced fallback
-        </label>
-        <div className="mt-1 pl-6 text-[11px] text-muted-foreground">
-          {preflight
-            ? `PR size: ${preflight.fileCount} file${preflight.fileCount === 1 ? '' : 's'}, ${preflight.changedLines} changed lines.`
-            : 'PR size: loading diff metadata…'}
+          <details className="mt-2 rounded border border-border/70 p-2">
+            <summary className="cursor-pointer text-xs font-medium text-foreground">{t('review.advanced')}</summary>
+            <label htmlFor="review-custom-instructions" className="mt-2 block text-xs font-medium text-foreground">{t('review.customInstructions')}</label>
+            <textarea
+              id="review-custom-instructions"
+              className="mt-2 w-full rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-ring resize-y"
+              rows={2}
+              placeholder="Custom instructions for this review only"
+              value={customInstructions}
+              onChange={(e) => onCustomInstructionsChange(e.target.value)}
+            />
+            <label className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={chunkedMode}
+                onChange={(e) => onChunkedModeChange(e.target.checked)}
+              />
+              Use chunked review mode as an advanced fallback
+            </label>
+            <div className="mt-1 pl-6 text-[11px] text-muted-foreground">
+              {preflight
+                ? `PR size: ${preflight.fileCount} file${preflight.fileCount === 1 ? '' : 's'}, ${preflight.changedLines} changed lines.`
+                : 'PR size: loading diff metadata…'}
+            </div>
+            <div className="mt-1 pl-6 text-[11px]">
+              <span className={cn('font-medium', recommendation.recommendChunked ? 'text-status-suggestion' : 'text-status-approve')}>
+                {recommendation.recommendChunked ? 'Fallback available: consider chunked mode.' : 'Recommended: Single-pass mode.'}
+              </span>
+              <span className="text-muted-foreground"> {recommendation.reason}</span>
+            </div>
+            <p className="mt-1 pl-6 text-[11px] text-muted-foreground">
+              Chunked reviews process file batches independently, so they can miss cross-file interactions and provide
+              limited synthesis. Enable this fallback explicitly only when a single-pass review cannot cover the diff.
+            </p>
+          </details>
         </div>
-        <div className="mt-1 pl-6 text-[11px]">
-          <span className={cn('font-medium', recommendation.recommendChunked ? 'text-status-suggestion' : 'text-status-approve')}>
-            {recommendation.recommendChunked ? 'Fallback available: consider chunked mode.' : 'Recommended: Single-pass mode.'}
-          </span>
-          <span className="text-muted-foreground"> {recommendation.reason}</span>
-        </div>
-        <p className="mt-1 pl-6 text-[11px] text-muted-foreground">
-          Chunked reviews process file batches independently, so they can miss cross-file interactions and provide
-          limited synthesis. Enable this fallback explicitly only when a single-pass review cannot cover the diff.
-        </p>
-        </details>
-      </div>
+      </details>
     </div>
   )
 }
@@ -1866,7 +1888,12 @@ function PaneContent({
                 : state.providerReadiness.detail}
             </p>
           )}
-          <Button onClick={onGenerate} className="gap-2" disabled={state.providerReadiness?.available === false}>
+          <Button
+            data-testid="generate-review"
+            onClick={onGenerate}
+            className="gap-2"
+            disabled={state.providerReadiness?.available === false}
+          >
             Generate Review
           </Button>
           {state.providerReadiness?.available === false && (

@@ -35,7 +35,6 @@ export const COPILOT_MODEL_SUGGESTIONS: string[] = [
 export const COPILOT_EFFORTS: string[] = ['none', 'low', 'medium', 'high', 'xhigh', 'max'];
 
 export const GITHUB_BASE_URL_ERROR = 'GitHub base URL must be an HTTPS origin without credentials, a port, path, query, or fragment.';
-
 export interface SettingsState {
     provider: Provider;
     reviewModel: string;
@@ -83,6 +82,10 @@ export function normalizeGithubBaseUrl(value: string): string {
     } catch {
         throw new Error(GITHUB_BASE_URL_ERROR);
     }
+}
+
+export function profileNameError(value: string): string | null {
+    return value.trim() === '' ? 'Enter a profile name.' : null;
 }
 
 /**
@@ -147,14 +150,18 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
   .status { min-height: 18px; margin: 0 0 14px; font-size: 12px; color: var(--vscode-descriptionForeground); }
   .status.ok { color: var(--vscode-testing-iconPassed); }
   .status.error { color: var(--vscode-errorForeground); }
-  select, input[type=text], textarea {
+  select, input[type=text], input[type=number], textarea {
     width: 100%; box-sizing: border-box; padding: 5px 8px; font-size: 13px;
     color: var(--vscode-input-foreground); background: var(--vscode-input-background);
     border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px;
   }
+  select:focus-visible, input:focus-visible, textarea:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px;
+  }
   .row { display: flex; gap: 8px; align-items: center; }
   .row select, .row input { flex: 1; }
   .row.wrap { flex-wrap: wrap; }
+  .row input.short-field, input.short-field { width: 88px; flex: 0 0 88px; }
   button {
     padding: 5px 12px; font-size: 13px; cursor: pointer; border: none; border-radius: 2px;
     color: var(--vscode-button-foreground); background: var(--vscode-button-background);
@@ -164,6 +171,13 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
     color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground);
   }
   button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  button:disabled {
+    cursor: not-allowed; opacity: .6;
+  }
+  button:disabled:hover { background: var(--vscode-button-background); }
+  button.secondary:disabled:hover { background: var(--vscode-button-secondaryBackground); }
+  .field-error { margin: 4px 0 0; color: var(--vscode-errorForeground); font-size: 12px; }
+  input[aria-invalid=true] { border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground)); }
   .hidden { display: none; }
   .modal[hidden] { display: none; }
   .modal {
@@ -204,7 +218,8 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
     <div class="modal-content">
       <h2 id="profileNameDialogTitle">Save guidance profile</h2>
       <label for="profileNameInput">Profile name</label>
-      <input type="text" id="profileNameInput" autocomplete="off">
+      <input type="text" id="profileNameInput" autocomplete="off" aria-describedby="profileNameError">
+      <p id="profileNameError" class="field-error" role="alert" aria-live="assertive" hidden></p>
       <div class="modal-actions">
         <button id="cancelProfileName" class="secondary" type="button">Cancel</button>
         <button id="confirmProfileName" type="button">Save</button>
@@ -327,7 +342,7 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
         <label><input type="checkbox" id="notifyReviewRequested" style="width:auto;margin-right:6px;">Notify when a review is requested from me</label>
         <label><input type="checkbox" id="notifyStarredRepos" style="width:auto;margin-right:6px;">Notify for new PRs in starred repositories</label>
         <label for="notificationPollMinutes">Notification polling interval (minutes)</label>
-        <input type="number" id="notificationPollMinutes" min="1" max="60" step="1">
+        <input type="number" id="notificationPollMinutes" class="short-field" min="1" max="60" step="1">
       </div>
       <div id="notificationHealth" class="hint" role="status" aria-live="polite"></div>
       <button id="retryNotifications" class="secondary" type="button">Retry notification poll</button>
@@ -336,6 +351,7 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
   </div>
 
 <script nonce="${nonce}">
+  ${profileNameError.toString()}
   const vscode = acquireVsCodeApi();
   const $ = (id) => document.getElementById(id);
   const CLI_DEFAULT = '__cli_default__';
@@ -494,8 +510,27 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
 
   function closeProfileDialog(id) {
     $(id).hidden = true;
+    if (id === 'profileNameDialog') clearProfileNameError();
     if (profileDialogReturnFocus) profileDialogReturnFocus.focus();
     profileDialogReturnFocus = null;
+  }
+
+  function clearProfileNameError() {
+    const input = $('profileNameInput');
+    const error = $('profileNameError');
+    input.removeAttribute('aria-invalid');
+    error.textContent = '';
+    error.hidden = true;
+  }
+
+  function showProfileNameError(message) {
+    const input = $('profileNameInput');
+    const error = $('profileNameError');
+    input.setAttribute('aria-invalid', 'true');
+    error.textContent = message;
+    error.hidden = false;
+    input.focus();
+    input.select();
   }
 
   function keepFocusInDialog(dialog, event) {
@@ -522,6 +557,7 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
     $('profileNameDialogTitle').textContent = mode === 'rename' ? 'Rename guidance profile' : 'Save guidance profile';
     $('confirmProfileName').textContent = mode === 'rename' ? 'Rename' : 'Save';
     $('profileNameInput').value = profile ? profile.name : '';
+    clearProfileNameError();
     $('profileNameDialog').hidden = false;
     $('profileNameInput').focus();
     $('profileNameInput').select();
@@ -563,8 +599,13 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
   });
   $('cancelProfileName').addEventListener('click', () => closeProfileDialog('profileNameDialog'));
   $('confirmProfileName').addEventListener('click', () => {
-    const name = $('profileNameInput').value.trim();
-    if (!name) return;
+    const input = $('profileNameInput');
+    const nameError = profileNameError(input.value);
+    if (nameError) {
+      showProfileNameError(nameError);
+      return;
+    }
+    const name = input.value.trim();
     if (profileDialogMode === 'rename') {
       const profile = guidanceProfiles.find((candidate) => candidate.id === profileDialogTargetId);
       if (!profile) return;
@@ -583,6 +624,7 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
     if (event.key === 'Enter') $('confirmProfileName').click();
     if (event.key === 'Escape') closeProfileDialog('profileNameDialog');
   });
+  $('profileNameInput').addEventListener('input', clearProfileNameError);
   $('deleteGuidanceProfile').addEventListener('click', () => {
     openDeleteProfileDialog();
   });

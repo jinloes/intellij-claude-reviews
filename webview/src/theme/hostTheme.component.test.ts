@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { applyHostTheme } from './hostTheme'
+import { applyHostTheme, sonnerThemeForHost } from './hostTheme'
 
 afterEach(() => {
   document.documentElement.className = ''
@@ -19,5 +19,14 @@ describe('applyHostTheme', () => {
     applyHostTheme('light')
     expect(document.documentElement).not.toHaveClass('dark', 'high-contrast')
     expect(document.documentElement.style.colorScheme).toBe('light')
+  })
+})
+
+describe('sonnerThemeForHost', () => {
+  it('uses the IDE host instead of the operating-system color scheme', () => {
+    expect(sonnerThemeForHost('dark')).toBe('dark')
+    expect(sonnerThemeForHost('highContrastDark')).toBe('dark')
+    expect(sonnerThemeForHost('light')).toBe('light')
+    expect(sonnerThemeForHost('highContrastLight')).toBe('light')
   })
 })

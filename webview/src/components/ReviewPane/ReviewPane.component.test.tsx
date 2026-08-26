@@ -102,8 +102,36 @@ describe('ReviewPane review submission', () => {
     }
 
     async function openAdvanced(user: ReturnType<typeof userEvent.setup>) {
+      await user.click(screen.getByText('Review instructions (optional)'))
       await user.click(screen.getByText('Advanced review options'))
     }
+
+    it('puts Generate Review first and preserves collapsed override values', async () => {
+      const user = userEvent.setup()
+      ;(window as unknown as { cefQuery?: ReturnType<typeof vi.fn> }).cefQuery = vi.fn()
+      render(<ReviewPane pr={pr} />)
+      loadReviewableDiff(diffWithFiles(1))
+
+      const generate = screen.getByRole('button', { name: 'Generate Review' })
+      const disclosure = screen.getByText('Review instructions (optional)').closest('summary')!
+      expect(generate.compareDocumentPosition(disclosure) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+      expect(screen.getByLabelText('Focus areas')).not.toBeVisible()
+
+      disclosure.focus()
+      await user.keyboard('{Enter}')
+      await user.type(screen.getByLabelText('Focus areas'), 'security')
+      await user.click(screen.getByText('Advanced review options'))
+      await user.type(screen.getByLabelText(/Custom instructions/), 'Check boundary cases')
+      expect(screen.getByText('2 overrides applied')).toBeInTheDocument()
+
+      screen.getByText('Review instructions (optional)').closest('summary')!.focus()
+      await user.keyboard('{Enter}')
+      expect(screen.getByLabelText('Focus areas')).not.toBeVisible()
+      screen.getByText('Review instructions (optional)').closest('summary')!.focus()
+      await user.keyboard('{Enter}')
+      expect(screen.getByLabelText('Focus areas')).toHaveValue('security')
+      expect(screen.getByLabelText(/Custom instructions/)).toHaveValue('Check boundary cases')
+    })
 
     it('keeps chunking off for a large PR recommendation and generates a single-pass review', async () => {
       const user = userEvent.setup()

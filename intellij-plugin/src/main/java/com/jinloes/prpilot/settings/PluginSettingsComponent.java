@@ -28,6 +28,14 @@ public class PluginSettingsComponent {
 
     private record ModelOption(String label, String id) {}
 
+    @FunctionalInterface
+    interface ProfileNamePrompt {
+        String prompt(
+                Component parent, String title, String initialValue, String validationMessage);
+    }
+
+    static final String PROFILE_NAME_REQUIRED = "Enter a profile name.";
+
     private static final List<ModelOption> CLAUDE_MODELS =
             List.of(
                     new ModelOption("CLI default (unset)", ""),
@@ -79,6 +87,7 @@ public class PluginSettingsComponent {
     private final JButton addReviewGuidanceProfileButton = new JButton("Save as…");
     private final JButton renameReviewGuidanceProfileButton = new JButton("Rename");
     private final JButton deleteReviewGuidanceProfileButton = new JButton("Delete");
+    private final ProfileNamePrompt profileNamePrompt;
     private List<PluginSettings.ReviewGuidanceProfile> reviewGuidanceProfiles = new ArrayList<>();
     private String activeReviewGuidanceProfileId = "";
     private String defaultReviewFocusAreas = "";
@@ -117,7 +126,9 @@ public class PluginSettingsComponent {
         this(
                 baseUrl -> IntellijGitHubService.getInstance().checkAuth(baseUrl),
                 task -> ApplicationManager.getApplication().executeOnPooledThread(task),
-                SwingUtilities::invokeLater);
+                SwingUtilities::invokeLater,
+                () -> PRNotificationService.getInstance().getLastPollStatus(),
+                PluginSettingsComponent::showProfileNamePrompt);
     }
 
     PluginSettingsComponent(
@@ -128,7 +139,8 @@ public class PluginSettingsComponent {
                 authChecker,
                 backgroundExecutor,
                 uiExecutor,
-                () -> PRNotificationService.getInstance().getLastPollStatus());
+                () -> PRNotificationService.getInstance().getLastPollStatus(),
+                PluginSettingsComponent::showProfileNamePrompt);
     }
 
     PluginSettingsComponent(
@@ -136,8 +148,23 @@ public class PluginSettingsComponent {
             Consumer<Runnable> backgroundExecutor,
             Consumer<Runnable> uiExecutor,
             Supplier<String> pollStatusSupplier) {
+        this(
+                authChecker,
+                backgroundExecutor,
+                uiExecutor,
+                pollStatusSupplier,
+                PluginSettingsComponent::showProfileNamePrompt);
+    }
+
+    PluginSettingsComponent(
+            Function<String, CheckAuthResult> authChecker,
+            Consumer<Runnable> backgroundExecutor,
+            Consumer<Runnable> uiExecutor,
+            Supplier<String> pollStatusSupplier,
+            ProfileNamePrompt profileNamePrompt) {
         this.authChecks = new AuthCheckCoordinator(authChecker, backgroundExecutor, uiExecutor);
         this.pollStatusSupplier = pollStatusSupplier;
+        this.profileNamePrompt = profileNamePrompt;
         checkButton.addActionListener(e -> checkStatus());
 
         providerCombo.setRenderer(
@@ -611,13 +638,8 @@ public class PluginSettingsComponent {
 
     private void addReviewGuidanceProfile() {
         syncCurrentReviewGuidanceProfile();
-        String name =
-                JOptionPane.showInputDialog(
-                        mainPanel,
-                        "Profile name:",
-                        "Save guidance profile",
-                        JOptionPane.PLAIN_MESSAGE);
-        if (name == null || name.trim().isEmpty()) {
+        String name = promptForProfileName("Save guidance profile", "");
+        if (name == null) {
             return;
         }
         PluginSettings.ReviewGuidanceProfile profile =
@@ -637,21 +659,48 @@ public class PluginSettingsComponent {
         if (active == null) {
             return;
         }
-        String name =
-                (String)
-                        JOptionPane.showInputDialog(
-                                mainPanel,
-                                "Profile name:",
-                                "Rename guidance profile",
-                                JOptionPane.PLAIN_MESSAGE,
-                                null,
-                                null,
-                                active.name);
-        if (name == null || name.trim().isEmpty()) {
+        String name = promptForProfileName("Rename guidance profile", active.name);
+        if (name == null) {
             return;
         }
-        active.name = name.trim();
+        active.name = name;
         rebuildReviewGuidanceProfileCombo();
+    }
+
+    private String promptForProfileName(String title, String initialValue) {
+        String candidate = initialValue;
+        String validationMessage = null;
+        while (true) {
+            candidate = profileNamePrompt.prompt(mainPanel, title, candidate, validationMessage);
+            if (candidate == null) {
+                return null;
+            }
+            validationMessage = profileNameError(candidate);
+            if (validationMessage == null) {
+                return candidate.trim();
+            }
+        }
+    }
+
+    static String profileNameError(String value) {
+        return value == null || value.trim().isEmpty() ? PROFILE_NAME_REQUIRED : null;
+    }
+
+    private static String showProfileNamePrompt(
+            Component parent, String title, String initialValue, String validationMessage) {
+        String message =
+                validationMessage == null
+                        ? "Profile name:"
+                        : validationMessage + System.lineSeparator() + "Profile name:";
+        return (String)
+                JOptionPane.showInputDialog(
+                        parent,
+                        message,
+                        title,
+                        JOptionPane.PLAIN_MESSAGE,
+                        null,
+                        null,
+                        initialValue);
     }
 
     private void deleteReviewGuidanceProfile() {

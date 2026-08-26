@@ -12,11 +12,12 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import { shouldFocusPrFilter } from '@/lib/keyboard'
 import { useI18n } from '@/i18n/I18nProvider'
 import { onHostMessage, sendToHost, type PR, type PRListStatus, type PRSearchScope, type ProviderReadiness } from '../../bridge/types'
-import { setupSteps, type SetupReason } from './setupSteps'
+import { setupRecoveryAction, setupSteps, type SetupReason } from './setupSteps'
 
 interface Props {
   onSelect?: (pr: PR) => boolean | void
@@ -194,7 +195,8 @@ export function PRList({ onSelect, selectedPr }: Props) {
   }, [])
 
   return (
-    <nav className="flex min-h-0 flex-1 flex-col bg-background border-r border-border" aria-label={t('app.prList')}>
+    <TooltipProvider delayDuration={400}>
+      <nav className="flex min-h-0 flex-1 flex-col bg-background border-r border-border" aria-label={t('app.prList')}>
       {coachVisible && (
         <div className="shrink-0 border-b border-border bg-status-approve/5 px-3 py-2">
           <div className="flex items-start gap-2">
@@ -244,43 +246,54 @@ export function PRList({ onSelect, selectedPr }: Props) {
       {/* Header */}
       <div className="shrink-0 px-3 pt-3 pb-2 space-y-2 border-b border-border">
         {/* Title row */}
-        <div className="flex items-center gap-2">
-          <h1 className="text-xs font-semibold tracking-widest uppercase text-muted-foreground">
+        <div
+          className="pr-list-toolbar flex min-w-0 items-center gap-2"
+          data-testid="pr-list-toolbar"
+        >
+          <h1 className="min-w-0 truncate text-xs font-semibold tracking-widest uppercase text-muted-foreground">
             Pull Requests
           </h1>
           <Badge
             variant="outline"
             className={cn(
-              'text-[10px] px-1.5 py-0 font-mono',
+              'shrink-0 text-[10px] px-1.5 py-0 font-mono',
               filtered.length > 0 ? 'text-primary border-primary/40' : 'text-muted-foreground',
             )}
             title={`${filtered.length} visible of ${prs.length} loaded`}
           >
             {filtered.length}{filtered.length !== prs.length ? `/${prs.length}` : ''}
           </Badge>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => sendToHost({ type: 'openSettings' })}
-            className="ml-auto h-6 px-2 text-xs text-muted-foreground hover:text-foreground gap-1.5"
-            title="Open PR Pilot settings"
-            aria-label="Open PR Pilot settings"
-          >
-            <Settings2 className="w-3.5 h-3.5" />
-            Settings
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => fetchWithFilters()}
-            disabled={refreshing}
-            className="h-6 px-2 text-xs text-muted-foreground hover:text-foreground gap-1.5"
-            title="Refresh pull requests"
-            aria-label="Refresh pull requests"
-          >
-            <RefreshCw className={cn('w-3 h-3', refreshing && 'animate-spin')} />
-            Refresh
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => sendToHost({ type: 'openSettings' })}
+                className="pr-list-toolbar-action ml-auto h-6 min-w-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
+                aria-label="Open PR Pilot settings"
+              >
+                <Settings2 className="w-3.5 h-3.5" />
+                <span className="pr-list-toolbar-label">Settings</span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Open PR Pilot settings</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => fetchWithFilters()}
+                disabled={refreshing}
+                className="pr-list-toolbar-action h-6 min-w-6 gap-1.5 px-2 text-xs text-muted-foreground hover:text-foreground"
+                aria-label="Refresh pull requests"
+              >
+                <RefreshCw className={cn('w-3 h-3', refreshing && 'animate-spin')} />
+                <span className="pr-list-toolbar-label">Refresh</span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Refresh pull requests</TooltipContent>
+          </Tooltip>
         </div>
 
         {/* State filter + search scope */}
@@ -489,7 +502,8 @@ export function PRList({ onSelect, selectedPr }: Props) {
           </ul>
         </div>
       </ScrollArea>
-    </nav>
+      </nav>
+    </TooltipProvider>
   )
 }
 
@@ -617,14 +631,17 @@ export function SetupScreen({ reason, detail, providerReadiness, refreshing, onR
     ? 'VS Code'
     : 'IntelliJ'
   const steps = setupSteps(reason, providerReadiness)
+  const recovery = setupRecoveryAction(reason, providerReadiness)
+  const guideUrl = recovery.guideUrl
   const [copyLabel, setCopyLabel] = useState<'copy' | 'copied' | 'failed'>('copy')
   const [lastCheckedAt, setLastCheckedAt] = useState<number | null>(null)
 
-  const authCommand = reason === 'provider_not_installed' || reason === 'provider_not_authenticated'
-    ? providerReadiness?.authCommand ?? `${providerReadiness?.provider ?? 'claude'} --help`
-    : 'gh auth login'
+  const authCommand = recovery.command
+  const canRunInHost = host === 'VS Code' && recovery.canRunInHost === true
+  const providerFailure = reason === 'provider_not_installed' || reason === 'provider_not_authenticated'
 
   async function handleCopyAuthCommand() {
+    if (!authCommand) return
     try {
       await navigator.clipboard.writeText(authCommand)
       setCopyLabel('copied')
@@ -636,7 +653,7 @@ export function SetupScreen({ reason, detail, providerReadiness, refreshing, onR
   }
 
   function runAuthFlow() {
-    if (host === 'VS Code' && reason !== 'provider_not_installed' && reason !== 'provider_not_authenticated') {
+    if (canRunInHost) {
       sendToHost({ type: 'runAuthLogin' })
       return
     }
@@ -649,11 +666,12 @@ export function SetupScreen({ reason, detail, providerReadiness, refreshing, onR
   }
 
   return (
-    <div className="flex flex-col h-full items-center justify-center gap-5 px-6 text-center">
+    <div className="flex min-h-full w-full">
+      <div className="my-auto flex w-full flex-col items-center gap-5 px-6 py-6 text-center">
       <TriangleAlert className="w-10 h-10 text-status-suggestion shrink-0" />
       <div className="flex flex-col gap-2">
         <h1 className="text-sm font-semibold text-foreground">{title}</h1>
-        <p className="text-xs text-muted-foreground leading-relaxed">{detail}</p>
+        <p className="break-words text-xs text-muted-foreground leading-relaxed">{detail}</p>
         <p className="text-[11px] text-muted-foreground">Detected host: {host}</p>
       </div>
       <div className="w-full max-w-72 rounded border border-border bg-card text-left">
@@ -671,11 +689,11 @@ export function SetupScreen({ reason, detail, providerReadiness, refreshing, onR
           </div>
         ))}
       </div>
-      {!draftIndexUnavailable && <div className="w-full max-w-72 rounded border border-border bg-muted/20 px-3 py-2.5 text-left space-y-2">
-        <p className="text-[11px] font-semibold text-foreground">Guided setup</p>
-        <p className="text-[11px] font-mono text-foreground">{authCommand}</p>
+      {authCommand && <div className="w-full max-w-72 rounded border border-border bg-muted/20 px-3 py-2.5 text-left space-y-2">
+        <p className="text-[11px] font-semibold text-foreground">{recovery.label}</p>
+        <p className="break-all text-[11px] font-mono text-foreground">{authCommand}</p>
         <p className="mt-1 text-[11px] text-muted-foreground">
-          {host === 'VS Code' && reason !== 'provider_not_installed' && reason !== 'provider_not_authenticated'
+          {canRunInHost
             ? 'Open the integrated terminal and run GitHub CLI auth automatically.'
             : 'Copy the command, run it in your terminal, then re-check status.'}
         </p>
@@ -686,8 +704,8 @@ export function SetupScreen({ reason, detail, providerReadiness, refreshing, onR
             className="h-6 px-2 text-[11px] gap-1.5"
             onClick={runAuthFlow}
           >
-            {host === 'VS Code' && reason !== 'provider_not_installed' && reason !== 'provider_not_authenticated' ? <Terminal className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-            {host === 'VS Code' && reason !== 'provider_not_installed' && reason !== 'provider_not_authenticated' ? 'Run in terminal' : copyLabel === 'copied' ? 'Copied' : copyLabel === 'failed' ? 'Copy failed' : 'Copy command'}
+            {canRunInHost ? <Terminal className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+            {canRunInHost ? 'Run gh auth login' : copyLabel === 'copied' ? 'Copied' : copyLabel === 'failed' ? 'Copy failed' : 'Copy auth command'}
           </Button>
         </div>
         {lastCheckedAt && (
@@ -697,7 +715,7 @@ export function SetupScreen({ reason, detail, providerReadiness, refreshing, onR
         )}
       </div>}
       <div className="flex flex-wrap items-center justify-center gap-2">
-        {!draftIndexUnavailable && <Button
+        {providerFailure && <Button
           variant="outline"
           size="sm"
           className="gap-1.5 text-xs"
@@ -706,19 +724,20 @@ export function SetupScreen({ reason, detail, providerReadiness, refreshing, onR
           <Settings2 className="w-3.5 h-3.5" />
           Open Settings
         </Button>}
-        {!draftIndexUnavailable && <Button
+        {guideUrl && <Button
           variant="outline"
           size="sm"
-          className="gap-1.5 text-xs"
-          onClick={() => sendToHost({ type: 'openUrl', url: 'https://cli.github.com/manual/gh_auth_login' })}
+          className="h-auto min-h-8 max-w-full gap-1.5 whitespace-normal py-1.5 text-xs"
+          onClick={() => sendToHost({ type: 'openUrl', url: guideUrl })}
         >
           <ExternalLink className="w-3.5 h-3.5" />
-          Auth Guide
+          {recovery.guideLabel}
         </Button>}
         <Button variant="outline" size="sm" className="gap-1.5 text-xs" onClick={checkStatus} disabled={refreshing}>
           <RefreshCw className={cn('w-3 h-3', refreshing && 'animate-spin')} />
-          {reason === 'load_failed' ? 'Retry' : 'Check status'}
+          {recovery.kind === 'retry' ? recovery.label : 'Check status'}
         </Button>
+      </div>
       </div>
     </div>
   )

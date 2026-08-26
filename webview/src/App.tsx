@@ -5,7 +5,7 @@ import { ReviewPane, type ReviewPaneHandle } from './components/ReviewPane'
 import { onHostMessage, sendToHost, type PR } from './bridge/types'
 import { BRIDGE_PROTOCOL_VERSION } from './bridge/validation'
 import { AccessibleResizer } from './components/layout/AccessibleResizer'
-import { applyHostTheme } from './theme/hostTheme'
+import { applyHostTheme, sonnerThemeForHost } from './theme/hostTheme'
 import { Button } from './components/ui/button'
 import {
   AlertDialog,
@@ -109,6 +109,7 @@ export default function App() {
     providerReadiness?: import('./bridge/types').ProviderReadiness
   } | null>(null)
   const [setupRefreshing, setSetupRefreshing] = useState(false)
+  const [toastTheme, setToastTheme] = useState<'light' | 'dark' | 'system'>('system')
   const [narrow, setNarrow] = useState(() => window.innerWidth < 640)
   const [activePane, setActivePane] = useState<'list' | 'review'>('list')
   const [pendingPrSelection, setPendingPrSelection] = useState<PR | null>(null)
@@ -192,6 +193,7 @@ export default function App() {
       setSetupRefreshing(false)
     } else if (msg.type === 'themeChanged') {
       applyHostTheme(msg.theme)
+      setToastTheme(sonnerThemeForHost(msg.theme))
     }
   }), [])
 
@@ -244,7 +246,7 @@ export default function App() {
 
   return (
     <>
-    <Toaster theme="system" position="bottom-right" richColors />
+    <Toaster theme={toastTheme} position="bottom-right" richColors />
     <AlertDialog
       open={pendingPrSelection !== null}
       onOpenChange={(open) => {
@@ -279,7 +281,7 @@ export default function App() {
       </AlertDialogContent>
     </AlertDialog>
     {setup && (
-      <main className="fixed inset-0 z-50 min-h-0 overflow-clip bg-background" aria-label="PR Pilot setup">
+      <main className="fixed inset-0 z-50 min-h-0 overflow-x-hidden overflow-y-auto bg-background" aria-label="PR Pilot setup">
         <SetupScreen
           reason={setup.reason}
           detail={setup.detail}

@@ -92,6 +92,10 @@ jobs:
         working-directory: webview
         run: npm run test:a11y
 
+      - name: Run webview visual regression tests
+        working-directory: webview
+        run: npm run test:visual
+
       - name: Build webview
         working-directory: webview
         run: npm run build

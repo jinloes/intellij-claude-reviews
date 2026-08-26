@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.swing.AbstractButton;
 import javax.swing.BoxLayout;
@@ -109,6 +110,11 @@ class PluginSettingsComponentTest {
         void usesTaskBasedSectionsLabelsAndAttachedHints() throws Exception {
             runUiProbe("sections-and-hints");
         }
+
+        @Test
+        void keepsProfileNameCorrectionContextOpenUntilValidOrCancelled() throws Exception {
+            runUiProbe("profile-validation");
+        }
     }
 
     public static final class UiProbe {
@@ -119,6 +125,7 @@ class PluginSettingsComponentTest {
                     case "custom-instructions" -> verifyCustomInstructions();
                     case "profile-layout" -> verifyProfileLayout();
                     case "sections-and-hints" -> verifySectionsAndHints();
+                    case "profile-validation" -> verifyProfileNameValidation();
                     default -> throw new IllegalArgumentException("Unknown probe: " + args[0]);
                 }
             } catch (Throwable failure) {
@@ -261,6 +268,60 @@ class PluginSettingsComponentTest {
                 .isLessThanOrEqualTo(profileCombo.getPreferredSize().width);
     }
 
+    private static void verifyProfileNameValidation() {
+        List<String> addInitialValues = new ArrayList<>();
+        List<String> addValidationMessages = new ArrayList<>();
+        List<String> addResponses = List.of("   ", " Security ");
+        AtomicInteger addResponse = new AtomicInteger();
+        PluginSettingsComponent addComponent =
+                component(
+                        (parent, title, initialValue, validationMessage) -> {
+                            addInitialValues.add(initialValue);
+                            addValidationMessages.add(validationMessage);
+                            return addResponses.get(addResponse.getAndIncrement());
+                        });
+
+        button(addComponent.getPanel(), "Save as…").doClick();
+
+        assertThat(addInitialValues).containsExactly("", "   ");
+        assertThat(addValidationMessages)
+                .containsExactly(null, PluginSettingsComponent.PROFILE_NAME_REQUIRED);
+        assertThat(addComponent.getReviewGuidanceProfiles())
+                .extracting(profile -> profile.name)
+                .containsExactly("Security");
+
+        PluginSettingsComponent cancelComponent =
+                component((parent, title, initialValue, validationMessage) -> null);
+        button(cancelComponent.getPanel(), "Save as…").doClick();
+        assertThat(cancelComponent.getReviewGuidanceProfiles()).isEmpty();
+
+        PluginSettings.ReviewGuidanceProfile profile =
+                new PluginSettings.ReviewGuidanceProfile(
+                        "quality", "Quality", "security", "Check boundaries", "");
+        List<String> renameInitialValues = new ArrayList<>();
+        List<String> renameValidationMessages = new ArrayList<>();
+        List<String> renameResponses = List.of("\t", "Deep quality");
+        AtomicInteger renameResponse = new AtomicInteger();
+        PluginSettingsComponent renameComponent =
+                component(
+                        (parent, title, initialValue, validationMessage) -> {
+                            renameInitialValues.add(initialValue);
+                            renameValidationMessages.add(validationMessage);
+                            return renameResponses.get(renameResponse.getAndIncrement());
+                        });
+        renameComponent.setReviewGuidanceProfiles(List.of(profile));
+        renameComponent.setActiveReviewGuidanceProfileId(profile.id);
+
+        button(renameComponent.getPanel(), "Rename").doClick();
+
+        assertThat(renameInitialValues).containsExactly("Quality", "\t");
+        assertThat(renameValidationMessages)
+                .containsExactly(null, PluginSettingsComponent.PROFILE_NAME_REQUIRED);
+        assertThat(renameComponent.getReviewGuidanceProfiles())
+                .extracting(candidate -> candidate.name)
+                .containsExactly("Deep quality");
+    }
+
     private static void verifySectionsAndHints() {
         PluginSettingsComponent component = component();
         JPanel panel = component.getPanel();
@@ -333,6 +394,16 @@ class PluginSettingsComponentTest {
     private static PluginSettingsComponent component() {
         return new PluginSettingsComponent(
                 ignored -> authenticated("octocat"), ignored -> {}, Runnable::run, () -> null);
+    }
+
+    private static PluginSettingsComponent component(
+            PluginSettingsComponent.ProfileNamePrompt profileNamePrompt) {
+        return new PluginSettingsComponent(
+                ignored -> authenticated("octocat"),
+                ignored -> {},
+                Runnable::run,
+                () -> null,
+                profileNamePrompt);
     }
 
     @SuppressWarnings("unchecked")

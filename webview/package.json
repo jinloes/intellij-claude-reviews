@@ -12,7 +12,7 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "test": "npm run test:unit",
-    "test:logic": "tsx --test src/lib/*.test.ts src/bridge/*.test.ts",
+    "test:logic": "tsx --test src/lib/*.test.ts src/bridge/*.test.ts src/theme/contrast.test.ts",
     "test:component": "vitest run",
     "test:unit": "npm run test:logic && npm run test:component",
     "test:coverage": "vitest run --coverage",

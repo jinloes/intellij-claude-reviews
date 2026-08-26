@@ -8,6 +8,70 @@ export type SetupReason =
   | 'load_failed'
   | 'draft_index_unavailable'
 
+export interface SetupRecoveryAction {
+  kind: 'install' | 'authenticate' | 'retry' | 'check'
+  label: string
+  command?: string
+  guideLabel?: string
+  guideUrl?: string
+  canRunInHost?: boolean
+}
+
+const GH_INSTALL_URL = 'https://cli.github.com/'
+const GH_AUTH_URL = 'https://cli.github.com/manual/gh_auth_login'
+const CLAUDE_INSTALL_URL = 'https://code.claude.com/docs/en/setup'
+const CLAUDE_AUTH_URL = 'https://code.claude.com/docs/en/authentication'
+const COPILOT_INSTALL_URL = 'https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli'
+const COPILOT_AUTH_URL = 'https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli'
+
+export function setupRecoveryAction(
+  reason: SetupReason,
+  provider?: ProviderReadiness,
+): SetupRecoveryAction {
+  switch (reason) {
+    case 'gh_not_installed':
+      return {
+        kind: 'install',
+        label: 'Install GitHub CLI',
+        guideLabel: 'Open GitHub CLI install guide',
+        guideUrl: GH_INSTALL_URL,
+      }
+    case 'gh_not_authenticated':
+      return {
+        kind: 'authenticate',
+        label: 'Authenticate GitHub CLI',
+        command: 'gh auth login',
+        guideLabel: 'Open GitHub CLI authentication guide',
+        guideUrl: GH_AUTH_URL,
+        canRunInHost: true,
+      }
+    case 'provider_not_installed': {
+      const copilot = provider?.provider === 'copilot'
+      return {
+        kind: 'install',
+        label: copilot ? 'Install GitHub Copilot CLI' : 'Install Claude Code CLI',
+        guideLabel: copilot ? 'Open Copilot CLI install guide' : 'Open Claude Code install guide',
+        guideUrl: copilot ? COPILOT_INSTALL_URL : CLAUDE_INSTALL_URL,
+      }
+    }
+    case 'provider_not_authenticated': {
+      const copilot = provider?.provider === 'copilot'
+      const command = provider?.authCommand?.trim()
+      return {
+        kind: 'authenticate',
+        label: copilot ? 'Authenticate GitHub Copilot CLI' : 'Authenticate Claude Code CLI',
+        command: command || undefined,
+        guideLabel: copilot ? 'Open Copilot CLI authentication guide' : 'Open Claude Code authentication guide',
+        guideUrl: copilot ? COPILOT_AUTH_URL : CLAUDE_AUTH_URL,
+      }
+    }
+    case 'load_failed':
+      return { kind: 'retry', label: 'Retry' }
+    case 'draft_index_unavailable':
+      return { kind: 'check', label: 'Check status' }
+  }
+}
+
 export function setupSteps(
   reason: SetupReason,
   provider?: ProviderReadiness,
