@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -22,6 +23,7 @@ public final class DraftReviewCodec {
     private static final String VERDICT_TAG = "<!-- claude-verdict: ";
     private static final String SUMMARY_TAG = "<!-- claude-summary: ";
     private static final String COMMENTS_TAG = "<!-- claude-comments: ";
+    private static final String PAYLOAD_TAG = "<!-- pr-pilot-review:v1:";
     private static final String TAG_END = " -->";
     private static final String DETACHED_COMMENTS_HEADER =
             "**Comments not attached inline (invalid diff positions):**";
@@ -36,6 +38,34 @@ public final class DraftReviewCodec {
 
     DecodedReview decode(String body, List<ApiComment> apiComments) {
         String safeBody = body == null ? "" : body;
+        if (safeBody.startsWith(PAYLOAD_TAG)) {
+            try {
+                int end = safeBody.indexOf(TAG_END, PAYLOAD_TAG.length());
+                if (end < 0) throw new IllegalArgumentException("Unterminated review payload");
+                byte[] json =
+                        Base64.getDecoder()
+                                .decode(safeBody.substring(PAYLOAD_TAG.length(), end).trim());
+                EncodedReview payload = mapper.readValue(json, EncodedReview.class);
+                if (payload == null
+                        || payload.summary() == null
+                        || !VALID_VERDICTS.contains(payload.verdict())
+                        || payload.comments() == null
+                        || payload.comments().stream().anyMatch(c -> !validEncodedComment(c))) {
+                    throw new IllegalArgumentException("Invalid embedded review payload");
+                }
+                return new DecodedReview(
+                        payload.summary(),
+                        payload.verdict(),
+                        payload.comments().stream().map(DraftReviewCodec::toLineComment).toList(),
+                        false);
+            } catch (Exception exception) {
+                log.debug(
+                        "Embedded draft review payload was invalid; using GitHub comments ({})",
+                        exception.getClass().getName());
+                return fromApiComments("", "COMMENT", apiComments);
+            }
+        }
+
         String verdict = tag(safeBody, VERDICT_TAG, "COMMENT");
         boolean validVerdict = VALID_VERDICTS.contains(verdict);
         String summary = tag(safeBody, SUMMARY_TAG, "");
@@ -47,10 +77,7 @@ public final class DraftReviewCodec {
                     throw new IllegalArgumentException("Invalid embedded review metadata");
                 }
                 List<LineComment> lines = new ArrayList<>();
-                for (EncodedComment c : comments)
-                    lines.add(
-                            new LineComment(
-                                    c.f(), c.l(), c.t(), c.b(), c.s(), c.c(), c.cf(), c.r()));
+                for (EncodedComment c : comments) lines.add(toLineComment(c));
                 return new DecodedReview(summary, verdict, lines, false);
             } catch (Exception exception) {
                 log.debug(
@@ -61,6 +88,11 @@ public final class DraftReviewCodec {
         if (!validVerdict) {
             verdict = "COMMENT";
         }
+        return fromApiComments(summary, verdict, apiComments);
+    }
+
+    private static DecodedReview fromApiComments(
+            String summary, String verdict, List<ApiComment> apiComments) {
         List<LineComment> lines = new ArrayList<>();
         for (ApiComment c : apiComments) {
             String text = c.body() == null ? "" : c.body();
@@ -86,6 +118,18 @@ public final class DraftReviewCodec {
         return new DecodedReview(summary, verdict, lines, true);
     }
 
+    private static LineComment toLineComment(EncodedComment comment) {
+        return new LineComment(
+                comment.f(),
+                comment.l(),
+                comment.t(),
+                comment.b(),
+                comment.s(),
+                comment.c(),
+                comment.cf(),
+                comment.r());
+    }
+
     private String tag(String body, String start, String fallback) {
         int index = body.indexOf(start);
         if (index < 0) return fallback;
@@ -94,31 +138,37 @@ public final class DraftReviewCodec {
     }
 
     /**
-     * Encodes a summary/verdict/comment set into a GitHub review body carrying the PR Pilot
-     * HTML-comment tags {@link #decode} understands, plus a trailing "General Notes" section for
-     * comments with no file/line.
+     * Encodes a summary/verdict/comment set into one versioned, reversibly encoded PR Pilot
+     * payload, plus a trailing "General Notes" section for comments with no file/line.
      */
     String encodeBody(String summary, String verdict, List<LineComment> lineComments) {
-        StringBuilder sb = new StringBuilder(SUMMARY_TAG).append(escape(summary)).append(TAG_END);
-        sb.append("\n").append(VERDICT_TAG).append(escape(verdict)).append(TAG_END);
-
-        ArrayNode encoded = mapper.createArrayNode();
+        List<EncodedComment> encoded = new ArrayList<>();
         for (LineComment c : lineComments) {
-            ObjectNode obj = mapper.createObjectNode();
-            obj.put("f", c.file());
-            obj.put("l", c.line());
-            obj.put("t", c.type());
-            obj.put("b", c.body());
-            if (c.severity() != null && !c.severity().isBlank()) obj.put("s", c.severity());
-            if (c.category() != null && !c.category().isBlank()) obj.put("c", c.category());
-            if (c.confidence() != null && !c.confidence().isBlank()) obj.put("cf", c.confidence());
-            if (c.rationale() != null && !c.rationale().isBlank()) obj.put("r", c.rationale());
-            encoded.add(obj);
+            encoded.add(
+                    new EncodedComment(
+                            c.file(),
+                            c.line(),
+                            c.type(),
+                            c.body(),
+                            blankToNull(c.severity()),
+                            blankToNull(c.category()),
+                            blankToNull(c.confidence()),
+                            blankToNull(c.rationale())));
         }
-        sb.append("\n")
-                .append(COMMENTS_TAG)
-                .append(encoded.toString().replace("-->", "-- >"))
-                .append(TAG_END);
+        String serialized;
+        try {
+            serialized =
+                    Base64.getEncoder()
+                            .encodeToString(
+                                    mapper.writeValueAsBytes(
+                                            new EncodedReview(
+                                                    summary == null ? "" : summary,
+                                                    verdict,
+                                                    encoded)));
+        } catch (Exception exception) {
+            throw new IllegalStateException("Unable to encode draft review metadata", exception);
+        }
+        StringBuilder sb = new StringBuilder(PAYLOAD_TAG).append(serialized).append(TAG_END);
 
         List<LineComment> general =
                 lineComments.stream()
@@ -131,8 +181,8 @@ public final class DraftReviewCodec {
         return sb.toString();
     }
 
-    private static String escape(String s) {
-        return s == null ? "" : s.replace("-->", "-- >");
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 
     /**
@@ -311,4 +361,6 @@ public final class DraftReviewCodec {
 
     private record EncodedComment(
             String f, int l, String t, String b, String s, String c, String cf, String r) {}
+
+    private record EncodedReview(String summary, String verdict, List<EncodedComment> comments) {}
 }

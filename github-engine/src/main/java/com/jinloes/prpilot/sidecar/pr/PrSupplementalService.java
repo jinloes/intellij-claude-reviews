@@ -313,12 +313,12 @@ public final class PrSupplementalService {
 
     private static Failure failure(GitHubResponse response) {
         if (response.isSuccess()) return null;
-        if (response.statusCode() == 401 || response.statusCode() == 403)
+        if (response.isRateLimited())
+            return new Failure("rate_limited", "GitHub rate limit exceeded. Try again shortly.");
+        if (response.isUnauthenticated())
             return new Failure(
                     "not_authenticated", "Run 'gh auth login' in a terminal for this GitHub host.");
-        if (response.statusCode() == 429)
-            return new Failure("rate_limited", "GitHub rate limit exceeded. Try again shortly.");
-        if (response.statusCode() == 0)
+        if (response.isNetworkError())
             return new Failure("network_error", "Unable to reach GitHub. Check your connection.");
         return new Failure("api_failed", "GitHub API request failed.");
     }

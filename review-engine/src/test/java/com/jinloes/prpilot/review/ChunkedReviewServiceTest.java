@@ -54,6 +54,68 @@ class ChunkedReviewServiceTest {
     }
 
     @Test
+    void countsTriplePlusSourceLinesAsChangesInsideAHunk() {
+        StringBuilder diff = new StringBuilder();
+        for (int index = 0; index < 7; index++) {
+            String file = "File" + index + ".txt";
+            diff.append("diff --git a/").append(file).append(" b/").append(file).append("\n");
+            diff.append("--- a/").append(file).append("\n");
+            diff.append("+++ b/").append(file).append("\n");
+            diff.append("@@ -1 +1 @@\n");
+            diff.append(index == 0 ? "+++operator\n" : "+change\n");
+        }
+
+        assertThat(ChunkedReviewService.buildBatches(diff.toString()).get(0).files())
+                .contains("File0.txt");
+    }
+
+    @Test
+    void contractIndexUsesExplicitCorrectLineLabelsAcrossHunksAndContext() {
+        String diff =
+                "diff --git a/A.java b/A.java\n"
+                        + "--- a/A.java\n"
+                        + "+++ b/A.java\n"
+                        + "@@ -10,4 +20,4 @@\n"
+                        + " context one\n"
+                        + "-removed\n"
+                        + " context two\n"
+                        + "+++operator\n"
+                        + "@@ -50,2 +80,2 @@\n"
+                        + "-old call\n"
+                        + "+new call\n";
+
+        String index =
+                ChunkedReviewService.buildContractIndex(ChunkedReviewService.buildBatches(diff));
+
+        assertThat(index)
+                .contains("OLD 11 | -removed")
+                .contains("NEW 22 | +++operator")
+                .contains("OLD 50 | -old call")
+                .contains("NEW 80 | +new call");
+        assertThat(index).doesNotContain("\n@@", "\n+new call", "\n-old call");
+    }
+
+    @Test
+    void contractIndexTruncatesAtWholeLabelledLines() {
+        String longBody = "x".repeat(2_000);
+        StringBuilder diff = new StringBuilder();
+        for (int file = 0; file < 70; file++) {
+            diff.append("diff --git a/F").append(file).append(" b/F").append(file).append("\n");
+            diff.append("--- a/F").append(file).append("\n");
+            diff.append("+++ b/F").append(file).append("\n");
+            diff.append("@@ -1 +1 @@\n+").append(longBody).append("\n");
+        }
+
+        String index =
+                ChunkedReviewService.buildContractIndex(
+                        ChunkedReviewService.buildBatches(diff.toString()));
+
+        assertThat(index).endsWith("[contract index truncated at engine limit]\n");
+        assertThat(index.length())
+                .isLessThanOrEqualTo(ChunkedReviewService.MAX_RECONCILIATION_INDEX_CHARS);
+    }
+
+    @Test
     void reconcilesCrossFileContractAfterReviewingAllBatches() throws Exception {
         ChunkedReviewService service = new ChunkedReviewService();
         List<PRReviewRequest> requests = new ArrayList<>();

@@ -180,6 +180,32 @@ class CheckRunServiceTest {
         }
 
         @Test
+        void treatsStartupFailureAsFailingAndFetchesItsAnnotations() {
+            FakeClient client = new FakeClient();
+            client.responses.add(
+                    ok(
+                            checkRunsPayload(
+                                    checkRun("bootstrap", "completed", "startup_failure", 17))));
+            client.responses.add(
+                    ok(
+                            annotationsPayload(
+                                    annotation(
+                                            "scripts/start.sh",
+                                            3,
+                                            3,
+                                            "failure",
+                                            "runner did not start"))));
+
+            CheckStatusResult result = service(client).checkStatus(params());
+
+            assertThat(result.checkRuns())
+                    .singleElement()
+                    .returns(true, CheckRunSummary::isFailing);
+            assertThat(client.paths.get(1)).contains("/check-runs/17/annotations");
+            assertThat(result.summary()).contains("1 of 1 checks failing", "FAILING: bootstrap");
+        }
+
+        @Test
         void tellsTheModelExplicitlyThatPendingChecksAreNotKnownToPass() {
             FakeClient client = new FakeClient();
             client.responses.add(

@@ -19,7 +19,12 @@ public final class ChunkedReviewService {
     static final int MAX_FILES_PER_BATCH = 6;
     static final int MAX_DIFF_CHARS_PER_BATCH = 220_000;
     static final int MAX_RECONCILIATION_INDEX_CHARS = 120_000;
+    private static final int MAX_CHANGED_LINES_PER_FILE = 80;
+    private static final String CONTRACT_INDEX_TRUNCATED =
+            "\n[contract index truncated at engine limit]\n";
     private static final Pattern FILE_START = Pattern.compile("(?m)^diff --git ");
+    private static final Pattern HUNK_HEADER =
+            Pattern.compile("^@@ -(\\d+)(?:,\\d+)? \\+(\\d+)(?:,\\d+)? @@");
     private final ObjectMapper mapper;
 
     public ChunkedReviewService() {
@@ -185,10 +190,14 @@ public final class ChunkedReviewService {
                             index + 1 < starts.size() ? starts.get(index + 1) : diff.length());
             String path = "";
             int changedLines = 0;
+            boolean inHunk = false;
             for (String line : section.split("\\R")) {
-                if (line.startsWith("+++ b/")) path = line.substring(6).trim();
-                if ((line.startsWith("+") && !line.startsWith("+++"))
-                        || (line.startsWith("-") && !line.startsWith("---"))) {
+                if (line.startsWith("@@")) {
+                    inHunk = true;
+                    continue;
+                }
+                if (!inHunk && line.startsWith("+++ b/")) path = line.substring(6).trim();
+                if (inHunk && (line.startsWith("+") || line.startsWith("-"))) {
                     changedLines++;
                 }
             }
@@ -208,32 +217,81 @@ public final class ChunkedReviewService {
                 String.join("\n", files.stream().map(DiffFile::diff).toList()));
     }
 
-    private static String buildContractIndex(List<DiffBatch> batches) {
+    static String buildContractIndex(List<DiffBatch> batches) {
         StringBuilder index =
-                new StringBuilder("Changed files and contract-relevant diff lines:\n");
-        outer:
+                new StringBuilder(
+                        "Changed files and contract-relevant changed lines.\n"
+                                + "NEW n is a current-file line that may anchor a comment; OLD n "
+                                + "exists only before the change.\n");
         for (DiffBatch batch : batches) {
             for (DiffFile file : parseFiles(batch.diff())) {
-                index.append("\nFILE ").append(file.path()).append("\n");
-                String section =
-                        file.diff()
-                                .lines()
-                                .filter(
-                                        line ->
-                                                line.startsWith("@@")
-                                                        || (line.startsWith("+")
-                                                                && !line.startsWith("+++"))
-                                                        || (line.startsWith("-")
-                                                                && !line.startsWith("---")))
-                                .limit(80)
-                                .reduce("", (left, line) -> left + line + "\n");
-                if (index.length() + section.length() > MAX_RECONCILIATION_INDEX_CHARS) {
-                    index.append("\n[contract index truncated at engine limit]\n");
-                    break outer;
+                if (!appendIndex(index, "\nFILE " + file.path() + "\n")) {
+                    return truncatedIndex(index);
                 }
-                index.append(section);
+                int oldLine = -1;
+                int newLine = -1;
+                int emittedChanges = 0;
+                boolean fileTruncated = false;
+                for (String line : file.diff().split("\\R")) {
+                    Matcher hunk = HUNK_HEADER.matcher(line);
+                    if (hunk.find()) {
+                        oldLine = Integer.parseInt(hunk.group(1));
+                        newLine = Integer.parseInt(hunk.group(2));
+                        if (!appendIndex(index, "HUNK " + line + "\n")) {
+                            return truncatedIndex(index);
+                        }
+                        continue;
+                    }
+                    if (oldLine < 0 || newLine < 0) continue;
+                    if (line.startsWith("+")) {
+                        if (emittedChanges >= MAX_CHANGED_LINES_PER_FILE) {
+                            fileTruncated = true;
+                            break;
+                        }
+                        if (!appendIndex(index, "NEW " + newLine + " | " + line + "\n")) {
+                            return truncatedIndex(index);
+                        }
+                        newLine++;
+                        emittedChanges++;
+                    } else if (line.startsWith("-")) {
+                        if (emittedChanges >= MAX_CHANGED_LINES_PER_FILE) {
+                            fileTruncated = true;
+                            break;
+                        }
+                        if (!appendIndex(index, "OLD " + oldLine + " | " + line + "\n")) {
+                            return truncatedIndex(index);
+                        }
+                        oldLine++;
+                        emittedChanges++;
+                    } else if (line.startsWith(" ")) {
+                        oldLine++;
+                        newLine++;
+                    }
+                }
+                if (fileTruncated
+                        && !appendIndex(
+                                index,
+                                "[file changed lines truncated at "
+                                        + MAX_CHANGED_LINES_PER_FILE
+                                        + "]\n")) {
+                    return truncatedIndex(index);
+                }
             }
         }
+        return index.toString();
+    }
+
+    private static boolean appendIndex(StringBuilder index, String text) {
+        if (index.length() + text.length()
+                > MAX_RECONCILIATION_INDEX_CHARS - CONTRACT_INDEX_TRUNCATED.length()) {
+            return false;
+        }
+        index.append(text);
+        return true;
+    }
+
+    private static String truncatedIndex(StringBuilder index) {
+        index.append(CONTRACT_INDEX_TRUNCATED);
         return index.toString();
     }
 

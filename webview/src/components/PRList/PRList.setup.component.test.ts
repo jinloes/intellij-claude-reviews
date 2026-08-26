@@ -44,4 +44,14 @@ describe('provider onboarding steps', () => {
 
     expect(steps.slice(2, 4).map((step) => step.done)).toEqual([true, true])
   })
+
+  it('shows repair guidance instead of authentication steps for an unavailable draft index', () => {
+    const steps = setupSteps('draft_index_unavailable')
+
+    expect(steps.map((step) => step.label)).toEqual([
+      'Repair the preserved draft index',
+      'Refresh PR Pilot',
+    ])
+    expect(steps[0].detail).toContain('pending-prs.json')
+  })
 })

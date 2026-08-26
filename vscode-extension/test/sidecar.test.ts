@@ -409,6 +409,7 @@ test('SidecarClient reports a missing packaged jar before spawning', async () =>
   const client = new SidecarClient(path.join(tempRoot, 'missing.jar'), 'java', harness.spawnSidecar);
 
   await assert.rejects(client.initialize(), /was not found.*Reinstall the extension/);
+  await assert.rejects(client.initialize(), /was not found.*Reinstall the extension/);
   assert.equal(harness.commands.length, 0);
 });
 
@@ -428,6 +429,8 @@ test('SidecarClient rejects incompatible protocols and missing capabilities', as
   const incompatible = createSidecarHarness(() => ({ ...initializeResult, protocolVersion: 2 }));
   const incompatibleClient = new SidecarClient(fakeJar, 'java', incompatible.spawnSidecar);
   await assert.rejects(incompatibleClient.initialize(), /protocol mismatch.*expected 1, got 2/);
+  await assert.rejects(incompatibleClient.initialize(), /protocol mismatch.*expected 1, got 2/);
+  assert.equal(incompatible.commands.length, 1);
 
   const incomplete = createSidecarHarness(() => ({
     ...initializeResult,
@@ -527,6 +530,123 @@ test('SidecarClient cannot restart after disposal', async () => {
   await assert.rejects(client.initialize(), /has been disposed/);
   await assert.rejects(client.restart(), /has been disposed/);
   assert.equal(harness.commands.length, 1);
+});
+
+test('SidecarClient respawns on the next request after an unexpected exit', async () => {
+  let answerAuth = false;
+  const harness = createSidecarHarness((method) => {
+    if (method === 'initialize') return initializeResult;
+    return answerAuth
+      ? { status: 'authenticated', username: 'octocat', message: 'ok' }
+      : NO_RESPONSE;
+  });
+  const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar);
+  await client.initialize();
+
+  const interrupted = client.checkGitHubAuth('https://github.com');
+  while (!harness.methods.includes('github/checkAuth')) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  harness.children[0].emit('exit', 1, null);
+
+  await assert.rejects(interrupted, /exited unexpectedly/);
+  answerAuth = true;
+  const recovered = await client.checkGitHubAuth('https://github.com');
+
+  assert.equal(recovered.username, 'octocat');
+  assert.equal(harness.commands.length, 2);
+  client.dispose();
+});
+
+test('SidecarClient recovers after an invalid frame header', async () => {
+  const harness = createSidecarHarness((method) => method === 'initialize'
+    ? initializeResult
+    : { status: 'authenticated', username: 'octocat', message: 'ok' });
+  const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar);
+  await client.initialize();
+
+  (harness.children[0].stdout as PassThrough).write(
+    Buffer.from('Broken-Header\r\n\r\n', 'ascii'),
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal((await client.checkGitHubAuth('https://github.com')).username, 'octocat');
+  assert.equal(harness.commands.length, 2);
+  client.dispose();
+});
+
+test('SidecarClient recovers after malformed JSON from the sidecar', async () => {
+  const harness = createSidecarHarness((method) => method === 'initialize'
+    ? initializeResult
+    : { status: 'authenticated', username: 'octocat', message: 'ok' });
+  const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar);
+  await client.initialize();
+
+  (harness.children[0].stdout as PassThrough).write(encodeFrame('{not-json'));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal((await client.checkGitHubAuth('https://github.com')).username, 'octocat');
+  assert.equal(harness.commands.length, 2);
+  client.dispose();
+});
+
+test('SidecarClient recovers after a stdin write failure', async () => {
+  const harness = createSidecarHarness((method) => method === 'initialize'
+    ? initializeResult
+    : { status: 'authenticated', username: 'octocat', message: 'ok' });
+  const client = new SidecarClient(fakeJar, 'java', harness.spawnSidecar);
+  await client.initialize();
+
+  const failingStdin = harness.children[0].stdin as unknown as {
+    write: (chunk: Uint8Array, callback: (error?: Error | null) => void) => boolean;
+  };
+  failingStdin.write = (_chunk, callback) => {
+    queueMicrotask(() => callback(new Error('broken pipe')));
+    return false;
+  };
+
+  await assert.rejects(client.checkGitHubAuth('https://github.com'), /broken pipe/);
+  assert.equal((await client.checkGitHubAuth('https://github.com')).username, 'octocat');
+  assert.equal(harness.commands.length, 2);
+  client.dispose();
+});
+
+test('SidecarClient bounds consecutive automatic recovery attempts', async () => {
+  const harness = createSidecarHarness((method) => method === 'initialize'
+    ? initializeResult
+    : { status: 'authenticated', username: 'octocat', message: 'ok' });
+  let failSpawnedChildren = false;
+  const spawnSidecar: SidecarSpawn = (command, args, options) => {
+    const child = harness.spawnSidecar(command, args, options);
+    if (failSpawnedChildren) {
+      queueMicrotask(() => child.emit('exit', 1, null));
+    }
+    return child;
+  };
+  const exhausted: Error[] = [];
+  const client = new SidecarClient(
+    fakeJar,
+    'java',
+    spawnSidecar,
+    undefined,
+    (failure) => exhausted.push(failure),
+  );
+  await client.checkGitHubAuth('https://github.com');
+  failSpawnedChildren = true;
+  harness.children[0].emit('exit', 1, null);
+
+  await assert.rejects(
+    client.checkGitHubAuth('https://github.com'),
+    /Automatic recovery failed after 3 attempts.*Use Retry/,
+  );
+  await assert.rejects(
+    client.checkGitHubAuth('https://github.com'),
+    /Automatic recovery failed after 3 attempts.*Use Retry/,
+  );
+
+  assert.equal(harness.commands.length, 4);
+  assert.equal(exhausted.length, 1);
+  client.dispose();
 });
 
 // ── Phase 1 prompt context (best-effort reads) ────────────────────────────────

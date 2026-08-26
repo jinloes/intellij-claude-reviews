@@ -148,6 +148,7 @@ test('buildSettingsHtml exposes notification health, retry, and dependent contro
     assert.match(html, /id="retryNotifications"/);
     assert.match(html, /type: 'retryNotifications'/);
     assert.match(html, /applyNotificationVisibility\(state\.notificationsEnabled\)/);
+    assert.match(html, /Notifications are partially working:/);
     assert.match(html, /Notification polling failed:/);
 });
 

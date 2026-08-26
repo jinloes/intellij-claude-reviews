@@ -7,7 +7,7 @@ package com.jinloes.prpilot.sidecar.pr;
  * @param status lifecycle state: {@code queued}, {@code in_progress}, or {@code completed}
  * @param conclusion outcome when {@code status} is {@code completed}, else empty — one of {@code
  *     success}, {@code failure}, {@code neutral}, {@code cancelled}, {@code timed_out}, {@code
- *     action_required}, {@code skipped}, or {@code stale}
+ *     action_required}, {@code startup_failure}, {@code skipped}, or {@code stale}
  * @param output bounded {@code output.title}/{@code output.summary} text, empty when absent
  */
 public record CheckRunSummary(String name, String status, String conclusion, String output) {
@@ -16,7 +16,8 @@ public record CheckRunSummary(String name, String status, String conclusion, Str
     public boolean isFailing() {
         return "failure".equals(conclusion)
                 || "timed_out".equals(conclusion)
-                || "action_required".equals(conclusion);
+                || "action_required".equals(conclusion)
+                || "startup_failure".equals(conclusion);
     }
 
     /** True when the check has not produced a conclusion yet. */

@@ -137,6 +137,15 @@ void test('validates provider setup readiness states', () => {
   }), null)
 })
 
+void test('accepts the IntelliJ draft-index recovery reason', () => {
+  assert.notEqual(parseIncomingMessage({
+    ...version,
+    type: 'setupRequired',
+    reason: 'draft_index_unavailable',
+    detail: 'Repair the preserved index, then refresh.',
+  }), null)
+})
+
 void test('validates all optional draft metadata', () => {
   assert.notEqual(parseIncomingMessage({
     ...version,

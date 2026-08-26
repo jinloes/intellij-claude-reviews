@@ -2,6 +2,7 @@ package com.jinloes.prpilot.review;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.copilot.rpc.McpHttpServerConfig;
 import com.github.copilot.rpc.McpServerConfig;
 import com.github.copilot.rpc.McpStdioServerConfig;
@@ -71,6 +72,79 @@ class CopilotMcpConfigTest {
             McpHttpServerConfig http = (McpHttpServerConfig) servers.get("remote");
             assertThat(http.getUrl()).isEqualTo("https://mcp.example.com");
             assertThat(http.getHeaders()).containsEntry("Authorization", "Bearer x");
+        }
+
+        @Test
+        void preservesExplicitEmptyToolsForBothTransports() {
+            Map<String, McpServerConfig> servers =
+                    CopilotMcpConfig.parseServers(
+                            "{\"mcpServers\":{"
+                                    + "\"stdio\":{\"command\":\"node\",\"tools\":[]},"
+                                    + "\"http\":{\"url\":\"https://mcp.example.com\",\"tools\":[]}}}");
+
+            McpStdioServerConfig stdio = (McpStdioServerConfig) servers.get("stdio");
+            McpHttpServerConfig http = (McpHttpServerConfig) servers.get("http");
+            assertThat(stdio.getTools()).isEmpty();
+            assertThat(http.getTools()).isEmpty();
+            ObjectMapper mapper = new ObjectMapper();
+            assertThat(mapper.valueToTree(stdio).path("tools").isArray()).isTrue();
+            assertThat(mapper.valueToTree(http).path("tools").isArray()).isTrue();
+        }
+
+        @Test
+        void leavesToolsUnsetWhenTheFieldIsAbsent() {
+            Map<String, McpServerConfig> servers =
+                    CopilotMcpConfig.parseServers(
+                            "{\"mcpServers\":{"
+                                    + "\"stdio\":{\"command\":\"node\"},"
+                                    + "\"http\":{\"url\":\"https://mcp.example.com\"}}}");
+
+            assertThat(((McpStdioServerConfig) servers.get("stdio")).getTools()).isNull();
+            assertThat(((McpHttpServerConfig) servers.get("http")).getTools()).isNull();
+        }
+
+        @Test
+        void rejectsMalformedToolsInsteadOfBroadeningThePolicy() {
+            Map<String, McpServerConfig> servers =
+                    CopilotMcpConfig.parseServers(
+                            "{\"mcpServers\":{"
+                                    + "\"notArray\":{\"command\":\"node\",\"tools\":\"all\"},"
+                                    + "\"mixed\":{\"url\":\"https://mcp.example.com\",\"tools\":[\"ok\",1]},"
+                                    + "\"valid\":{\"command\":\"node\",\"tools\":[\"search\"]}}}");
+
+            assertThat(servers).containsOnlyKeys("valid");
+        }
+
+        @Test
+        void mapsPositiveTimeoutToBothTransportsAndSerialization() {
+            Map<String, McpServerConfig> servers =
+                    CopilotMcpConfig.parseServers(
+                            "{\"mcpServers\":{"
+                                    + "\"stdio\":{\"command\":\"node\",\"timeout\":1500},"
+                                    + "\"http\":{\"url\":\"https://mcp.example.com\",\"timeout\":2500}}}");
+
+            McpStdioServerConfig stdio = (McpStdioServerConfig) servers.get("stdio");
+            McpHttpServerConfig http = (McpHttpServerConfig) servers.get("http");
+            assertThat(stdio.getTimeout()).isEqualTo(1500);
+            assertThat(http.getTimeout()).isEqualTo(2500);
+            ObjectMapper mapper = new ObjectMapper();
+            assertThat(mapper.valueToTree(stdio).path("timeout").asInt()).isEqualTo(1500);
+            assertThat(mapper.valueToTree(http).path("timeout").asInt()).isEqualTo(2500);
+        }
+
+        @Test
+        void rejectsNonPositiveFractionalAndOutOfRangeTimeouts() {
+            Map<String, McpServerConfig> servers =
+                    CopilotMcpConfig.parseServers(
+                            "{\"mcpServers\":{"
+                                    + "\"zero\":{\"command\":\"node\",\"timeout\":0},"
+                                    + "\"negative\":{\"command\":\"node\",\"timeout\":-1},"
+                                    + "\"fraction\":{\"command\":\"node\",\"timeout\":1.5},"
+                                    + "\"large\":{\"command\":\"node\",\"timeout\":2147483648},"
+                                    + "\"text\":{\"command\":\"node\",\"timeout\":\"1000\"},"
+                                    + "\"valid\":{\"command\":\"node\",\"timeout\":1}}}");
+
+            assertThat(servers).containsOnlyKeys("valid");
         }
 
         @Test

@@ -65,7 +65,7 @@ public final class GitHubHttpClient {
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
                 GitHubResponse response = transport.send(request);
-                if (isRetryable(response.statusCode()) && attempt < MAX_ATTEMPTS) {
+                if (isRetryable(response) && attempt < MAX_ATTEMPTS) {
                     backoff.pause(attempt);
                     continue;
                 }
@@ -105,8 +105,8 @@ public final class GitHubHttpClient {
                 .build();
     }
 
-    private static boolean isRetryable(int statusCode) {
-        return statusCode == 429 || statusCode >= 500;
+    private static boolean isRetryable(GitHubResponse response) {
+        return response.isRateLimited() || response.statusCode() >= 500;
     }
 
     /** Consumes a streamed response body together with its status code. */
@@ -137,7 +137,8 @@ public final class GitHubHttpClient {
             HttpResponse<String> response =
                     httpClient.send(
                             request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            return new GitHubResponse(response.statusCode(), response.body());
+            return GitHubResponse.fromHeaders(
+                    response.statusCode(), response.body(), response.headers().map());
         }
 
         @Override

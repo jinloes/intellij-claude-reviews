@@ -2,6 +2,8 @@ package com.jinloes.prpilot.sidecar.github;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
@@ -32,8 +34,62 @@ class GitHubFailureTest {
         void mapsRateLimitingSeparatelyFromGenericFailure() {
             assertThat(GitHubFailure.of(new GitHubResponse(429, "")))
                     .isEqualTo(GitHubFailure.RATE_LIMITED);
+            assertThat(
+                            GitHubFailure.of(
+                                    new GitHubResponse(
+                                            403,
+                                            "",
+                                            Map.of(
+                                                    "x-ratelimit-remaining",
+                                                    "0",
+                                                    "x-ratelimit-reset",
+                                                    "1900000000"))))
+                    .isEqualTo(GitHubFailure.RATE_LIMITED);
+            assertThat(GitHubFailure.of(new GitHubResponse(403, "", Map.of("retry-after", "60"))))
+                    .isEqualTo(GitHubFailure.RATE_LIMITED);
+            assertThat(
+                            GitHubFailure.of(
+                                    new GitHubResponse(
+                                            403,
+                                            "{\"message\":\"You have exceeded a secondary rate limit.\"}")))
+                    .isEqualTo(GitHubFailure.RATE_LIMITED);
             assertThat(GitHubFailure.of(new GitHubResponse(500, "")))
                     .isEqualTo(GitHubFailure.API_FAILED);
+        }
+
+        @Test
+        void keepsUnknownAndPermission403AsAuthorizationFailures() {
+            assertThat(
+                            GitHubFailure.of(
+                                    new GitHubResponse(
+                                            403,
+                                            "{\"message\":\"Resource not accessible by integration\"}")))
+                    .isEqualTo(GitHubFailure.NOT_AUTHENTICATED);
+            assertThat(
+                            GitHubFailure.of(
+                                    new GitHubResponse(
+                                            403, "", Map.of("x-ratelimit-remaining", "42"))))
+                    .isEqualTo(GitHubFailure.NOT_AUTHENTICATED);
+        }
+
+        @Test
+        void retainsOnlyNormalizedSafeRateLimitHeaders() {
+            GitHubResponse response =
+                    GitHubResponse.fromHeaders(
+                            403,
+                            "",
+                            Map.of(
+                                    "X-RateLimit-Remaining",
+                                    List.of("0"),
+                                    "Retry-After",
+                                    List.of("30"),
+                                    "Set-Cookie",
+                                    List.of("private")));
+
+            assertThat(response.rateLimitHeaders())
+                    .containsOnly(
+                            Map.entry("x-ratelimit-remaining", "0"),
+                            Map.entry("retry-after", "30"));
         }
 
         @Test

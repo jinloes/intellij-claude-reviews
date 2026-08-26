@@ -38,13 +38,17 @@ public final class CiFindingSuppressor {
     static final int LINE_TOLERANCE = 2;
 
     /**
-     * Fraction of the annotation's distinctive words that must appear in the comment. High on
-     * purpose: at 0.6 a comment has to be substantially about the same thing, not merely near it.
+     * Jaccard similarity required across the annotation and comment's distinctive words. Using the
+     * union as the denominator is intentionally symmetric: a terse CI annotation cannot suppress a
+     * longer review finding merely because all of its few words happen to be present.
      */
     static final double MIN_OVERLAP = 0.6;
 
     /** Below this length a word carries no signal ("the", "a", "null" is kept, "is" is not). */
     private static final int MIN_TOKEN_LENGTH = 4;
+
+    /** Short phrases are too ambiguous to justify making a review finding disappear. */
+    private static final int MIN_SIGNAL_TOKENS = 4;
 
     private CiFindingSuppressor() {}
 
@@ -77,7 +81,10 @@ public final class CiFindingSuppressor {
         log.info("Suppressed {} review comment(s) already reported by CI", dropped);
         ReviewResult result = new ReviewResult();
         result.setSummary(review.getSummary());
-        result.setVerdict(review.getVerdict());
+        result.setVerdict(
+                kept.isEmpty() && "REQUEST_CHANGES".equals(review.getVerdict())
+                        ? "COMMENT"
+                        : review.getVerdict());
         result.setLineComments(kept);
         return result;
     }
@@ -87,11 +94,13 @@ public final class CiFindingSuppressor {
         for (CiAnnotation annotation : annotations) {
             if (annotation == null || !sameLocation(comment, annotation)) continue;
             Set<String> annotationTokens = tokens(annotation.getMessage());
-            // An annotation with no distinctive words ("Process completed with exit code 1")
-            // would otherwise match everything on its line.
-            if (annotationTokens.isEmpty()) continue;
+            if (annotationTokens.size() < MIN_SIGNAL_TOKENS
+                    || commentTokens.size() < MIN_SIGNAL_TOKENS) {
+                continue;
+            }
             long shared = annotationTokens.stream().filter(commentTokens::contains).count();
-            if ((double) shared / annotationTokens.size() >= MIN_OVERLAP) {
+            int union = annotationTokens.size() + commentTokens.size() - (int) shared;
+            if ((double) shared / union >= MIN_OVERLAP) {
                 return true;
             }
         }

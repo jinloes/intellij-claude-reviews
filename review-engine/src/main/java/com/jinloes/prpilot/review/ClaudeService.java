@@ -1203,16 +1203,19 @@ public class ClaudeService {
         for (int i = 0; i < lines.length; i++) {
             String line = lines[i];
             Matcher hunk = HUNK_HEADER.matcher(line);
-            if (hunk.find()) {
+            if (line.startsWith("diff --git ")) {
+                newLine = -1;
+                out.append(line);
+            } else if (hunk.find()) {
                 newLine = Integer.parseInt(hunk.group(1));
                 out.append(line);
             } else if (newLine < 0) {
                 // Pre-hunk header lines (diff --git, index, ---, +++): leave untouched.
                 out.append(line);
-            } else if (line.startsWith("+") && !line.startsWith("+++")) {
+            } else if (line.startsWith("+")) {
                 out.append(newLine).append("| ").append(line);
                 newLine++;
-            } else if (line.startsWith("-") && !line.startsWith("---")) {
+            } else if (line.startsWith("-")) {
                 out.append("| ").append(line);
             } else if (line.startsWith(" ")) {
                 out.append(newLine).append("| ").append(line);

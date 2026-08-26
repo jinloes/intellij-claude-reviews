@@ -20,6 +20,7 @@ const HEADER_TERMINATOR = '\r\n\r\n';
 const SIDECAR_PROTOCOL_VERSION = 1;
 const MAX_LINKED_ISSUES = 3;
 const MAX_GITHUB_ISSUE_NUMBER = 999_999_999;
+const MAX_RUNTIME_RECOVERY_ATTEMPTS = 3;
 /**
  * Every capability the sidecar advertises, all of which this client calls. Kept exhaustive on
  * purpose: each of these has a `SidecarClient` method, so a sidecar missing one produces a broken
@@ -69,6 +70,8 @@ interface SidecarRpcResponse {
     result?: unknown;
     error?: { code?: number; message?: string };
 }
+
+class StickySidecarFailure extends Error {}
 
 export type SidecarSpawn = (
     command: string,
@@ -759,6 +762,9 @@ export function extractFrames(buffer: Uint8Array, onFrame: (body: string) => voi
 export class SidecarClient {
     private child: ChildProcessWithoutNullStreams | null = null;
     private startupFailure: Error | null = null;
+    private runtimeFailure: Error | null = null;
+    private runtimeRecoveryAttempts = 0;
+    private recoveryPrompted = false;
     private readyPromise: Promise<void> | null = null;
     private disposed = false;
     private nextId = 1;
@@ -772,32 +778,73 @@ export class SidecarClient {
         private readonly javaBinary = 'java',
         private readonly spawnSidecar: SidecarSpawn = spawn,
         private readonly requestTimeoutMs = REQUEST_TIMEOUT_MS,
+        private readonly onRecoveryExhausted?: (failure: Error) => void,
     ) {}
 
     async initialize(): Promise<void> {
         if (this.disposed) throw new Error('PR Pilot Java sidecar has been disposed. Reload VS Code.');
         if (this.startupFailure) throw this.startupFailure;
         if (this.readyPromise) return this.readyPromise;
-        this.ensureStarted();
-        this.readyPromise = this.requestRaw('initialize', {}).then((value) => {
+        if (this.runtimeFailure) {
+            if (this.runtimeRecoveryAttempts >= MAX_RUNTIME_RECOVERY_ATTEMPTS) {
+                const failure = new Error(
+                    `${this.runtimeFailure.message} Automatic recovery failed after ${MAX_RUNTIME_RECOVERY_ATTEMPTS} attempts. Use Retry to start the sidecar again.`,
+                );
+                if (!this.recoveryPrompted) {
+                    this.recoveryPrompted = true;
+                    this.onRecoveryExhausted?.(failure);
+                }
+                throw failure;
+            }
+            this.runtimeRecoveryAttempts++;
+            this.runtimeFailure = null;
+            this.readyPromise = null;
+            this.buffer = Buffer.alloc(0);
+            this.stderr = '';
+        }
+
+        try {
+            this.ensureStarted();
+        } catch (err) {
+            throw err instanceof Error ? err : new Error(String(err));
+        }
+        const initializingChild = this.child;
+        const ready = this.requestRaw('initialize', {}).then((value) => {
             const result = parseInitializeResult(value);
-            if (!result) throw new Error('PR Pilot Java sidecar returned an invalid initialization response.');
+            if (!result) {
+                throw new StickySidecarFailure(
+                    'PR Pilot Java sidecar returned an invalid initialization response. Reinstall the extension.',
+                );
+            }
             if (result.protocolVersion !== SIDECAR_PROTOCOL_VERSION) {
-                throw new Error(
+                throw new StickySidecarFailure(
                     `PR Pilot Java sidecar protocol mismatch (expected ${SIDECAR_PROTOCOL_VERSION}, got ${result.protocolVersion}). Reinstall the extension.`,
                 );
             }
             const missing = REQUIRED_CAPABILITIES.filter((capability) => result.capabilities[capability] !== true);
             if (missing.length > 0) {
-                throw new Error(`PR Pilot Java sidecar is missing required capabilities: ${missing.join(', ')}. Reinstall the extension.`);
+                throw new StickySidecarFailure(
+                    `PR Pilot Java sidecar is missing required capabilities: ${missing.join(', ')}. Reinstall the extension.`,
+                );
             }
+            if (this.child !== initializingChild) {
+                throw this.runtimeFailure ?? new Error('PR Pilot Java sidecar stopped during initialization.');
+            }
+            this.runtimeFailure = null;
+            this.runtimeRecoveryAttempts = 0;
+            this.recoveryPrompted = false;
         }).catch((err: unknown) => {
             const failure = err instanceof Error ? err : new Error(String(err));
-            this.startupFailure = failure;
-            this.stopChild();
-            throw failure;
+            if (this.startupFailure) throw this.startupFailure;
+            if (failure instanceof StickySidecarFailure) {
+                this.markStartupFailure(failure);
+                throw failure;
+            }
+            if (!this.runtimeFailure) this.markRuntimeFailure(failure, initializingChild);
+            return this.initialize();
         });
-        return this.readyPromise;
+        this.readyPromise = ready;
+        return ready;
     }
 
     private ensureStarted(): void {
@@ -805,12 +852,18 @@ export class SidecarClient {
         if (this.startupFailure) throw this.startupFailure;
         if (this.child) return;
         if (!this.jarPath) {
-            throw new Error(
+            const failure = new StickySidecarFailure(
                 'PR Pilot Java sidecar is missing. Reinstall the extension or run ./gradlew :sidecar:bootJar for local development.',
             );
+            this.markStartupFailure(failure);
+            throw failure;
         }
         if (!fs.existsSync(this.jarPath)) {
-            throw new Error(`PR Pilot Java sidecar was not found at ${this.jarPath}. Reinstall the extension.`);
+            const failure = new StickySidecarFailure(
+                `PR Pilot Java sidecar was not found at ${this.jarPath}. Reinstall the extension.`,
+            );
+            this.markStartupFailure(failure);
+            throw failure;
         }
         try {
             const child = this.spawnSidecar(
@@ -821,33 +874,41 @@ export class SidecarClient {
             child.on('error', (err: NodeJS.ErrnoException) => {
                 if (this.disposed || this.child !== child) return;
                 const failure = err.code === 'ENOENT'
-                    ? new Error('Java was not found. Install Java 17 or newer and ensure java is on PATH.')
+                    ? new StickySidecarFailure('Java was not found. Install Java 17 or newer and ensure java is on PATH.')
                     : new Error(`PR Pilot Java sidecar failed to start: ${err.message}`);
-                this.startupFailure = failure;
-                this.child = null;
-                this.failAllPending(this.startupFailure);
+                if (failure instanceof StickySidecarFailure) this.markStartupFailure(failure, child);
+                else this.markRuntimeFailure(failure, child);
             });
             child.on('exit', (code, signal) => {
                 if (this.disposed || this.child !== child) return;
-                this.child = null;
-                this.startupFailure = this.processExitError(code, signal);
-                this.failAllPending(this.startupFailure);
+                const failure = this.processExitError(code, signal);
+                if (failure instanceof StickySidecarFailure) this.markStartupFailure(failure, child);
+                else this.markRuntimeFailure(failure, child);
             });
-            child.stdout.on('data', (chunk: Buffer) => this.onData(chunk));
+            child.stdout.on('data', (chunk: Buffer) => {
+                if (this.child === child) this.onData(chunk, child);
+            });
             child.stderr.on('data', (chunk: Buffer) => {
-                this.stderr = (this.stderr + chunk.toString('utf8')).slice(-4_096);
+                if (this.child === child) {
+                    this.stderr = (this.stderr + chunk.toString('utf8')).slice(-4_096);
+                }
             });
             this.child = child;
         } catch (err) {
-            const failure = err instanceof Error
-                ? new Error(`PR Pilot Java sidecar failed to start: ${err.message}`)
-                : new Error('PR Pilot Java sidecar failed to start.');
-            this.startupFailure = failure;
+            const failure = (err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
+                ? new StickySidecarFailure(
+                    'Java was not found. Install Java 17 or newer and ensure java is on PATH.',
+                )
+                : err instanceof Error
+                    ? new Error(`PR Pilot Java sidecar failed to start: ${err.message}`)
+                    : new Error('PR Pilot Java sidecar failed to start.');
+            if (failure instanceof StickySidecarFailure) this.markStartupFailure(failure);
+            else this.markRuntimeFailure(failure);
             throw failure;
         }
     }
 
-    private onData(chunk: Buffer): void {
+    private onData(chunk: Buffer, child: ChildProcessWithoutNullStreams): void {
         try {
             this.buffer = extractFrames(
                 Buffer.concat([this.buffer, chunk]),
@@ -855,9 +916,7 @@ export class SidecarClient {
             );
         } catch (err) {
             const failure = err instanceof Error ? err : new Error(String(err));
-            this.startupFailure = failure;
-            this.failAllPending(failure);
-            this.stopChild();
+            this.markRuntimeFailure(failure, child);
         }
     }
 
@@ -867,9 +926,7 @@ export class SidecarClient {
             message = JSON.parse(body) as SidecarRpcResponse & { method?: string; params?: unknown };
         } catch {
             const failure = new Error('PR Pilot Java sidecar sent malformed JSON.');
-            this.startupFailure = failure;
-            this.failAllPending(failure);
-            this.stopChild();
+            this.markRuntimeFailure(failure);
             return;
         }
         if (typeof message.id !== 'number') {
@@ -880,11 +937,15 @@ export class SidecarClient {
         }
         const pending = this.pending.get(message.id);
         if (!pending) return;
+        if (message.jsonrpc !== '2.0' || (message.error === undefined) === (message.result === undefined)) {
+            this.markRuntimeFailure(
+                new Error('PR Pilot Java sidecar returned a malformed JSON-RPC response.'),
+            );
+            return;
+        }
         this.pending.delete(message.id);
         this.notificationHandlers.delete(message.id);
-        if (message.jsonrpc !== '2.0' || (message.error === undefined) === (message.result === undefined)) {
-            pending.reject(new Error('PR Pilot Java sidecar returned a malformed JSON-RPC response.'));
-        } else if (message.error) {
+        if (message.error) {
             pending.reject(new Error(message.error.message ?? 'Sidecar error'));
         } else {
             pending.resolve(message.result);
@@ -904,6 +965,33 @@ export class SidecarClient {
         } else if (method === 'reviews/chatChunk' && typeof p?.text === 'string') {
             handlers.onChatChunk?.(p.text);
         }
+    }
+
+    private markRuntimeFailure(
+        failure: Error,
+        expectedChild?: ChildProcessWithoutNullStreams | null,
+    ): void {
+        if (this.disposed) return;
+        if (expectedChild && this.child !== expectedChild) return;
+        this.runtimeFailure = failure;
+        this.readyPromise = null;
+        this.buffer = Buffer.alloc(0);
+        this.failAllPending(failure);
+        this.stopChild();
+    }
+
+    private markStartupFailure(
+        failure: Error,
+        expectedChild?: ChildProcessWithoutNullStreams | null,
+    ): void {
+        if (this.disposed) return;
+        if (expectedChild && this.child !== expectedChild) return;
+        this.startupFailure = failure;
+        this.runtimeFailure = null;
+        this.readyPromise = null;
+        this.buffer = Buffer.alloc(0);
+        this.failAllPending(failure);
+        this.stopChild();
     }
 
     private failAllPending(err: Error): void {
@@ -927,6 +1015,9 @@ export class SidecarClient {
         this.failAllPending(new Error('PR Pilot Java sidecar is restarting.'));
         this.stopChild();
         this.startupFailure = null;
+        this.runtimeFailure = null;
+        this.runtimeRecoveryAttempts = 0;
+        this.recoveryPrompted = false;
         this.readyPromise = null;
         this.buffer = Buffer.alloc(0);
         this.stderr = '';
@@ -944,7 +1035,13 @@ export class SidecarClient {
         options?: { timeoutMs?: number; notificationHandlers?: NotificationHandlers },
     ): Promise<unknown> {
         const child = this.child;
-        if (!child) return Promise.reject(this.startupFailure ?? new Error('PR Pilot Java sidecar is not running.'));
+        if (!child) {
+            return Promise.reject(
+                this.startupFailure
+                ?? this.runtimeFailure
+                ?? new Error('PR Pilot Java sidecar is not running.'),
+            );
+        }
         const id = this.nextId++;
         const timeoutMs = options?.timeoutMs ?? this.requestTimeoutMs;
         if (options?.notificationHandlers) this.notificationHandlers.set(id, options.notificationHandlers);
@@ -962,9 +1059,7 @@ export class SidecarClient {
             child.stdin.write(encodeFrame(JSON.stringify({ jsonrpc: '2.0', id, method, params })), (err) => {
                 if (err) {
                     const failure = err instanceof Error ? err : new Error(String(err));
-                    this.startupFailure = failure;
-                    this.failAllPending(failure);
-                    this.stopChild();
+                    this.markRuntimeFailure(failure, child);
                 }
             });
         });
@@ -1363,10 +1458,14 @@ export class SidecarClient {
     private processExitError(code: number | null, signal: NodeJS.Signals | null): Error {
         const diagnostics = this.stderr.trim();
         if (/UnsupportedClassVersionError|class file version/i.test(diagnostics)) {
-            return new Error('PR Pilot requires Java 17 or newer. Update Java and reload VS Code.');
+            return new StickySidecarFailure(
+                'PR Pilot requires Java 17 or newer. Update Java and reload VS Code.',
+            );
         }
         if (/Unable to access jarfile|Invalid or corrupt jarfile/i.test(diagnostics)) {
-            return new Error('PR Pilot Java sidecar could not be opened. Reinstall the extension.');
+            return new StickySidecarFailure(
+                'PR Pilot Java sidecar could not be opened. Reinstall the extension.',
+            );
         }
         const reason = signal ? `signal ${signal}` : `exit code ${code ?? 'unknown'}`;
         const diagnosticLines = diagnostics.split(/\r?\n/);

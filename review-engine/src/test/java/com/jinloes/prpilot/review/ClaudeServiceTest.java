@@ -1009,6 +1009,45 @@ class ClaudeServiceTest {
         }
 
         @Test
+        void treatsTriplePlusAsSourceAfterAHunkButAsAHeaderBeforeOne() {
+            String diff =
+                    "diff --git a/f.txt b/f.txt\n"
+                            + "--- a/f.txt\n"
+                            + "+++ b/f.txt\n"
+                            + "@@ -1,1 +1,3 @@\n"
+                            + " context\n"
+                            + "+++operator\n"
+                            + "+after\n";
+
+            String annotated = ClaudeService.annotateDiffWithLineNumbers(diff);
+
+            assertThat(annotated)
+                    .contains("+++ b/f.txt")
+                    .contains("2| +++operator")
+                    .contains("3| +after");
+        }
+
+        @Test
+        void resetsToHeaderModeAtTheNextFile() {
+            String diff =
+                    "diff --git a/a.txt b/a.txt\n"
+                            + "--- a/a.txt\n"
+                            + "+++ b/a.txt\n"
+                            + "@@ -1 +1 @@\n"
+                            + "+first\n"
+                            + "diff --git a/b.txt b/b.txt\n"
+                            + "--- a/b.txt\n"
+                            + "+++ b/b.txt\n"
+                            + "@@ -9 +10 @@\n"
+                            + "+second\n";
+
+            String annotated = ClaudeService.annotateDiffWithLineNumbers(diff);
+
+            assertThat(annotated).contains("+++ b/b.txt").contains("10| +second");
+            assertThat(annotated).doesNotContain("| +++ b/b.txt");
+        }
+
+        @Test
         void preHunkAndBlankInputPassThroughUnchanged() {
             assertThat(ClaudeService.annotateDiffWithLineNumbers("")).isEmpty();
             assertThat(ClaudeService.annotateDiffWithLineNumbers("diff --git a/a b/a"))

@@ -22,15 +22,22 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 final class StdioJsonRpcServer {
     private static final String JSON_RPC_VERSION = "2.0";
     private static final int MAX_OPERATION_ID_LENGTH = 128;
+    private static final int REQUEST_QUEUE_CAPACITY = 64;
+    private static final int SERVER_BUSY_CODE = -32000;
 
     /** Handles one decoded request; returns {@code null} when the reply is sent asynchronously. */
     @FunctionalInterface
@@ -44,9 +51,11 @@ final class StdioJsonRpcServer {
     private final GitHubEngineApi github;
     private final ReviewEngineApi review;
     private final ExecutorService reviewExecutor;
+    private final ExecutorService requestExecutor;
     private final Map<String, MethodHandler> handlers = new LinkedHashMap<>();
     private final Object writeLock = new Object();
     private final Object operationLock = new Object();
+    private final Object outcomeLogLock = new Object();
     private final ConcurrentMap<String, ScheduledOperation> scheduledOperations =
             new ConcurrentHashMap<>();
     private volatile OutputStream currentOutput;
@@ -64,6 +73,25 @@ final class StdioJsonRpcServer {
         this.github = Objects.requireNonNull(github);
         this.review = Objects.requireNonNull(review);
         this.reviewExecutor = Objects.requireNonNull(reviewExecutor);
+        int requestThreads = Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors()));
+        AtomicInteger threadSequence = new AtomicInteger();
+        this.requestExecutor =
+                new ThreadPoolExecutor(
+                        requestThreads,
+                        requestThreads,
+                        0L,
+                        TimeUnit.MILLISECONDS,
+                        new ArrayBlockingQueue<>(REQUEST_QUEUE_CAPACITY),
+                        runnable -> {
+                            Thread thread =
+                                    new Thread(
+                                            runnable,
+                                            "pr-pilot-sidecar-io-"
+                                                    + threadSequence.incrementAndGet());
+                            thread.setDaemon(true);
+                            return thread;
+                        },
+                        new ThreadPoolExecutor.AbortPolicy());
         registerHandlers();
     }
 
@@ -112,14 +140,49 @@ final class StdioJsonRpcServer {
         try {
             byte[] frame;
             while ((frame = frameCodec.readFrame(input)) != null) {
-                JsonNode response = handle(frame);
-                if (response != null) {
-                    send(response);
+                JsonNode request;
+                try {
+                    request = objectMapper.readTree(frame);
+                } catch (IOException exception) {
+                    send(error(null, -32700, "Parse error"));
+                    continue;
+                }
+                if (!isValidRequest(request)) {
+                    send(error(requestId(request), -32600, "Invalid Request"));
+                    continue;
+                }
+
+                String method = request.path("method").asText();
+                if (handlers.get(method) == null || isReaderThreadMethod(method)) {
+                    JsonNode response = handleRequest(request);
+                    if (response != null) send(response);
+                    continue;
+                }
+                try {
+                    requestExecutor.execute(
+                            () -> {
+                                JsonNode response = handleRequest(request);
+                                if (response != null) send(response);
+                            });
+                } catch (RejectedExecutionException exception) {
+                    if (request.has("id")) {
+                        send(error(requestId(request), SERVER_BUSY_CODE, "Server busy"));
+                    }
                 }
             }
         } catch (IOException exception) {
             throw new SidecarProtocolException(
                     "Unable to read or write JSON-RPC messages", exception);
+        } finally {
+            requestExecutor.shutdown();
+            try {
+                if (!requestExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    requestExecutor.shutdownNow();
+                }
+            } catch (InterruptedException exception) {
+                requestExecutor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
@@ -135,6 +198,10 @@ final class StdioJsonRpcServer {
             return error(requestId(request), -32600, "Invalid Request");
         }
 
+        return handleRequest(request);
+    }
+
+    private JsonNode handleRequest(JsonNode request) {
         boolean notification = !request.has("id");
         MethodHandler handler = handlers.get(request.path("method").asText());
         JsonNode response;
@@ -148,6 +215,15 @@ final class StdioJsonRpcServer {
         }
 
         return notification ? null : response;
+    }
+
+    private static boolean isReaderThreadMethod(String method) {
+        // Generate/chat only register background work; keeping registration here preserves frame
+        // order when the next frame cancels that operation.
+        return "initialize".equals(method)
+                || "reviews/generate".equals(method)
+                || "reviews/chat".equals(method)
+                || "reviews/cancel".equals(method);
     }
 
     /**
@@ -914,14 +990,17 @@ final class StdioJsonRpcServer {
         if (generated == null || submitted == null) {
             return error(requestId(request), -32602, "Invalid params");
         }
-        return result(
-                requestId(request),
-                review.recordOutcome(
-                        new ReviewEngineApi.RecordOutcomeParams(
-                                params.path("provider").textValue(),
-                                params.path("model").textValue(),
-                                generated,
-                                submitted)));
+        ReviewEngineApi.RecordOutcomeResult recorded;
+        synchronized (outcomeLogLock) {
+            recorded =
+                    review.recordOutcome(
+                            new ReviewEngineApi.RecordOutcomeParams(
+                                    params.path("provider").textValue(),
+                                    params.path("model").textValue(),
+                                    generated,
+                                    submitted));
+        }
+        return result(requestId(request), recorded);
     }
 
     /**

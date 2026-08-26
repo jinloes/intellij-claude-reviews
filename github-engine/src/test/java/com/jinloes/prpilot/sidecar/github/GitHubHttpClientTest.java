@@ -11,6 +11,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -117,6 +118,33 @@ class GitHubHttpClientTest {
 
             assertThat(client.get("https://api.github.com/user", "t").body()).isEqualTo("done");
             assertThat(backoff.pauses).containsExactly(1);
+        }
+
+        @Test
+        void retriesHeaderConfirmedRateLimit403ButNotPermission403() {
+            RecordingBackoff limitedBackoff = new RecordingBackoff();
+            GitHubHttpClient limitedClient =
+                    new GitHubHttpClient(
+                            new ScriptedTransport(
+                                    new GitHubResponse(
+                                            403, "", Map.of("x-ratelimit-remaining", "0")),
+                                    ok("done")),
+                            limitedBackoff);
+
+            assertThat(limitedClient.get("https://api.github.com/user", "t").body())
+                    .isEqualTo("done");
+            assertThat(limitedBackoff.pauses).containsExactly(1);
+
+            RecordingBackoff permissionBackoff = new RecordingBackoff();
+            GitHubHttpClient permissionClient =
+                    new GitHubHttpClient(
+                            new ScriptedTransport(
+                                    new GitHubResponse(
+                                            403, "{\"message\":\"Resource not accessible\"}")),
+                            permissionBackoff);
+            assertThat(permissionClient.get("https://api.github.com/user", "t").statusCode())
+                    .isEqualTo(403);
+            assertThat(permissionBackoff.pauses).isEmpty();
         }
 
         @Test

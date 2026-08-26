@@ -30,6 +30,39 @@ afterEach(() => {
 })
 
 describe('App pull-request transitions', () => {
+  it('keeps the PR list mounted so recovery payloads are not lost behind setup', () => {
+    ;(window as unknown as { cefQuery?: ReturnType<typeof vi.fn> }).cefQuery = vi.fn()
+    render(<App />)
+
+    act(() => hostMessage({
+      type: 'setupRequired',
+      reason: 'gh_not_authenticated',
+      detail: 'Sign in.',
+    }))
+    expect(screen.getByRole('main', { name: 'PR Pilot setup' })).toBeInTheDocument()
+
+    act(() => hostMessage({ type: 'prListLoaded', prs: [firstPr] }))
+
+    expect(screen.queryByRole('main', { name: 'PR Pilot setup' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /First pull request/ })).toBeInTheDocument()
+  })
+
+  it('renders specific repair guidance for an unavailable draft index', () => {
+    ;(window as unknown as { cefQuery?: ReturnType<typeof vi.fn> }).cefQuery = vi.fn()
+    render(<App />)
+
+    act(() => hostMessage({
+      type: 'setupRequired',
+      reason: 'draft_index_unavailable',
+      detail: 'The file was preserved; repair it or quarantine it, then refresh PR Pilot.',
+    }))
+
+    expect(screen.getByRole('heading', { name: 'Draft index needs attention' })).toBeInTheDocument()
+    expect(screen.getByText(/file was preserved; repair it or quarantine it/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Check status' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Auth Guide' })).not.toBeInTheDocument()
+  })
+
   it('confirmed discard switches PRs without flushing the rejected edit', async () => {
     const user = userEvent.setup()
     const cefQuery = vi.fn()

@@ -11,11 +11,16 @@ import { hasStaleCommits } from './draftState';
 import {
     EMPTY_NOTIFICATION_HEALTH,
     markNotificationWarningShown,
-    mergeBySource,
+    normalizeNotificationSeedSources,
     notificationMessage,
-    prNotificationKey,
+    notificationWarningMessage,
+    planNotificationPoll,
+    recordNotificationDegraded,
     recordNotificationFailure,
     recordNotificationSuccess,
+    settleNotificationSources,
+    type NotifySource,
+    type NotificationSourceRequest,
     shouldWarnAboutNotificationFailure,
     type NotificationHealth,
 } from './notifications';
@@ -63,15 +68,40 @@ function newOperationId(): string {
 }
 
 export function activate(context: vscode.ExtensionContext) {
-    sidecarClient = new SidecarClient(resolveSidecarJarPath(context.extensionUri.fsPath));
-    context.subscriptions.push({ dispose: () => sidecarClient?.dispose() });
-    const initializeSidecar = (restart = false) => (restart ? sidecarClient.restart() : sidecarClient.initialize()).catch((err) => {
-        const message = err instanceof Error ? err.message : 'PR Pilot Java sidecar failed to start.';
-        void vscode.window.showErrorMessage(message, 'Retry').then((action) => {
-            if (action === 'Retry') void initializeSidecar(true);
+    let retryPromptVisible = false;
+    const showSidecarRetry = (failure: Error): void => {
+        if (retryPromptVisible) return;
+        retryPromptVisible = true;
+        void vscode.window.showErrorMessage(failure.message, 'Retry').then((action) => {
+            retryPromptVisible = false;
+            if (action === 'Retry') {
+                void sidecarClient.restart().catch((err: unknown) => {
+                    showSidecarRetry(
+                        err instanceof Error
+                            ? err
+                            : new Error('PR Pilot Java sidecar failed to start.'),
+                    );
+                });
+            }
+        }, () => {
+            retryPromptVisible = false;
         });
+    };
+    sidecarClient = new SidecarClient(
+        resolveSidecarJarPath(context.extensionUri.fsPath),
+        undefined,
+        undefined,
+        undefined,
+        showSidecarRetry,
+    );
+    context.subscriptions.push({ dispose: () => sidecarClient?.dispose() });
+    void sidecarClient.initialize().catch((err: unknown) => {
+        showSidecarRetry(
+            err instanceof Error
+                ? err
+                : new Error('PR Pilot Java sidecar failed to start.'),
+        );
     });
-    void initializeSidecar();
     const provider = new ClaudeReviewsViewProvider(context.extensionUri, new DraftRecoveryStore(context.globalState));
     const notificationPoller = new PRNotificationPoller(context, (pr) => provider.openPullRequest(pr));
     context.subscriptions.push(
@@ -121,13 +151,15 @@ const NOTIFY_HEALTH_KEY = 'pr-pilot.notifications.health';
 const MAX_SEEN_NOTIFICATION_PRS = 500;
 
 interface SeenState {
-    seeded: boolean;
+    /** Legacy all-sources seed written before per-source seeding was introduced. */
+    seeded?: boolean;
+    seededSources?: NotifySource[];
     seen: string[];
 }
 
 class PRNotificationPoller implements vscode.Disposable {
     private timer: NodeJS.Timeout | null = null;
-    private seeded: boolean;
+    private readonly seededSources: Set<NotifySource>;
     private readonly seen: Set<string>;
     private running = false;
     private health: NotificationHealth;
@@ -139,7 +171,9 @@ class PRNotificationPoller implements vscode.Disposable {
         // Restore prior seen state so a reload/restart does not silently re-seed and swallow PRs
         // that appeared while the window was closed.
         const saved = context.globalState.get<SeenState>(NOTIFY_STATE_KEY);
-        this.seeded = saved?.seeded ?? false;
+        this.seededSources = new Set(
+            normalizeNotificationSeedSources(saved?.seededSources, saved?.seeded === true),
+        );
         this.seen = new Set(saved?.seen ?? []);
         this.health = {
             ...EMPTY_NOTIFICATION_HEALTH,
@@ -158,7 +192,7 @@ class PRNotificationPoller implements vscode.Disposable {
 
     /** Clears the seed and restarts so a scope/host change re-seeds silently instead of flooding. */
     resetAndSync(): void {
-        this.seeded = false;
+        this.seededSources.clear();
         this.seen.clear();
         void this.persist();
         this.syncFromSettings();
@@ -183,7 +217,7 @@ class PRNotificationPoller implements vscode.Disposable {
 
     private persist(): Thenable<void> {
         return this.context.globalState.update(NOTIFY_STATE_KEY, {
-            seeded: this.seeded,
+            seededSources: [...this.seededSources],
             seen: [...this.seen],
         } satisfies SeenState);
     }
@@ -197,47 +231,73 @@ class PRNotificationPoller implements vscode.Disposable {
         await this.persistHealth();
     }
 
+    private async recordDegraded(message: string): Promise<void> {
+        this.health = recordNotificationDegraded(this.health, message);
+        this.warnIfNeeded();
+        await this.persistHealth();
+    }
+
+    private warnIfNeeded(): void {
+        if (!shouldWarnAboutNotificationFailure(this.health)) return;
+        this.health = markNotificationWarningShown(this.health);
+        void vscode.window.showWarningMessage(
+            notificationWarningMessage(this.health),
+            'Retry',
+            'Open Settings',
+        ).then((choice) => {
+            if (choice === 'Retry') void this.retry();
+            if (choice === 'Open Settings') {
+                void vscode.commands.executeCommand('pr-pilot.openSettings');
+            }
+        });
+    }
+
     private async poll(): Promise<void> {
         if (this.running) return;
         this.running = true;
         try {
-            const reviewRequested: PR[] = [];
-            const starred: PR[] = [];
+            const requests: NotificationSourceRequest[] = [];
 
             if (config().get<boolean>('notifyReviewRequested', true)) {
-                const result = await sidecarClient.searchPullRequests(
-                    githubBaseUrl(), 'is:open is:pr draft:false review-requested:@me', 50);
-                if (result.status !== 'ok') throw new Error(result.message);
-                reviewRequested.push(...result.prs.map((pr) => ({ ...pr, hasReviewDraft: false })));
+                requests.push({
+                    source: 'reviewRequested',
+                    load: async () => {
+                        const result = await sidecarClient.searchPullRequests(
+                            githubBaseUrl(), 'is:open is:pr draft:false review-requested:@me', 50);
+                        if (result.status !== 'ok') throw new Error(result.message);
+                        return result.prs.map((pr) => ({ ...pr, hasReviewDraft: false }));
+                    },
+                });
             }
 
             if (config().get<boolean>('notifyStarredRepos', false)) {
-                const reposResult = await sidecarClient.listStarredRepositories(githubBaseUrl());
-                if (reposResult.status !== 'ok') throw new Error(reposResult.message);
-                const starredRepos = reposResult.repositories.slice(0, 25);
-                if (starredRepos.length > 0) {
-                    const repoQ = starredRepos.map((repo) => `repo:${repo}`).join(' ');
-                    const result = await sidecarClient.searchPullRequests(
-                        githubBaseUrl(), `is:open is:pr draft:false ${repoQ}`, 50);
-                    if (result.status !== 'ok') throw new Error(result.message);
-                    starred.push(...result.prs.map((pr) => ({ ...pr, hasReviewDraft: false })));
-                }
+                requests.push({
+                    source: 'starredRepo',
+                    load: async () => {
+                        const reposResult = await sidecarClient.listStarredRepositories(githubBaseUrl());
+                        if (reposResult.status !== 'ok') throw new Error(reposResult.message);
+                        const starredRepos = reposResult.repositories.slice(0, 25);
+                        if (starredRepos.length === 0) return [];
+                        const repoQ = starredRepos.map((repo) => `repo:${repo}`).join(' ');
+                        const result = await sidecarClient.searchPullRequests(
+                            githubBaseUrl(), `is:open is:pr draft:false ${repoQ}`, 50);
+                        if (result.status !== 'ok') throw new Error(result.message);
+                        return result.prs.map((pr) => ({ ...pr, hasReviewDraft: false }));
+                    },
+                });
             }
 
-            const merged = mergeBySource(reviewRequested, starred);
-            if (!this.seeded) {
-                for (const { pr } of merged) this.seen.add(prNotificationKey(pr));
-                this.seeded = true;
-                trimSeenSet(this.seen, MAX_SEEN_NOTIFICATION_PRS);
-                await this.persist();
-                await this.recordSuccess();
-                return;
+            const sourceResults = await settleNotificationSources(requests);
+            const plan = planNotificationPoll(this.seededSources, this.seen, sourceResults);
+            if (plan.status === 'failed') {
+                throw new Error(plan.message || 'All notification sources failed');
             }
+            this.seededSources.clear();
+            for (const source of plan.seededSources) this.seededSources.add(source);
+            this.seen.clear();
+            for (const key of plan.seen) this.seen.add(key);
 
-            for (const { pr, source } of merged) {
-                const key = prNotificationKey(pr);
-                if (this.seen.has(key)) continue;
-                this.seen.add(key);
+            for (const { pr, source } of plan.notifications) {
                 void vscode.window.showInformationMessage(
                     notificationMessage(pr, source),
                     'Open in PR Pilot',
@@ -247,22 +307,16 @@ class PRNotificationPoller implements vscode.Disposable {
             }
             trimSeenSet(this.seen, MAX_SEEN_NOTIFICATION_PRS);
             await this.persist();
-            await this.recordSuccess();
+            if (plan.status === 'degraded') {
+                await this.recordDegraded(plan.message || 'One notification source failed');
+            } else {
+                await this.recordSuccess();
+            }
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             console.warn('[pr-pilot] PR notification poll failed:', message);
             this.health = recordNotificationFailure(this.health, message);
-            if (shouldWarnAboutNotificationFailure(this.health)) {
-                this.health = markNotificationWarningShown(this.health);
-                void vscode.window.showWarningMessage(
-                    'PR Pilot notifications are not working. Open settings for details or retry now.',
-                    'Retry',
-                    'Open Settings',
-                ).then((choice) => {
-                    if (choice === 'Retry') void this.retry();
-                    if (choice === 'Open Settings') void vscode.commands.executeCommand('pr-pilot.openSettings');
-                });
-            }
+            this.warnIfNeeded();
             await Promise.resolve(this.persistHealth()).catch(() => undefined);
         } finally {
             this.running = false;

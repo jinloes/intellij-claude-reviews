@@ -172,7 +172,7 @@ export function parseIncomingMessage(value: unknown): IncomingMessage | null {
       valid = isString(value.response)
       break
     case 'setupRequired':
-      valid = ['gh_not_installed', 'gh_not_authenticated', 'provider_not_installed', 'provider_not_authenticated', 'load_failed'].includes(value.reason as string)
+      valid = ['gh_not_installed', 'gh_not_authenticated', 'provider_not_installed', 'provider_not_authenticated', 'load_failed', 'draft_index_unavailable'].includes(value.reason as string)
         && isString(value.detail)
         && (value.providerReadiness === undefined || isProviderReadiness(value.providerReadiness))
       break

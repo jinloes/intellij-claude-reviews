@@ -146,7 +146,7 @@ export interface ChatErrorMessage {
 
 export interface SetupRequiredMessage {
   type: 'setupRequired'
-  reason: 'gh_not_installed' | 'gh_not_authenticated' | 'provider_not_installed' | 'provider_not_authenticated' | 'load_failed'
+  reason: 'gh_not_installed' | 'gh_not_authenticated' | 'provider_not_installed' | 'provider_not_authenticated' | 'load_failed' | 'draft_index_unavailable'
   detail: string
   providerReadiness?: ProviderReadiness
 }

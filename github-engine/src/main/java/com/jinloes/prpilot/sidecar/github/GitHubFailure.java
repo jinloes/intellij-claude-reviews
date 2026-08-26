@@ -38,8 +38,8 @@ public record GitHubFailure(String status, String message) {
     /** Maps a response onto its failure, or returns null when the request succeeded. */
     public static GitHubFailure of(GitHubResponse response) {
         if (response.isSuccess()) return null;
-        if (response.isUnauthenticated()) return NOT_AUTHENTICATED;
         if (response.isRateLimited()) return RATE_LIMITED;
+        if (response.isUnauthenticated()) return NOT_AUTHENTICATED;
         if (response.isNetworkError()) return NETWORK_ERROR;
         return API_FAILED;
     }

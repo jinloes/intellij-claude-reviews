@@ -381,7 +381,9 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
     const when = health.lastAttemptAt ? ' Last checked ' + new Date(health.lastAttemptAt).toLocaleString() + '.' : '';
     target.textContent = health.status === 'healthy'
       ? 'Notifications are working.' + when
-      : 'Notification polling failed: ' + (health.message || 'Unknown error.') + when;
+      : health.status === 'degraded'
+        ? 'Notifications are partially working: ' + (health.message || 'One source failed.') + when
+        : 'Notification polling failed: ' + (health.message || 'Unknown error.') + when;
   }
 
   function renderCopilotModels(models, current) {

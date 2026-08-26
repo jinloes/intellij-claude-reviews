@@ -48,6 +48,10 @@ public final class PRNotificationService implements Disposable {
 
     private volatile ScheduledFuture<?> scheduledTask;
     private volatile PollStatus lastPollStatus = new PollStatus(0, null);
+    private final Object pollGuard = new Object();
+    private volatile long scheduleGeneration;
+    private boolean pollRunning;
+    private long pendingPollGeneration = -1;
     private final Supplier<NotificationSettings> settingsSupplier;
     private final NotificationSourceClient sourceClient;
     private final SeenPRSet seenSet;
@@ -109,12 +113,18 @@ public final class PRNotificationService implements Disposable {
     public synchronized void startPolling(int intervalMinutes) {
         stopPolling();
         long delay = Math.max(1, intervalMinutes);
+        long generation = ++scheduleGeneration;
         scheduledTask =
                 AppExecutorUtil.getAppScheduledExecutorService()
-                        .scheduleWithFixedDelay(this::poll, 0, delay, TimeUnit.MINUTES);
+                        .scheduleWithFixedDelay(
+                                () -> requestPoll(generation), 0, delay, TimeUnit.MINUTES);
     }
 
     public synchronized void stopPolling() {
+        scheduleGeneration++;
+        synchronized (pollGuard) {
+            pendingPollGeneration = -1;
+        }
         if (scheduledTask != null) {
             scheduledTask.cancel(false);
             scheduledTask = null;
@@ -161,6 +171,50 @@ public final class PRNotificationService implements Disposable {
     // -------------------------------------------------------------------------
 
     void poll() {
+        requestPoll(scheduleGeneration);
+    }
+
+    private void requestPoll(long generation) {
+        synchronized (pollGuard) {
+            if (generation != scheduleGeneration) {
+                return;
+            }
+            if (pollRunning) {
+                pendingPollGeneration = generation;
+                return;
+            }
+            pollRunning = true;
+        }
+
+        while (true) {
+            RuntimeException failure = null;
+            try {
+                pollBody();
+            } catch (RuntimeException e) {
+                failure = e;
+            }
+
+            boolean runAgain;
+            synchronized (pollGuard) {
+                runAgain =
+                        failure == null
+                                && pendingPollGeneration == scheduleGeneration
+                                && pendingPollGeneration >= 0;
+                pendingPollGeneration = -1;
+                if (!runAgain) {
+                    pollRunning = false;
+                }
+            }
+            if (failure != null) {
+                throw failure;
+            }
+            if (!runAgain) {
+                return;
+            }
+        }
+    }
+
+    private void pollBody() {
         NotificationSettings settings = settingsSupplier.get();
         if (!settings.notificationsEnabled()) return;
 

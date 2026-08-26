@@ -278,8 +278,8 @@ export default function App() {
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
-    {setup ? (
-      <main className="fixed inset-0 min-h-0 overflow-clip bg-background" aria-label="PR Pilot setup">
+    {setup && (
+      <main className="fixed inset-0 z-50 min-h-0 overflow-clip bg-background" aria-label="PR Pilot setup">
         <SetupScreen
           reason={setup.reason}
           detail={setup.detail}
@@ -291,8 +291,12 @@ export default function App() {
           }}
         />
       </main>
-    ) : (
-    <main className="fixed inset-0 flex min-h-0 overflow-clip" data-layout={narrow ? 'narrow' : 'wide'}>
+    )}
+    <main
+      className={`fixed inset-0 flex min-h-0 overflow-clip ${setup ? 'invisible pointer-events-none' : ''}`}
+      data-layout={narrow ? 'narrow' : 'wide'}
+      aria-hidden={setup ? true : undefined}
+    >
       {narrow && (
         <div className="fixed left-2 top-2 z-40 flex rounded-md border border-border bg-card p-1 shadow">
           <Button size="sm" variant={activePane === 'list' ? 'default' : 'ghost'} onClick={() => setActivePane('list')}>
@@ -346,7 +350,6 @@ export default function App() {
         <ReviewPane ref={reviewPaneRef} pr={selectedPR} onDirtyStateChange={handleDirtyStateChange} />
       </section>
     </main>
-    )}
     </>
   )
 }

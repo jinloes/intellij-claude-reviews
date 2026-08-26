@@ -16,6 +16,10 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -95,6 +99,196 @@ class StdioJsonRpcServerTest {
                                 .path("reviewGeneration")
                                 .asBoolean())
                 .isTrue();
+    }
+
+    @Test
+    void blockedHandlerDoesNotDelayLaterFrameAndResponsesStayFramed() throws Exception {
+        CountDownLatch blockedEntered = new CountDownLatch(1);
+        CountDownLatch releaseBlocked = new CountDownLatch(1);
+        CountDownLatch fastFinished = new CountDownLatch(1);
+        ReviewSessionService blockingReview =
+                new ReviewSessionService() {
+                    @Override
+                    public ReviewEngineApi.GuidelinesResult readGuidelines(
+                            ReviewEngineApi.ReadGuidelinesParams params) {
+                        if ("block".equals(params.projectDir())) {
+                            blockedEntered.countDown();
+                            try {
+                                if (!releaseBlocked.await(5, TimeUnit.SECONDS)) {
+                                    throw new IllegalStateException(
+                                            "Timed out waiting for test release");
+                                }
+                            } catch (InterruptedException exception) {
+                                Thread.currentThread().interrupt();
+                                throw new IllegalStateException(exception);
+                            }
+                        } else {
+                            fastFinished.countDown();
+                        }
+                        return new ReviewEngineApi.GuidelinesResult(params.projectDir());
+                    }
+                };
+        StdioJsonRpcServer concurrentServer =
+                new StdioJsonRpcServer(
+                        objectMapper,
+                        frameCodec,
+                        new SidecarBootstrapService(),
+                        new GitHubEngine(),
+                        blockingReview,
+                        reviewExecutor);
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        frameCodec.writeFrame(
+                input,
+                ("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"reviews/readGuidelines\","
+                                + "\"params\":{\"projectDir\":\"block\",\"globs\":[]}}")
+                        .getBytes(StandardCharsets.UTF_8));
+        frameCodec.writeFrame(
+                input,
+                ("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"reviews/readGuidelines\","
+                                + "\"params\":{\"projectDir\":\"fast\",\"globs\":[]}}")
+                        .getBytes(StandardCharsets.UTF_8));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        Thread runner =
+                new Thread(
+                        () ->
+                                concurrentServer.run(
+                                        new ByteArrayInputStream(input.toByteArray()), output));
+
+        try {
+            runner.start();
+            assertThat(blockedEntered.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(fastFinished.await(5, TimeUnit.SECONDS)).isTrue();
+
+            JsonNode fastResponse = null;
+            long responseDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (fastResponse == null && System.nanoTime() < responseDeadline) {
+                try {
+                    byte[] responseFrame =
+                            frameCodec.readFrame(new ByteArrayInputStream(output.toByteArray()));
+                    if (responseFrame != null) {
+                        fastResponse = objectMapper.readTree(responseFrame);
+                    }
+                } catch (IOException incompleteFrame) {
+                    // The writer emits the header and payload separately; retry the snapshot.
+                }
+                if (fastResponse == null) Thread.sleep(5);
+            }
+            assertThat(fastResponse).isNotNull();
+            assertThat(fastResponse.path("id").asInt()).isEqualTo(2);
+
+            releaseBlocked.countDown();
+            runner.join(5_000);
+            assertThat(runner.isAlive()).isFalse();
+
+            ByteArrayInputStream responses = new ByteArrayInputStream(output.toByteArray());
+            Set<Integer> ids = new HashSet<>();
+            byte[] responseFrame;
+            while ((responseFrame = frameCodec.readFrame(responses)) != null) {
+                ids.add(objectMapper.readTree(responseFrame).path("id").asInt());
+            }
+            assertThat(ids).containsExactlyInAnyOrder(1, 2);
+        } finally {
+            releaseBlocked.countDown();
+            runner.join(5_000);
+        }
+    }
+
+    @Test
+    void immediateGenerateThenCancelRegistersBeforeQueuedRequestWork() throws Exception {
+        int requestThreads = Math.max(2, Math.min(8, Runtime.getRuntime().availableProcessors()));
+        CountDownLatch requestWorkersStarted = new CountDownLatch(requestThreads);
+        CountDownLatch releaseRequestWorkers = new CountDownLatch(1);
+        CountDownLatch reviewWorkerStarted = new CountDownLatch(1);
+        CountDownLatch releaseReviewWorker = new CountDownLatch(1);
+        ReviewSessionService blockingReview =
+                new ReviewSessionService() {
+                    @Override
+                    public ReviewEngineApi.GuidelinesResult readGuidelines(
+                            ReviewEngineApi.ReadGuidelinesParams params) {
+                        requestWorkersStarted.countDown();
+                        try {
+                            if (!releaseRequestWorkers.await(10, TimeUnit.SECONDS)) {
+                                throw new IllegalStateException(
+                                        "Timed out waiting for request-worker release");
+                            }
+                        } catch (InterruptedException exception) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(exception);
+                        }
+                        return new ReviewEngineApi.GuidelinesResult(params.projectDir());
+                    }
+
+                    @Override
+                    public ReviewResult generate(
+                            ReviewEngineApi.GenerateReviewParams params,
+                            Consumer<String> onStatus,
+                            BiConsumer<String, String> onChunk) {
+                        return new ReviewResult("summary", "APPROVE", java.util.List.of());
+                    }
+                };
+        StdioJsonRpcServer concurrentServer =
+                new StdioJsonRpcServer(
+                        objectMapper,
+                        frameCodec,
+                        new SidecarBootstrapService(),
+                        new GitHubEngine(),
+                        blockingReview,
+                        reviewExecutor);
+        reviewExecutor.submit(
+                () -> {
+                    reviewWorkerStarted.countDown();
+                    try {
+                        releaseReviewWorker.await(10, TimeUnit.SECONDS);
+                    } catch (InterruptedException exception) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+        assertThat(reviewWorkerStarted.await(1, TimeUnit.SECONDS)).isTrue();
+
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        for (int index = 0; index < 8; index++) {
+            frameCodec.writeFrame(
+                    input,
+                    ("{\"jsonrpc\":\"2.0\",\"id\":"
+                                    + (index + 1)
+                                    + ",\"method\":\"reviews/readGuidelines\","
+                                    + "\"params\":{\"projectDir\":\"block-"
+                                    + index
+                                    + "\",\"globs\":[]}}")
+                            .getBytes(StandardCharsets.UTF_8));
+        }
+        frameCodec.writeFrame(input, generateRequest(43, "immediate-cancel"));
+        frameCodec.writeFrame(
+                input,
+                ("{\"jsonrpc\":\"2.0\",\"id\":44,\"method\":\"reviews/cancel\","
+                                + "\"params\":{\"operationId\":\"immediate-cancel\"}}")
+                        .getBytes(StandardCharsets.UTF_8));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        Thread runner =
+                new Thread(
+                        () ->
+                                concurrentServer.run(
+                                        new ByteArrayInputStream(input.toByteArray()), output));
+
+        try {
+            runner.start();
+            assertThat(requestWorkersStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+            Map<Integer, JsonNode> cancelResponse =
+                    awaitResponses(output, Set.of(44), 5, TimeUnit.SECONDS);
+            assertThat(cancelResponse.get(44).path("result").path("cancelled").asBoolean())
+                    .isTrue();
+
+            Map<Integer, JsonNode> terminalResponses =
+                    awaitResponses(output, Set.of(43, 44), 5, TimeUnit.SECONDS);
+            assertThat(terminalResponses.get(43).path("error").path("message").asText())
+                    .isEqualTo("Review interrupted.");
+        } finally {
+            releaseRequestWorkers.countDown();
+            releaseReviewWorker.countDown();
+            runner.join(5_000);
+            assertThat(runner.isAlive()).isFalse();
+        }
     }
 
     @Test
@@ -580,13 +774,7 @@ class StdioJsonRpcServerTest {
 
     /** Re-runs the request with a fresh id (43) against a server whose output is captured. */
     private JsonNode invokeGenerateDirectly() {
-        return server.handle(
-                ("{\"jsonrpc\":\"2.0\",\"id\":43,\"method\":\"reviews/generate\",\"params\":{"
-                                + "\"operationId\":\"review-1\",\"provider\":\"claude\",\"model\":\"\",\"effort\":\"\",\"inheritMcp\":false,"
-                                + "\"pr\":{\"title\":\"T\",\"htmlUrl\":\"\",\"owner\":\"o\",\"repo\":\"r\","
-                                + "\"number\":1,\"body\":\"\",\"author\":\"a\",\"createdAt\":\"2024-01-01\","
-                                + "\"isDraft\":false},\"diff\":\"\",\"ciStatus\":\"\"}}")
-                        .getBytes(StandardCharsets.UTF_8));
+        return server.handle(generateRequest(43, "review-1"));
     }
 
     private JsonNode invokeGenerateNotification() {
@@ -597,6 +785,42 @@ class StdioJsonRpcServerTest {
                                 + "\"number\":1,\"body\":\"\",\"author\":\"a\",\"createdAt\":\"2024-01-01\","
                                 + "\"isDraft\":false},\"diff\":\"\",\"ciStatus\":\"\"}}")
                         .getBytes(StandardCharsets.UTF_8));
+    }
+
+    private byte[] generateRequest(int id, String operationId) {
+        return ("{\"jsonrpc\":\"2.0\",\"id\":"
+                        + id
+                        + ",\"method\":\"reviews/generate\",\"params\":{"
+                        + "\"operationId\":\""
+                        + operationId
+                        + "\",\"provider\":\"claude\",\"model\":\"\",\"effort\":\"\",\"inheritMcp\":false,"
+                        + "\"pr\":{\"title\":\"T\",\"htmlUrl\":\"\",\"owner\":\"o\",\"repo\":\"r\","
+                        + "\"number\":1,\"body\":\"\",\"author\":\"a\",\"createdAt\":\"2024-01-01\","
+                        + "\"isDraft\":false},\"diff\":\"\",\"ciStatus\":\"\"}}")
+                .getBytes(StandardCharsets.UTF_8);
+    }
+
+    private Map<Integer, JsonNode> awaitResponses(
+            ByteArrayOutputStream output, Set<Integer> requiredIds, long timeout, TimeUnit unit)
+            throws Exception {
+        long deadline = System.nanoTime() + unit.toNanos(timeout);
+        Map<Integer, JsonNode> responses = new HashMap<>();
+        while (!responses.keySet().containsAll(requiredIds) && System.nanoTime() < deadline) {
+            responses.clear();
+            try {
+                ByteArrayInputStream frames = new ByteArrayInputStream(output.toByteArray());
+                byte[] responseFrame;
+                while ((responseFrame = frameCodec.readFrame(frames)) != null) {
+                    JsonNode response = objectMapper.readTree(responseFrame);
+                    responses.put(response.path("id").asInt(), response);
+                }
+            } catch (IOException incompleteFrame) {
+                responses.clear();
+            }
+            if (!responses.keySet().containsAll(requiredIds)) Thread.sleep(5);
+        }
+        assertThat(responses.keySet()).containsAll(requiredIds);
+        return responses;
     }
 
     private ObjectNode rpcRequest(int id, String method) {

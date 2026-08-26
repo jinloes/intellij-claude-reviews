@@ -17,6 +17,8 @@ import java.util.regex.Pattern;
 /** Read-only pending-review orchestration; tokens never leave the sidecar process. */
 public final class DraftReviewService {
     private static final Pattern SEGMENT = Pattern.compile("[A-Za-z0-9_.-]+");
+    static final int PAGE_SIZE = 100;
+    static final int MAX_PAGES = 10;
 
     private final GitHubAuthService.TokenResolver tokenResolver;
     private final PendingReviewClient client;
@@ -93,9 +95,17 @@ public final class DraftReviewService {
      * Fetches the PENDING review (if any) for a pull request over the GitHub REST API, plus its
      * inline comments. Never returns or logs the token used to authenticate.
      */
-    private static final class HttpPendingReviewClient implements PendingReviewClient {
-        private final GitHubHttpClient httpClient = new GitHubHttpClient();
+    static final class HttpPendingReviewClient implements PendingReviewClient {
+        private final HttpGetter httpGet;
         private final ObjectMapper mapper = new ObjectMapper();
+
+        HttpPendingReviewClient() {
+            this(new GitHubHttpClient()::get);
+        }
+
+        HttpPendingReviewClient(HttpGetter httpGet) {
+            this.httpGet = Objects.requireNonNull(httpGet);
+        }
 
         @Override
         public Pending load(
@@ -109,16 +119,22 @@ public final class DraftReviewService {
                             + "/pulls/"
                             + number
                             + "/reviews";
-            JsonNode reviews = fetchJson(reviewsUrl, token);
-            if (!reviews.isArray()) {
-                throw new PendingReviewFetchException("api_failed", "GitHub API request failed.");
-            }
             JsonNode pending = null;
-            for (JsonNode review : reviews) {
-                if ("PENDING".equals(review.path("state").asText(null))) {
-                    pending = review;
-                    break;
+            for (int page = 1; page <= MAX_PAGES; page++) {
+                JsonNode reviews =
+                        fetchJson(reviewsUrl + "?per_page=" + PAGE_SIZE + "&page=" + page, token);
+                if (!reviews.isArray()) {
+                    throw new PendingReviewFetchException(
+                            "api_failed", "GitHub API request failed.");
                 }
+                for (JsonNode review : reviews) {
+                    if ("PENDING".equals(review.path("state").asText(null))) {
+                        pending = review;
+                        break;
+                    }
+                }
+                if (pending != null || reviews.size() < PAGE_SIZE) break;
+                if (page == MAX_PAGES) throw paginationLimit();
             }
             if (pending == null) return null;
 
@@ -132,20 +148,32 @@ public final class DraftReviewService {
                             : null;
             String body = pending.path("body").isTextual() ? pending.path("body").textValue() : "";
 
-            JsonNode comments = fetchJson(reviewsUrl + "/" + id + "/comments", token);
-            if (!comments.isArray()) {
-                throw new PendingReviewFetchException("api_failed", "GitHub API request failed.");
-            }
             List<DraftReviewCodec.ApiComment> apiComments = new ArrayList<>();
-            for (JsonNode comment : comments) {
-                apiComments.add(
-                        new DraftReviewCodec.ApiComment(
-                                nullableText(comment, "path"),
-                                nullableInt(comment, "line"),
-                                nullableInt(comment, "original_line"),
-                                nullableText(comment, "body")));
+            String commentsUrl = reviewsUrl + "/" + id + "/comments";
+            for (int page = 1; page <= MAX_PAGES; page++) {
+                JsonNode comments =
+                        fetchJson(commentsUrl + "?per_page=" + PAGE_SIZE + "&page=" + page, token);
+                if (!comments.isArray()) {
+                    throw new PendingReviewFetchException(
+                            "api_failed", "GitHub API request failed.");
+                }
+                for (JsonNode comment : comments) {
+                    apiComments.add(
+                            new DraftReviewCodec.ApiComment(
+                                    nullableText(comment, "path"),
+                                    nullableInt(comment, "line"),
+                                    nullableInt(comment, "original_line"),
+                                    nullableText(comment, "body")));
+                }
+                if (comments.size() < PAGE_SIZE) break;
+                if (page == MAX_PAGES) throw paginationLimit();
             }
             return new Pending(id, commitId, body, apiComments);
+        }
+
+        private static PendingReviewFetchException paginationLimit() {
+            return new PendingReviewFetchException(
+                    "api_failed", "GitHub pending review pagination limit was exceeded.");
         }
 
         private static String nullableText(JsonNode node, String field) {
@@ -159,15 +187,15 @@ public final class DraftReviewService {
         }
 
         private JsonNode fetchJson(String url, String token) {
-            GitHubResponse response = httpClient.get(url, token);
+            GitHubResponse response = httpGet.get(url, token);
+            if (response.isRateLimited()) {
+                throw new PendingReviewFetchException(
+                        "rate_limited", "GitHub rate limit exceeded. Try again shortly.");
+            }
             if (response.isUnauthenticated()) {
                 throw new PendingReviewFetchException(
                         "not_authenticated",
                         "Run 'gh auth login' in a terminal for this GitHub host.");
-            }
-            if (response.isRateLimited()) {
-                throw new PendingReviewFetchException(
-                        "rate_limited", "GitHub rate limit exceeded. Try again shortly.");
             }
             if (response.isNetworkError()) {
                 throw new PendingReviewFetchException(
@@ -181,6 +209,11 @@ public final class DraftReviewService {
             } catch (IOException exception) {
                 throw new PendingReviewFetchException("api_failed", "GitHub API request failed.");
             }
+        }
+
+        @FunctionalInterface
+        interface HttpGetter {
+            GitHubResponse get(String url, String token);
         }
     }
 }

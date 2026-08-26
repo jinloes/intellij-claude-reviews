@@ -101,6 +101,11 @@ final class CopilotMcpConfig {
         if (node == null || !node.isObject()) {
             return null;
         }
+        if (!validStringArray(node, "tools") || !validPositiveInt(node, "timeout")) {
+            log.warn("Skipping malformed MCP server entry: tools or timeout has an invalid shape");
+            return null;
+        }
+        Integer timeout = node.has("timeout") ? node.path("timeout").intValue() : null;
         String url = textOrNull(node, "url");
         if (StringUtils.isNotBlank(url)) {
             McpHttpServerConfig http = new McpHttpServerConfig().setUrl(url);
@@ -108,10 +113,8 @@ final class CopilotMcpConfig {
             if (!headers.isEmpty()) {
                 http.setHeaders(headers);
             }
-            List<String> tools = stringList(node.get("tools"));
-            if (!tools.isEmpty()) {
-                http.setTools(tools);
-            }
+            if (node.has("tools")) http.setTools(stringList(node.get("tools")));
+            if (timeout != null) http.setTimeout(timeout);
             return http;
         }
         String command = textOrNull(node, "command");
@@ -125,13 +128,30 @@ final class CopilotMcpConfig {
             if (!env.isEmpty()) {
                 stdio.setEnv(env);
             }
-            List<String> tools = stringList(node.get("tools"));
-            if (!tools.isEmpty()) {
-                stdio.setTools(tools);
-            }
+            if (node.has("tools")) stdio.setTools(stringList(node.get("tools")));
+            if (timeout != null) stdio.setTimeout(timeout);
             return stdio;
         }
         return null;
+    }
+
+    private static boolean validStringArray(JsonNode node, String key) {
+        if (!node.has(key)) return true;
+        JsonNode value = node.get(key);
+        if (value == null || !value.isArray()) return false;
+        for (JsonNode element : value) {
+            if (!element.isTextual()) return false;
+        }
+        return true;
+    }
+
+    private static boolean validPositiveInt(JsonNode node, String key) {
+        if (!node.has(key)) return true;
+        JsonNode value = node.get(key);
+        return value != null
+                && value.isIntegralNumber()
+                && value.canConvertToInt()
+                && value.intValue() > 0;
     }
 
     private static String textOrNull(JsonNode node, String key) {

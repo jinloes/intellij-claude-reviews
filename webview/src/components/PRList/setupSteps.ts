@@ -6,11 +6,26 @@ export type SetupReason =
   | 'provider_not_installed'
   | 'provider_not_authenticated'
   | 'load_failed'
+  | 'draft_index_unavailable'
 
 export function setupSteps(
   reason: SetupReason,
   provider?: ProviderReadiness,
 ): Array<{ label: string; detail: string; done: boolean }> {
+  if (reason === 'draft_index_unavailable') {
+    return [
+      {
+        label: 'Repair the preserved draft index',
+        detail: 'Repair ~/.pr-pilot/pending-prs.json or use the IntelliJ notification action to quarantine it.',
+        done: false,
+      },
+      {
+        label: 'Refresh PR Pilot',
+        detail: 'After repairing or quarantining the file, check status to reload pull requests safely.',
+        done: false,
+      },
+    ]
+  }
   return [
     {
       label: 'Install GitHub CLI',

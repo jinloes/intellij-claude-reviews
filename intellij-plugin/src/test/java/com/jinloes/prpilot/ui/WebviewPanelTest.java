@@ -12,6 +12,7 @@ import com.jinloes.prpilot.sidecar.pr.PrDetail;
 import java.awt.BorderLayout;
 import java.awt.Rectangle;
 import java.io.File;
+import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -575,6 +576,42 @@ class WebviewPanelTest {
             assertThat(json.has("result")).isFalse();
             assertThat(json.has("diff")).isFalse();
             assertThat(json.has("validationDiff")).isFalse();
+        }
+    }
+
+    @Nested
+    class PendingReviewLoading {
+
+        @Test
+        void preservesServiceFailuresAsTypedFailures() {
+            IOException failure = new IOException("network unavailable");
+
+            WebviewPanel.PendingReviewLoad result =
+                    WebviewPanel.loadPendingReview(
+                            () -> {
+                                throw failure;
+                            });
+
+            assertThat(result.status()).isEqualTo(WebviewPanel.PendingReviewLoadStatus.FAILED);
+            assertThat(result.failure()).isSameAs(failure);
+            assertThat(result.review()).isNull();
+
+            var message =
+                    MAPPER.valueToTree(
+                            WebviewPanel.pendingReviewFailureMessage("acme/platform#42", result));
+            assertThat(message.path("type").asText()).isEqualTo("reviewError");
+            assertThat(message.path("prKey").asText()).isEqualTo("acme/platform#42");
+            assertThat(message.has("prState")).isFalse();
+            assertThat(message.toString()).doesNotContain("NO_DRAFT");
+        }
+
+        @Test
+        void distinguishesARealMissingReviewFromFailure() {
+            WebviewPanel.PendingReviewLoad result = WebviewPanel.loadPendingReview(() -> null);
+
+            assertThat(result.status()).isEqualTo(WebviewPanel.PendingReviewLoadStatus.NONE);
+            assertThat(result.failure()).isNull();
+            assertThat(result.review()).isNull();
         }
     }
 

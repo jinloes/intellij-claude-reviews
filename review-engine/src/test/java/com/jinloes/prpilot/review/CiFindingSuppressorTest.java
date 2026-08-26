@@ -28,6 +28,12 @@ class CiFindingSuppressorTest {
         return result;
     }
 
+    private static ReviewResult reviewWithVerdict(String verdict, LineComment... comments) {
+        ReviewResult result = review(comments);
+        result.setVerdict(verdict);
+        return result;
+    }
+
     private static List<String> bodies(ReviewResult result) {
         return result.getLineComments().stream().map(LineComment::getBody).toList();
     }
@@ -193,6 +199,66 @@ class CiFindingSuppressorTest {
                                             "config value exceeds maximum permitted length limit")));
 
             assertThat(result.getLineComments()).hasSize(1);
+        }
+
+        @Test
+        void keepsLongerFindingThatMerelyContainsAShortAnnotation() {
+            ReviewResult result =
+                    CiFindingSuppressor.suppress(
+                            review(
+                                    comment(
+                                            "A.java",
+                                            10,
+                                            "Null dereference also corrupts shared cache state")),
+                            List.of(annotation("A.java", 10, "null dereference")));
+
+            assertThat(result.getLineComments()).hasSize(1);
+        }
+
+        @Test
+        void keepsShortSubsetEvenWhenItHasThreeDistinctiveTokens() {
+            ReviewResult result =
+                    CiFindingSuppressor.suppress(
+                            review(
+                                    comment(
+                                            "A.java",
+                                            10,
+                                            "Unsafe shared cache mutation corrupts concurrent readers")),
+                            List.of(annotation("A.java", 10, "shared cache mutation")));
+
+            assertThat(result.getLineComments()).hasSize(1);
+        }
+
+        @Test
+        void downgradesRequestChangesWhenEveryCommentWasSuppressed() {
+            ReviewResult result =
+                    CiFindingSuppressor.suppress(
+                            reviewWithVerdict(
+                                    "REQUEST_CHANGES",
+                                    comment("A.java", 10, "Possible null dereference on config")),
+                            List.of(
+                                    annotation(
+                                            "A.java", 10, "Possible null dereference on config")));
+
+            assertThat(result.getVerdict()).isEqualTo("COMMENT");
+            assertThat(result.getLineComments()).isEmpty();
+        }
+
+        @Test
+        void preservesRequestChangesWhenAnyCommentRemains() {
+            LineComment duplicate = comment("A.java", 10, "Possible null dereference on config");
+            LineComment retained =
+                    comment("B.java", 20, "Concurrent cache mutation corrupts shared state");
+
+            ReviewResult result =
+                    CiFindingSuppressor.suppress(
+                            reviewWithVerdict("REQUEST_CHANGES", duplicate, retained),
+                            List.of(
+                                    annotation(
+                                            "A.java", 10, "Possible null dereference on config")));
+
+            assertThat(result.getVerdict()).isEqualTo("REQUEST_CHANGES");
+            assertThat(result.getLineComments()).containsExactly(retained);
         }
     }
 }

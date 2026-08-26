@@ -221,6 +221,34 @@ public class WebviewPanel implements Disposable {
             String chatOperationId,
             PrWorktree worktree) {}
 
+    enum PendingReviewLoadStatus {
+        LOADED,
+        NONE,
+        FAILED
+    }
+
+    record PendingReviewLoad(
+            PendingReviewLoadStatus status,
+            IntellijGitHubService.PendingReview review,
+            Exception failure) {
+        static PendingReviewLoad loaded(IntellijGitHubService.PendingReview review) {
+            return new PendingReviewLoad(PendingReviewLoadStatus.LOADED, review, null);
+        }
+
+        static PendingReviewLoad none() {
+            return new PendingReviewLoad(PendingReviewLoadStatus.NONE, null, null);
+        }
+
+        static PendingReviewLoad failed(Exception failure) {
+            return new PendingReviewLoad(PendingReviewLoadStatus.FAILED, null, failure);
+        }
+    }
+
+    @FunctionalInterface
+    interface PendingReviewLoader {
+        IntellijGitHubService.PendingReview load() throws Exception;
+    }
+
     record WorktreeLease<T>(long epoch, String key, CompletableFuture<T> future, boolean owner) {}
 
     static final class WorktreeCoordinator<T> {
@@ -699,6 +727,25 @@ public class WebviewPanel implements Disposable {
 
     // --- selectPR ---
 
+    static PendingReviewLoad loadPendingReview(PendingReviewLoader loader) {
+        try {
+            IntellijGitHubService.PendingReview review = loader.load();
+            return review == null ? PendingReviewLoad.none() : PendingReviewLoad.loaded(review);
+        } catch (Exception e) {
+            return PendingReviewLoad.failed(e);
+        }
+    }
+
+    static Object pendingReviewFailureMessage(String prKey, PendingReviewLoad load) {
+        if (load.status() != PendingReviewLoadStatus.FAILED || load.failure() == null) {
+            throw new IllegalArgumentException("A failed pending-review load is required");
+        }
+        return new ErrorMsg(
+                "reviewError",
+                prKey,
+                UserFacingErrors.forGitHub(load.failure(), "load the pending review"));
+    }
+
     private void handleSelectPR(int number, String owner, String repo) {
         String key = bridgePrKey(number, owner, repo);
         PullRequest pr =
@@ -788,19 +835,13 @@ public class WebviewPanel implements Disposable {
                                                 }
                                             });
 
-                            CompletableFuture<IntellijGitHubService.PendingReview> pendingFuture =
+                            CompletableFuture<PendingReviewLoad> pendingFuture =
                                     CompletableFuture.supplyAsync(
-                                            () -> {
-                                                try {
-                                                    return ghSvc.loadDraftReview(
-                                                            owner, repo, number);
-                                                } catch (Exception e) {
-                                                    log.warn(
-                                                            "loadDraftReview failed: {}",
-                                                            e.getMessage());
-                                                    return null;
-                                                }
-                                            });
+                                            () ->
+                                                    loadPendingReview(
+                                                            () ->
+                                                                    ghSvc.loadDraftReview(
+                                                                            owner, repo, number)));
 
                             CompletableFuture<String> diffFuture =
                                     CompletableFuture.supplyAsync(
@@ -846,7 +887,8 @@ public class WebviewPanel implements Disposable {
                             PrDetail detail = detailFuture.join();
                             PullRequest hydratedPr = hydratePullRequest(pr, detail);
                             boolean merged = detail != null && detail.merged();
-                            IntellijGitHubService.PendingReview pending = pendingFuture.join();
+                            PendingReviewLoad pendingLoad = pendingFuture.join();
+                            IntellijGitHubService.PendingReview pending = pendingLoad.review();
                             String fetchedDiff = diffFuture.join();
                             String fetchedValidationDiff = validationDiffFuture.join();
                             String fetchedReviews = reviewsFuture.join();
@@ -870,6 +912,17 @@ public class WebviewPanel implements Disposable {
                                 prefetchedExistingReviews = fetchedReviews;
                             }
 
+                            if (pendingLoad.status() == PendingReviewLoadStatus.FAILED) {
+                                log.warn(
+                                        "loadDraftReview failed: {}",
+                                        pendingLoad.failure().getMessage());
+                                publishIfCurrentSelection(
+                                        key,
+                                        revision,
+                                        pendingReviewFailureMessage(key, pendingLoad));
+                                return;
+                            }
+
                             // Delete stale draft on a merged PR, best-effort.
                             if (merged && pending != null && isCurrentSelection(key, revision)) {
                                 try {
@@ -882,6 +935,14 @@ public class WebviewPanel implements Disposable {
 
                             if (merged) {
                                 draftRecoveryStore.clear(key);
+                                synchronized (WebviewPanel.this) {
+                                    if (!isCurrentSelectionLocked(key, revision)) {
+                                        return;
+                                    }
+                                    pendingReviewId = null;
+                                    pendingReviewKey = null;
+                                    lastResult = null;
+                                }
                                 publishIfCurrentSelection(
                                         key,
                                         revision,
@@ -955,6 +1016,14 @@ public class WebviewPanel implements Disposable {
                                 return;
                             }
 
+                            synchronized (WebviewPanel.this) {
+                                if (!isCurrentSelectionLocked(key, revision)) {
+                                    return;
+                                }
+                                pendingReviewId = null;
+                                pendingReviewKey = null;
+                                lastResult = null;
+                            }
                             publishIfCurrentSelection(
                                     key,
                                     revision,
@@ -996,10 +1065,17 @@ public class WebviewPanel implements Disposable {
         activeChatId = chatSequence.incrementAndGet();
         PrWorktree worktree = worktrees.clear();
 
+        boolean samePullRequest =
+                activePR != null
+                        && activePR.getNumber() == pr.getNumber()
+                        && StringUtils.equals(activePR.getOwner(), pr.getOwner())
+                        && StringUtils.equals(activePR.getRepo(), pr.getRepo());
         activePR = pr;
-        lastResult = null;
-        pendingReviewId = null;
-        pendingReviewKey = null;
+        if (!samePullRequest) {
+            lastResult = null;
+            pendingReviewId = null;
+            pendingReviewKey = null;
+        }
         prefetchedDiff = null;
         prefetchedValidationDiff = null;
         prefetchedExistingReviews = null;

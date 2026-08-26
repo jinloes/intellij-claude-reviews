@@ -13,6 +13,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -244,6 +247,68 @@ class PRNotificationServiceTest {
             service.poll();
 
             assertThat(notified).containsExactly(candidate);
+        }
+
+        @Test
+        void restartDuringRunningPollCoalescesOneSerializedFollowUp() throws Exception {
+            CountDownLatch firstPollEntered = new CountDownLatch(1);
+            CountDownLatch releaseFirstPoll = new CountDownLatch(1);
+            CountDownLatch followUpFinished = new CountDownLatch(1);
+            AtomicInteger calls = new AtomicInteger();
+            AtomicInteger active = new AtomicInteger();
+            AtomicInteger maxActive = new AtomicInteger();
+            NotificationSourceClient source =
+                    new NotificationSourceClient() {
+                        @Override
+                        public List<PullRequest> searchPRs(String query) throws Exception {
+                            int invocation = calls.incrementAndGet();
+                            int nowActive = active.incrementAndGet();
+                            maxActive.accumulateAndGet(nowActive, Math::max);
+                            try {
+                                if (invocation == 1) {
+                                    firstPollEntered.countDown();
+                                    assertThat(releaseFirstPoll.await(5, TimeUnit.SECONDS))
+                                            .isTrue();
+                                } else if (invocation == 2) {
+                                    followUpFinished.countDown();
+                                }
+                                return List.of();
+                            } finally {
+                                active.decrementAndGet();
+                            }
+                        }
+
+                        @Override
+                        public List<String> getStarredRepos() {
+                            return List.of();
+                        }
+                    };
+            PRNotificationService service =
+                    new PRNotificationService(
+                            () -> new NotificationSettings(true, true, false),
+                            source,
+                            new SeenPRSet(tempDir.resolve("serialized-seen-prs.json")),
+                            new PendingReviewIndex(tempDir.resolve("serialized-pending-prs.json")),
+                            (pullRequest, notificationSource) -> {});
+            Thread initialPoll = new Thread(service::poll);
+
+            try {
+                initialPoll.start();
+                assertThat(firstPollEntered.await(5, TimeUnit.SECONDS)).isTrue();
+
+                service.startPolling(1);
+                releaseFirstPoll.countDown();
+
+                assertThat(followUpFinished.await(5, TimeUnit.SECONDS)).isTrue();
+                initialPoll.join(5_000);
+                assertThat(initialPoll.isAlive()).isFalse();
+                assertThat(calls).hasValue(2);
+                assertThat(maxActive).hasValue(1);
+            } finally {
+                releaseFirstPoll.countDown();
+                service.stopPolling();
+                initialPoll.join(5_000);
+            }
         }
     }
 

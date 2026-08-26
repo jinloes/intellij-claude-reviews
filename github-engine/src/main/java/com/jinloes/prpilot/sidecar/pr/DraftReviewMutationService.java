@@ -31,6 +31,8 @@ public final class DraftReviewMutationService {
     private static final Logger log = LoggerFactory.getLogger(DraftReviewMutationService.class);
     private static final Duration TIMEOUT = Duration.ofSeconds(15);
     private static final int MAX_ATTEMPTS = 3;
+    static final int PAGE_SIZE = 100;
+    static final int MAX_REVIEW_PAGES = 10;
     private static final Pattern SEGMENT = Pattern.compile("[A-Za-z0-9_.-]+");
     private static final Pattern REVIEW_ID = Pattern.compile("[0-9]+");
     private static final Set<String> EVENTS = Set.of("APPROVE", "REQUEST_CHANGES", "COMMENT");
@@ -87,11 +89,14 @@ public final class DraftReviewMutationService {
 
             PendingReview existing = findPendingReview(session, basePath);
             if (existing != null) {
-                if (bodyWithOrphans.equals(existing.body())) {
+                boolean sameHead = headSha.equals(existing.commitId());
+                if (sameHead && bodyWithOrphans.equals(existing.body())) {
                     return DraftReviewMutationResult.saved(existing.id(), false);
                 }
                 DraftReviewCodec.DecodedReview decoded = codec.decode(existing.body(), List.of());
-                if (!decoded.importedFromGitHub() && decoded.lineComments().equals(lineComments)) {
+                if (sameHead
+                        && !decoded.importedFromGitHub()
+                        && decoded.lineComments().equals(lineComments)) {
                     ObjectNode updatePayload = mapper.createObjectNode();
                     updatePayload.put("body", bodyWithOrphans);
                     requireSuccess(
@@ -248,19 +253,34 @@ public final class DraftReviewMutationService {
     }
 
     private PendingReview findPendingReview(Session session, String basePath) {
-        RestResponse response =
-                client.get(session.apiBase(), session.token(), basePath + "/reviews");
-        requireSuccess(response);
-        JsonNode reviews = readJson(response.body());
-        if (!reviews.isArray())
-            throw new MutationException("api_failed", "GitHub API request failed.");
-        for (JsonNode review : reviews) {
-            if ("PENDING".equals(review.path("state").asText(null))) {
-                String id = review.path("id").isMissingNode() ? null : review.path("id").asText();
-                return id == null || id.isBlank()
-                        ? null
-                        : new PendingReview(id, review.path("body").asText(""));
+        for (int page = 1; page <= MAX_REVIEW_PAGES; page++) {
+            RestResponse response =
+                    client.get(
+                            session.apiBase(),
+                            session.token(),
+                            basePath + "/reviews?per_page=" + PAGE_SIZE + "&page=" + page);
+            requireSuccess(response);
+            JsonNode reviews = readJson(response.body());
+            if (!reviews.isArray())
+                throw new MutationException("api_failed", "GitHub API request failed.");
+            for (JsonNode review : reviews) {
+                if ("PENDING".equals(review.path("state").asText(null))) {
+                    String id =
+                            review.path("id").isMissingNode() ? null : review.path("id").asText();
+                    return id == null || id.isBlank()
+                            ? null
+                            : new PendingReview(
+                                    id,
+                                    review.path("commit_id").isTextual()
+                                            ? review.path("commit_id").textValue()
+                                            : null,
+                                    review.path("body").asText(""));
+                }
             }
+            if (reviews.size() < PAGE_SIZE) return null;
+            if (page == MAX_REVIEW_PAGES)
+                throw new MutationException(
+                        "api_failed", "GitHub pending review pagination limit was exceeded.");
         }
         return null;
     }
@@ -362,7 +382,7 @@ public final class DraftReviewMutationService {
         }
     }
 
-    private record PendingReview(String id, String body) {}
+    private record PendingReview(String id, String commitId, String body) {}
 
     /** A single inline or general comment supplied by the caller (host UI). */
     public record CommentInput(

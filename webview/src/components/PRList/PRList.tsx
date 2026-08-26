@@ -605,7 +605,10 @@ interface SetupScreenProps {
 }
 
 export function SetupScreen({ reason, detail, providerReadiness, refreshing, onRefresh }: SetupScreenProps) {
-  const title = reason === 'load_failed'
+  const draftIndexUnavailable = reason === 'draft_index_unavailable'
+  const title = draftIndexUnavailable
+    ? 'Draft index needs attention'
+    : reason === 'load_failed'
     ? 'Could not load pull requests'
     : reason === 'provider_not_installed' || reason === 'provider_not_authenticated'
       ? 'Review provider not ready'
@@ -668,7 +671,7 @@ export function SetupScreen({ reason, detail, providerReadiness, refreshing, onR
           </div>
         ))}
       </div>
-      <div className="w-full max-w-72 rounded border border-border bg-muted/20 px-3 py-2.5 text-left space-y-2">
+      {!draftIndexUnavailable && <div className="w-full max-w-72 rounded border border-border bg-muted/20 px-3 py-2.5 text-left space-y-2">
         <p className="text-[11px] font-semibold text-foreground">Guided setup</p>
         <p className="text-[11px] font-mono text-foreground">{authCommand}</p>
         <p className="mt-1 text-[11px] text-muted-foreground">
@@ -692,9 +695,9 @@ export function SetupScreen({ reason, detail, providerReadiness, refreshing, onR
             Last checked at {new Date(lastCheckedAt).toLocaleTimeString()}
           </p>
         )}
-      </div>
+      </div>}
       <div className="flex flex-wrap items-center justify-center gap-2">
-        <Button
+        {!draftIndexUnavailable && <Button
           variant="outline"
           size="sm"
           className="gap-1.5 text-xs"
@@ -702,8 +705,8 @@ export function SetupScreen({ reason, detail, providerReadiness, refreshing, onR
         >
           <Settings2 className="w-3.5 h-3.5" />
           Open Settings
-        </Button>
-        <Button
+        </Button>}
+        {!draftIndexUnavailable && <Button
           variant="outline"
           size="sm"
           className="gap-1.5 text-xs"
@@ -711,7 +714,7 @@ export function SetupScreen({ reason, detail, providerReadiness, refreshing, onR
         >
           <ExternalLink className="w-3.5 h-3.5" />
           Auth Guide
-        </Button>
+        </Button>}
         <Button variant="outline" size="sm" className="gap-1.5 text-xs" onClick={checkStatus} disabled={refreshing}>
           <RefreshCw className={cn('w-3 h-3', refreshing && 'animate-spin')} />
           {reason === 'load_failed' ? 'Retry' : 'Check status'}
