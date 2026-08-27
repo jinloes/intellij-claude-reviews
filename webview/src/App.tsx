@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Toaster } from 'sonner'
-import { PRList, SetupScreen, type SetupReason } from './components/PRList'
+import { PRList } from './components/PRList'
+import { SetupScreen, type SetupReason } from './components/Setup'
 import { ReviewPane, type ReviewPaneHandle } from './components/ReviewPane'
 import { onHostMessage, sendToHost, type PR } from './bridge/types'
 import { BRIDGE_PROTOCOL_VERSION } from './bridge/validation'

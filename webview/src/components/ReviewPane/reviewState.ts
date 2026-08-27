@@ -1,0 +1,304 @@
+import type { LineComment, ProviderReadiness, ReviewResult } from '../../bridge/types'
+import { validateComments } from '@/lib/validateComments'
+
+export type Verdict = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT'
+
+export type DraftPresentState = {
+  kind: 'draftPresent'
+  result: ReviewResult
+  reviewId: string
+  staleCommits: boolean
+  importedFromGitHub: boolean
+  diff?: string
+  validationDiff?: string
+  generationElapsedSec?: number
+}
+
+export type PaneState =
+  | { kind: 'idle' }
+  | { kind: 'draftLoading' }
+  | { kind: 'noDraft'; diff?: string; validationDiff?: string; providerReadiness?: ProviderReadiness }
+  | { kind: 'authError'; message: string; diff?: string; validationDiff?: string }
+  | DraftPresentState
+  | {
+      kind: 'generating'
+      messages: string[]
+      chunks: Array<{ kind: 'text' | 'thinking'; content: string }>
+      startedAtMs: number
+    }
+  | { kind: 'reviewUnsaved'; result: ReviewResult; diff: string; validationDiff: string; generationElapsedSec?: number }
+  | { kind: 'merged'; status?: string }
+  | { kind: 'submitted' }
+  | { kind: 'error'; message: string }
+  | { kind: 'saveError'; message: string; result: ReviewResult | null; diff: string; validationDiff: string }
+  | { kind: 'submitError'; message: string; result: ReviewResult | null; diff: string; validationDiff: string }
+  | { kind: 'deleteError'; message: string; draft: DraftPresentState }
+
+export type ReviewStateEvent =
+  | { type: 'reset'; hasPr: boolean }
+  | { type: 'draftLoading' }
+  | {
+      type: 'draftLoaded'
+      prState: 'NO_DRAFT' | 'DRAFT_PRESENT' | 'MERGED'
+      result?: ReviewResult
+      reviewId?: string
+      staleCommits?: boolean
+      importedFromGitHub?: boolean
+      diff: string
+      validationDiff: string
+      status?: string
+      providerReadiness?: ProviderReadiness
+    }
+  | { type: 'reviewGenerating'; message: string; nowMs: number }
+  | { type: 'reviewChunk'; kind: 'text' | 'thinking'; chunk: string }
+  | { type: 'reviewResult'; result: ReviewResult; diff: string; validationDiff: string; nowMs: number }
+  | { type: 'reviewError'; message: string }
+  | { type: 'validationDiffUpdated'; validationDiff: string }
+  | { type: 'draftSaved'; reviewId: string }
+  | { type: 'saveError'; message: string }
+  | { type: 'reviewSubmitted' }
+  | { type: 'reviewSubmitError'; message: string }
+  | { type: 'draftDeleted' }
+  | { type: 'draftDeleteError'; message: string; draft: DraftPresentState | null }
+  | { type: 'startGenerating'; message: string; nowMs: number }
+  | { type: 'keepDraft' }
+  | { type: 'reanchorDraft' }
+  | {
+      type: 'replaceComments'
+      kinds: PaneState['kind'][]
+      comments: LineComment[]
+    }
+  | { type: 'updateComment'; index: number; comment: LineComment | null }
+  | { type: 'addComment'; comment: LineComment }
+
+export const initialPaneState: PaneState = { kind: 'idle' }
+
+export function isDiffTruncated(diff?: string): boolean {
+  return Boolean(diff?.includes('[... diff truncated at 250 KB ...]'))
+}
+
+export function sortedComments(comments: LineComment[]): LineComment[] {
+  return [...comments].sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line)
+}
+
+export function normalizeReviewResult(result: ReviewResult, diff: string): ReviewResult {
+  const { adjusted, orphans } = validateComments(diff, result.lineComments)
+  return { ...result, lineComments: sortedComments([...adjusted, ...orphans]) }
+}
+
+export function diffOf(state: PaneState): string {
+  if (state.kind === 'reviewUnsaved') return state.diff
+  if (state.kind === 'draftPresent') return state.diff ?? ''
+  if (state.kind === 'noDraft' || state.kind === 'authError') return state.diff ?? ''
+  if (state.kind === 'saveError' || state.kind === 'submitError') return state.diff
+  if (state.kind === 'deleteError') return state.draft.diff ?? ''
+  return ''
+}
+
+export function validationDiffOf(state: PaneState): string {
+  if (state.kind === 'reviewUnsaved') return state.validationDiff
+  if (state.kind === 'draftPresent') return state.validationDiff ?? state.diff ?? ''
+  if (state.kind === 'noDraft' || state.kind === 'authError') {
+    return state.validationDiff ?? state.diff ?? ''
+  }
+  if (state.kind === 'saveError' || state.kind === 'submitError') return state.validationDiff
+  if (state.kind === 'deleteError') return state.draft.validationDiff ?? state.draft.diff ?? ''
+  return diffOf(state)
+}
+
+export function resultOf(state: PaneState): ReviewResult | null {
+  if (state.kind === 'draftPresent' || state.kind === 'reviewUnsaved') return state.result
+  if (state.kind === 'saveError' || state.kind === 'submitError') return state.result
+  if (state.kind === 'deleteError') return state.draft.result
+  return null
+}
+
+function mutateComments(
+  state: PaneState,
+  kinds: PaneState['kind'][],
+  mutate: (comments: LineComment[]) => LineComment[],
+): PaneState {
+  if (!kinds.includes(state.kind)) return state
+  if (state.kind === 'deleteError') {
+    const result = { ...state.draft.result, lineComments: mutate(state.draft.result.lineComments) }
+    return { ...state.draft, result }
+  }
+  if (
+    state.kind !== 'draftPresent'
+    && state.kind !== 'reviewUnsaved'
+    && state.kind !== 'saveError'
+    && state.kind !== 'submitError'
+  ) {
+    return state
+  }
+  if (!state.result) return state
+  return { ...state, result: { ...state.result, lineComments: mutate(state.result.lineComments) } }
+}
+
+function mutationErrorState(
+  state: PaneState,
+  kind: 'saveError' | 'submitError',
+  message: string,
+): PaneState {
+  return {
+    kind,
+    message,
+    result: state.kind === 'reviewUnsaved' || state.kind === 'draftPresent' ? state.result : null,
+    diff: state.kind === 'reviewUnsaved' ? state.diff : state.kind === 'draftPresent' ? (state.diff ?? '') : '',
+    validationDiff:
+      state.kind === 'reviewUnsaved'
+        ? state.validationDiff
+        : state.kind === 'draftPresent'
+          ? (state.validationDiff ?? state.diff ?? '')
+          : '',
+  }
+}
+
+export function reviewReducer(state: PaneState, event: ReviewStateEvent): PaneState {
+  switch (event.type) {
+    case 'reset':
+      return { kind: event.hasPr ? 'draftLoading' : 'idle' }
+
+    case 'draftLoading':
+      return { kind: 'draftLoading' }
+
+    case 'draftLoaded':
+      if (event.prState === 'MERGED') return { kind: 'merged', status: event.status }
+      if (event.prState === 'DRAFT_PRESENT' && event.result) {
+        return {
+          kind: 'draftPresent',
+          result: event.result,
+          reviewId: event.reviewId ?? '',
+          staleCommits: event.staleCommits ?? false,
+          importedFromGitHub: event.importedFromGitHub ?? false,
+          diff: event.diff,
+          validationDiff: event.validationDiff,
+        }
+      }
+      return event.status
+        ? { kind: 'authError', message: event.status, diff: event.diff, validationDiff: event.validationDiff }
+        : {
+            kind: 'noDraft',
+            diff: event.diff,
+            validationDiff: event.validationDiff,
+            providerReadiness: event.providerReadiness,
+          }
+
+    case 'reviewGenerating':
+      return {
+        kind: 'generating',
+        messages: state.kind === 'generating' ? [...state.messages, event.message] : [event.message],
+        chunks: state.kind === 'generating' ? state.chunks : [],
+        startedAtMs: state.kind === 'generating' ? state.startedAtMs : event.nowMs,
+      }
+
+    case 'reviewChunk':
+      if (state.kind !== 'generating') return state
+      return { ...state, chunks: [...state.chunks, { kind: event.kind, content: event.chunk }] }
+
+    case 'reviewResult':
+      return {
+        kind: 'reviewUnsaved',
+        result: event.result,
+        diff: event.diff || event.validationDiff,
+        validationDiff: event.validationDiff,
+        generationElapsedSec:
+          state.kind === 'generating'
+            ? Math.max(0, Math.round((event.nowMs - state.startedAtMs) / 1000))
+            : undefined,
+      }
+
+    case 'reviewError':
+      return { kind: 'error', message: event.message }
+
+    case 'validationDiffUpdated': {
+      const validationDiff = event.validationDiff
+      if (state.kind === 'draftPresent' || state.kind === 'reviewUnsaved') {
+        return { ...state, validationDiff, result: normalizeReviewResult(state.result, validationDiff) }
+      }
+      if (state.kind === 'saveError' || state.kind === 'submitError') {
+        return {
+          ...state,
+          validationDiff,
+          result: state.result ? normalizeReviewResult(state.result, validationDiff) : null,
+        }
+      }
+      if (state.kind === 'noDraft' || state.kind === 'authError') return { ...state, validationDiff }
+      return state
+    }
+
+    case 'draftSaved': {
+      const saved = resultOf(state)
+      if (!saved) return state
+      return {
+        kind: 'draftPresent',
+        result: saved,
+        reviewId: event.reviewId,
+        staleCommits: false,
+        importedFromGitHub: false,
+        diff: diffOf(state),
+        validationDiff: validationDiffOf(state),
+        generationElapsedSec: 'generationElapsedSec' in state ? state.generationElapsedSec : undefined,
+      }
+    }
+
+    case 'saveError':
+      return mutationErrorState(state, 'saveError', event.message)
+
+    case 'reviewSubmitted':
+      return { kind: 'submitted' }
+
+    case 'reviewSubmitError':
+      return mutationErrorState(state, 'submitError', event.message)
+
+    case 'draftDeleted':
+      return { kind: 'noDraft' }
+
+    case 'draftDeleteError': {
+      const draft = event.draft ?? (state.kind === 'draftPresent' ? state : null)
+      return draft ? { kind: 'deleteError', message: event.message, draft } : { kind: 'error', message: event.message }
+    }
+
+    case 'startGenerating':
+      return { kind: 'generating', messages: [event.message], chunks: [], startedAtMs: event.nowMs }
+
+    case 'keepDraft':
+      return state.kind === 'deleteError' ? state.draft : state
+
+    case 'reanchorDraft':
+      if (state.kind !== 'draftPresent') return state
+      return {
+        ...state,
+        result: normalizeReviewResult(state.result, validationDiffOf(state)),
+        importedFromGitHub: false,
+      }
+
+    case 'replaceComments':
+      return mutateComments(state, event.kinds, () => event.comments)
+
+    case 'updateComment':
+      return mutateComments(
+        state,
+        ['draftPresent', 'reviewUnsaved', 'deleteError'],
+        (comments) => {
+          if (event.index < 0 || event.index >= comments.length) return comments
+          const next = comments.slice()
+          if (event.comment === null) next.splice(event.index, 1)
+          else next[event.index] = event.comment
+          return next
+        },
+      )
+
+    case 'addComment':
+      if (state.kind !== 'draftPresent' && state.kind !== 'reviewUnsaved') return state
+      return {
+        ...state,
+        result: { ...state.result, lineComments: [...state.result.lineComments, event.comment] },
+      }
+
+    default: {
+      const exhaustive: never = event
+      return exhaustive
+    }
+  }
+}

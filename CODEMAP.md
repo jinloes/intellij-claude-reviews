@@ -132,6 +132,14 @@ Shared Vite/React/TypeScript UI used by both IDE hosts.
 - `src/App.tsx` - Application state and top-level host workflow.
 - `src/bridge/types.ts` - Cross-host message schemas.
 - `src/components/` - PR discovery, diff, review, chat, settings-adjacent UI, and reusable controls.
+- `src/components/PRList/` - Pull-request discovery, filtering, scope controls, and success coaching.
+- `src/components/Setup/` - App-level prerequisite recovery UI and the setup reason/action matrix.
+- `src/components/ReviewPane/ReviewPane.tsx` - Review feature composition root and public component API.
+- `src/components/ReviewPane/useReviewController.ts` - PR-scoped bridge events, autosave, mutation
+  watchdogs, review commands, chat sizing, and the view-model/action contract.
+- `src/components/ReviewPane/reviewState.ts` - Pure review lifecycle transitions and state selectors.
+- `src/components/ReviewPane/ReviewOverrides.tsx`, `ReviewQuality.tsx`, `ReviewContent.tsx`,
+  `ReviewFooter.tsx`, and `OrphanComments.tsx` - Feature-private review presentation modules.
 - `src/lib/reviewQuality.ts` - Quality heuristics and in-memory repair suggestions.
 - `src/lib/autosave.ts` - Draft dirty-check, snapshot, and debounce decisions.
 - `src/lib/validateComments.ts` - Inline-comment validation.

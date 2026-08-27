@@ -2,8 +2,8 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createElement } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { SetupScreen } from './PRList'
-import { setupRecoveryAction, setupSteps } from './setupSteps'
+import { SetupScreen } from './SetupScreen'
+import { setupRecoveryAction, setupSteps } from './setupRecovery'
 
 afterEach(() => {
   vi.restoreAllMocks()
