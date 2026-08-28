@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
 import AxeBuilder from '@axe-core/playwright'
 import { exampleDiff, examplePr, installHostFixture, pushHostMessage } from './hostFixture'
 
@@ -6,6 +6,20 @@ async function expectNoViolations(page: import('@playwright/test').Page, include
   const builder = new AxeBuilder({ page })
   const results = await (include ? builder.include(include) : builder).analyze()
   expect(results.violations, results.violations.map((v) => `${v.id} (${v.impact}): ${v.description} [${v.nodes.length}]`).join('\n')).toEqual([])
+}
+
+async function openGeneratingReview(page: Page) {
+  await pushHostMessage(page, { type: 'prListLoaded', prs: [examplePr] })
+  await page.getByRole('button', { name: /Improve authentication/ }).click()
+  await pushHostMessage(page, {
+    type: 'draftLoaded',
+    prKey: 'acme/platform#42',
+    prState: 'NO_DRAFT',
+    diff: exampleDiff,
+    validationDiff: exampleDiff,
+    providerReadiness: { provider: 'claude', available: true, detail: 'Ready' },
+  })
+  await page.getByRole('button', { name: 'Generate Review' }).click()
 }
 
 test.beforeEach(async ({ page }) => {
@@ -128,6 +142,81 @@ test('dark and high-contrast primary controls have no axe violations', async ({ 
     await expectNoViolations(page)
     await page.getByRole('button', { name: 'Show pull requests' }).click()
   }
+})
+
+test('generation, long activity, reduced motion, and failure recovery are accessible', async ({ page }) => {
+  await page.setViewportSize({ width: 400, height: 600 })
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await pushHostMessage(page, { type: 'themeChanged', theme: 'dark' })
+  await openGeneratingReview(page)
+
+  await pushHostMessage(page, {
+    type: 'reviewChunk',
+    prKey: 'acme/platform#42',
+    kind: 'thinking',
+    chunk: 'PRIVATE_PROVIDER_REASONING_SENTINEL',
+  })
+  await pushHostMessage(page, {
+    type: 'reviewChunk',
+    prKey: 'acme/platform#42',
+    kind: 'text',
+    chunk: 'RAW_PROVIDER_TEXT_SENTINEL',
+  })
+  for (let index = 0; index < 16; index += 1) {
+    await pushHostMessage(page, {
+      type: 'reviewGenerating',
+      prKey: 'acme/platform#42',
+      message: `tool_${index}`,
+    })
+  }
+
+  const activity = page.getByRole('region', { name: 'Review generation activity' })
+  const entries = activity.getByRole('region', { name: 'Review activity entries' })
+  await expect(page.getByText('PRIVATE_PROVIDER_REASONING_SENTINEL')).toHaveCount(0)
+  await expect(page.getByText('RAW_PROVIDER_TEXT_SENTINEL')).toHaveCount(0)
+  await expect(activity.getByRole('button', { name: 'Stop generation' })).toBeVisible()
+  await expect(activity.getByRole('progressbar', { name: 'Review generation progress' })).toBeVisible()
+  expect(await entries.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true)
+
+  await entries.focus()
+  await expect(entries).toBeFocused()
+  await page.keyboard.press('Home')
+  await expect.poll(() => entries.evaluate((element) => element.scrollTop)).toBe(0)
+  await page.keyboard.press('ArrowDown')
+  await expect.poll(() => entries.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+  await page.keyboard.press('Home')
+  await expect.poll(() => entries.evaluate((element) => element.scrollTop)).toBe(0)
+  await pushHostMessage(page, {
+    type: 'reviewGenerating',
+    prKey: 'acme/platform#42',
+    message: 'tool_after_keyboard_scroll',
+  })
+  await expect.poll(() => entries.evaluate((element) => element.scrollTop)).toBe(0)
+  await expectNoViolations(page)
+
+  await pushHostMessage(page, { type: 'themeChanged', theme: 'highContrastDark' })
+  await expectNoViolations(page)
+
+  await pushHostMessage(page, {
+    type: 'reviewError',
+    prKey: 'acme/platform#42',
+    message: 'Provider failed. Check credentials and retry.',
+  })
+  const alert = page.getByRole('alert')
+  const instructions = page.getByTestId('review-overrides-disclosure')
+  const [alertBox, activityBox, instructionsBox] = await Promise.all([
+    alert.boundingBox(),
+    activity.boundingBox(),
+    instructions.boundingBox(),
+  ])
+  expect(alertBox).not.toBeNull()
+  expect(activityBox).not.toBeNull()
+  expect(instructionsBox).not.toBeNull()
+  expect(alertBox!.y).toBeLessThan(activityBox!.y)
+  expect(activityBox!.y).toBeLessThan(instructionsBox!.y)
+  await expect(page.getByRole('button', { name: 'Try Again' })).toBeVisible()
+  await expect(page.getByText('Adjust instructions before retry')).toBeVisible()
+  await expectNoViolations(page)
 })
 
 test('Comment can be selected from an Approve split menu', async ({ page }) => {

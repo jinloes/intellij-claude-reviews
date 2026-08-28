@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils'
 import type { ChunkRecommendation, DiffPreflight } from './useReviewController'
 
 interface ReviewOverridesProps {
+  summaryLabel?: string
   focusAreas: string
   customInstructions: string
   chunkedMode: boolean
@@ -16,6 +17,7 @@ interface ReviewOverridesProps {
 }
 
 export function ReviewOverrides({
+  summaryLabel = 'Review instructions (optional)',
   focusAreas,
   customInstructions,
   chunkedMode,
@@ -35,7 +37,7 @@ export function ReviewOverrides({
         className="rounded border border-border bg-muted/20 px-3 py-2.5"
       >
         <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-foreground">
-          <span>Review instructions (optional)</span>
+          <span>{summaryLabel}</span>
           {hasOverrides && (
             <Badge variant="outline" className="px-1.5 py-0 text-[10px] font-normal">
               {overrideCount} {overrideCount === 1 ? 'override' : 'overrides'} applied

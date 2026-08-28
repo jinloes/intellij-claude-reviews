@@ -41,6 +41,7 @@ import {
   appendReviewActivity,
   emptyReviewActivity,
   finishReviewActivity,
+  formatReviewActivityLabel,
   startReviewActivity,
   type ReviewActivity,
 } from './reviewActivity'
@@ -275,6 +276,7 @@ export function useReviewController({
   const submitInFlightRef = useRef(false)
   const currentPrRef = useRef(pr)
   const activeReviewOperationIdRef = useRef<string | null>(null)
+  const generationStartedAtRef = useRef<number | null>(null)
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastSavedSnapshotRef = useRef<string | null>(null)
   const generatedBaselineRef = useRef<ReviewResult | null>(null)
@@ -317,6 +319,7 @@ export function useReviewController({
     setPendingChatMessage(null)
     setQualityExpanded(false)
     activeReviewOperationIdRef.current = null
+    generationStartedAtRef.current = null
     lastSavedSnapshotRef.current = null
     generatedBaselineRef.current = null
     inFlightSaveRef.current = null
@@ -367,13 +370,11 @@ export function useReviewController({
 
         case 'reviewGenerating': {
           const nowMs = Date.now()
-          dispatch({ type: 'reviewGenerating', message: message.message, nowMs })
           setReviewActivity((current) => appendReviewActivity(current, message.message, nowMs))
           break
         }
 
         case 'reviewChunk':
-          dispatch({ type: 'reviewChunk', kind: message.kind, chunk: message.chunk })
           break
 
         case 'reviewResult': {
@@ -381,19 +382,24 @@ export function useReviewController({
           const validationDiff = message.validationDiff ?? diff
           const result = normalizeReviewResult(message.result, validationDiff)
           const nowMs = Date.now()
+          const generationElapsedSec = generationStartedAtRef.current == null
+            ? undefined
+            : Math.max(0, Math.round((nowMs - generationStartedAtRef.current) / 1000))
           setFocusedCommentIdx(0)
           activeReviewOperationIdRef.current = null
+          generationStartedAtRef.current = null
           generatedBaselineRef.current = result
           setReviewActivity((current) =>
             finishReviewActivity(current, 'completed', 'Review complete', nowMs),
           )
-          dispatch({ type: 'reviewResult', result, diff, validationDiff, nowMs })
+          dispatch({ type: 'reviewResult', result, diff, validationDiff, generationElapsedSec })
           break
         }
 
         case 'reviewError': {
           const nowMs = Date.now()
           activeReviewOperationIdRef.current = null
+          generationStartedAtRef.current = null
           setReviewActivity((current) =>
             finishReviewActivity(current, 'failed', 'Review failed', nowMs),
           )
@@ -747,14 +753,11 @@ export function useReviewController({
       const operationId = newOperationId()
       const nowMs = Date.now()
       activeReviewOperationIdRef.current = operationId
+      generationStartedAtRef.current = nowMs
       setReviewActivity((current) =>
         startReviewActivity(current, 'Preparing engine-owned review batches…', nowMs),
       )
-      dispatch({
-        type: 'startGenerating',
-        message: 'Preparing engine-owned review batches…',
-        nowMs,
-      })
+      dispatch({ type: 'startGenerating' })
       sendToHost({
         type: 'generateReview',
         operationId,
@@ -772,8 +775,9 @@ export function useReviewController({
     const operationId = newOperationId()
     const nowMs = Date.now()
     activeReviewOperationIdRef.current = operationId
+    generationStartedAtRef.current = nowMs
     setReviewActivity((current) => startReviewActivity(current, 'Starting review…', nowMs))
-    dispatch({ type: 'startGenerating', message: 'Starting review…', nowMs })
+    dispatch({ type: 'startGenerating' })
     sendToHost({
       type: 'generateReview',
       operationId,
@@ -794,6 +798,7 @@ export function useReviewController({
     )
     sendToHost({ type: 'cancelReview', operationId })
     activeReviewOperationIdRef.current = null
+    generationStartedAtRef.current = null
     dispatch({ type: 'draftLoading' })
     sendToHost({ type: 'selectPR', number: pr.number, owner: pr.owner, repo: pr.repo })
   }
@@ -992,7 +997,7 @@ export function useReviewController({
   const statusMessage = state.kind === 'draftLoading'
     ? 'Checking for a saved review draft'
     : state.kind === 'generating'
-      ? (state.messages[state.messages.length - 1] ?? 'Generating review')
+      ? formatReviewActivityLabel(activity.entries[activity.entries.length - 1]?.message ?? 'Generating review')
       : state.kind === 'submitted'
         ? 'Review submitted'
         : saving

@@ -7,7 +7,6 @@ import {
   MessageSquare,
   RotateCcw,
   Trash2,
-  X,
   XCircle,
 } from 'lucide-react'
 import {
@@ -42,7 +41,6 @@ interface ReviewFooterProps {
   deleting: boolean
   onSave: () => void
   onSubmit: (verdict: Verdict, comment?: string) => void
-  onCancel: () => void
   onRegenerate: () => void
   onDelete: () => void
   onRunQualityCheck: () => void
@@ -61,7 +59,6 @@ export function ReviewFooter({
   deleting,
   onSave,
   onSubmit,
-  onCancel,
   onRegenerate,
   onDelete,
   onRunQualityCheck,
@@ -71,16 +68,7 @@ export function ReviewFooter({
   qualityReport,
   diffUnavailable,
 }: ReviewFooterProps) {
-  if (state.kind === 'generating') {
-    return (
-      <div className="shrink-0 flex flex-wrap items-center gap-2 px-4 py-2.5 border-t border-border bg-card">
-        <Button variant="destructive" size="sm" onClick={onCancel} className="gap-1.5">
-          <X className="w-3.5 h-3.5" />
-          Cancel
-        </Button>
-      </div>
-    )
-  }
+  if (state.kind === 'generating') return null
 
   if (state.kind === 'draftPresent' || state.kind === 'reviewUnsaved') {
     const busy = saving || submitting || deleting

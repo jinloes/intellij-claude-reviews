@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import type { ReactNode } from 'react'
 import {
   AlertTriangle,
   CheckCircle2,
@@ -41,20 +41,6 @@ interface PaneContentProps {
   onReanchor: () => void
   onOpenSettings: () => void
   onOpenAuthGuide: () => void
-}
-
-function useElapsedSeconds(active: boolean): number {
-  const [seconds, setSeconds] = useState(0)
-  useEffect(() => {
-    if (!active) {
-      setSeconds(0)
-      return
-    }
-    setSeconds(0)
-    const id = setInterval(() => setSeconds((value) => value + 1), 1000)
-    return () => clearInterval(id)
-  }, [active])
-  return seconds
 }
 
 function formatElapsed(seconds: number): string {
@@ -240,8 +226,6 @@ export function PaneContent({
   onOpenSettings,
   onOpenAuthGuide,
 }: PaneContentProps) {
-  const elapsed = useElapsedSeconds(state.kind === 'generating')
-
   switch (state.kind) {
     case 'idle':
       return null
@@ -308,42 +292,8 @@ export function PaneContent({
         </div>
       )
 
-    case 'generating': {
-      const isThinking = elapsed >= 10 && state.chunks.length === 0
-      const latestChunks = state.chunks.slice(-5)
-      return (
-        <div className="flex flex-col gap-4 p-6">
-          <div className="flex items-center gap-3">
-            <Loader2 className="w-4 h-4 text-primary animate-spin shrink-0" />
-            <div className="flex-1 min-w-0">
-              <p className="text-sm text-foreground/80 truncate">Generating review…</p>
-              <p className="text-xs text-muted-foreground font-mono mt-0.5">
-                {elapsed < 2 ? 'Starting…' : formatElapsed(elapsed)}
-              </p>
-            </div>
-          </div>
-
-          <div className="relative h-0.5 bg-border rounded-full overflow-hidden">
-            <div
-              className="absolute inset-y-0 w-2/5 bg-primary rounded-full"
-              style={{ animation: 'progress-slide 1.5s ease-in-out infinite' }}
-            />
-          </div>
-
-          {isThinking && (
-            <p className="text-xs text-muted-foreground italic">
-              {elapsed >= 60 ? 'Large diffs may take a few minutes…' : 'AI is thinking…'}
-            </p>
-          )}
-
-          {latestChunks.length > 0 && (
-            <p className="text-xs text-muted-foreground font-mono break-words line-clamp-3 leading-relaxed">
-              {latestChunks.map((chunk) => chunk.content).join('')}
-            </p>
-          )}
-        </div>
-      )
-    }
+    case 'generating':
+      return null
 
     case 'draftPresent':
       return (

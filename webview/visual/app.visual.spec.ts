@@ -85,6 +85,18 @@ async function openNoDraftReview(page: Page, diff = reviewDiff) {
   })
 }
 
+async function openGeneratingReview(page: Page, activityCount = 1) {
+  await openNoDraftReview(page)
+  await page.getByRole('button', { name: 'Generate Review' }).click()
+  for (let index = 0; index < activityCount; index += 1) {
+    await pushHostMessage(page, {
+      type: 'reviewGenerating',
+      prKey: 'acme/platform#42',
+      message: index === 0 ? 'read_file' : `tool_${index}`,
+    })
+  }
+}
+
 async function openLongestRiskySubmit(page: Page) {
   await selectExamplePr(page, true)
   await pushHostMessage(page, {
@@ -292,6 +304,76 @@ test('no-draft hierarchy keeps the primary action ahead of optional overrides', 
   expect(generateBox!.y).toBeLessThan(disclosureBox!.y)
   await expect(page.locator('#review-focus-areas')).toBeHidden()
   await expect(page).toHaveScreenshot('no-draft-narrow-pseudo-high-contrast.png')
+})
+
+test('wide generation stays on a bounded reading rail without exposing provider output', async ({ page }) => {
+  await page.setViewportSize({ width: 1_440, height: 900 })
+  await page.goto('/')
+  await pushHostMessage(page, { type: 'themeChanged', theme: 'dark' })
+  await openGeneratingReview(page)
+  await pushHostMessage(page, {
+    type: 'reviewChunk',
+    prKey: 'acme/platform#42',
+    kind: 'thinking',
+    chunk: 'PRIVATE_PROVIDER_REASONING_SENTINEL',
+  })
+  await pushHostMessage(page, {
+    type: 'reviewChunk',
+    prKey: 'acme/platform#42',
+    kind: 'text',
+    chunk: 'RAW_PROVIDER_TEXT_SENTINEL',
+  })
+
+  const activity = page.getByRole('region', { name: 'Review generation activity' })
+  const geometry = await activity.evaluate((element) => {
+    const bounds = element.getBoundingClientRect()
+    return { width: bounds.width, x: bounds.x }
+  })
+  expect(geometry.width).toBeLessThanOrEqual(896)
+  await expect(page.getByText('PRIVATE_PROVIDER_REASONING_SENTINEL')).toHaveCount(0)
+  await expect(page.getByText('RAW_PROVIDER_TEXT_SENTINEL')).toHaveCount(0)
+  await expect(activity.getByRole('button', { name: 'Stop generation' })).toBeVisible()
+  await expect(page).toHaveScreenshot('review-generation-wide-dark.png')
+})
+
+test('long generation activity remains usable in a narrow high-contrast host', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 568 })
+  await page.goto('/')
+  await pushHostMessage(page, { type: 'themeChanged', theme: 'highContrastDark' })
+  await openGeneratingReview(page, 16)
+
+  const activity = page.getByRole('region', { name: 'Review generation activity' })
+  const entries = activity.getByRole('region', { name: 'Review activity entries' })
+  await expectNoHorizontalOverflow(page, '[data-testid="review-pane-shell"]')
+  expect(await entries.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true)
+  await entries.focus()
+  await expect(entries).toBeFocused()
+  await expect(page).toHaveScreenshot('review-generation-long-narrow-high-contrast.png')
+})
+
+test('generation failure puts recovery first in a narrow dark host', async ({ page }) => {
+  await page.setViewportSize({ width: 400, height: 600 })
+  await page.goto('/')
+  await pushHostMessage(page, { type: 'themeChanged', theme: 'dark' })
+  await openGeneratingReview(page, 5)
+  await pushHostMessage(page, {
+    type: 'reviewError',
+    prKey: 'acme/platform#42',
+    message: 'Provider failed. Check credentials and retry.',
+  })
+
+  const [alertBox, activityBox, instructionsBox] = await Promise.all([
+    page.getByRole('alert').boundingBox(),
+    page.getByRole('region', { name: 'Review generation activity' }).boundingBox(),
+    page.getByTestId('review-overrides-disclosure').boundingBox(),
+  ])
+  expect(alertBox).not.toBeNull()
+  expect(activityBox).not.toBeNull()
+  expect(instructionsBox).not.toBeNull()
+  expect(alertBox!.y).toBeLessThan(activityBox!.y)
+  expect(activityBox!.y).toBeLessThan(instructionsBox!.y)
+  await expect(page.getByRole('button', { name: 'Try Again' })).toBeVisible()
+  await expect(page).toHaveScreenshot('review-generation-failed-narrow-dark.png')
 })
 
 test('longest risky-submit dialog stays inside a 320x568 viewport and traps focus', async ({ page }) => {

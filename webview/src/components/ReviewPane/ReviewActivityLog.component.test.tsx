@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   appendReviewActivity,
   emptyReviewActivity,
@@ -15,17 +15,27 @@ function runningActivity() {
 
 describe('ReviewActivityLog', () => {
   it('shows chronological safe activity while a review is running', () => {
-    render(<ReviewActivityLog activity={runningActivity()} />)
+    const onCancel = vi.fn()
+    render(<ReviewActivityLog activity={runningActivity()} onCancel={onCancel} />)
 
     expect(screen.getByRole('region', { name: 'Review generation activity' })).toBeVisible()
-    expect(screen.getByRole('button', { name: 'Hide review activity' })).toHaveAttribute(
+    expect(screen.getByText('Generating review')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Hide details for Generating review' })).toHaveAttribute(
       'aria-expanded',
       'true',
     )
     expect(screen.getByText('Starting review')).toBeVisible()
-    expect(screen.getAllByText('Reading files')).toHaveLength(2)
-    expect(screen.getByText('+1s')).toBeVisible()
-    expect(screen.getByText(/Private reasoning, arguments, and file contents are not displayed/)).toBeVisible()
+    expect(screen.getAllByText('Reading files')).toHaveLength(1)
+    expect(screen.getByText('+0s')).toBeVisible()
+    expect(screen.getByRole('progressbar', { name: 'Review generation progress' })).toHaveAttribute(
+      'aria-valuetext',
+      'Reading files',
+    )
+    expect(screen.getByRole('region', { name: 'Review activity entries' })).toHaveAttribute('tabindex', '0')
+    expect(screen.getByText(/Provider output, private reasoning, arguments, and file contents are not displayed/)).toBeVisible()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stop generation' }))
+    expect(onCancel).toHaveBeenCalledOnce()
   })
 
   it('collapses after completion and remains available for inspection', () => {
@@ -39,13 +49,13 @@ describe('ReviewActivityLog', () => {
     )
 
     expect(screen.getByText('Completed in 3s')).toBeVisible()
-    expect(screen.getByRole('button', { name: 'Show review activity' })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: 'Show details for Review activity' })).toHaveAttribute(
       'aria-expanded',
       'false',
     )
     expect(screen.queryByText('Review complete')).not.toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Show review activity' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Show details for Review activity' }))
 
     expect(screen.getByText('Review complete')).toBeVisible()
   })

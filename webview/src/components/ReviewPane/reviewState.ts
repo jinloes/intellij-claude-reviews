@@ -20,12 +20,7 @@ export type PaneState =
   | { kind: 'noDraft'; diff?: string; validationDiff?: string; providerReadiness?: ProviderReadiness }
   | { kind: 'authError'; message: string; diff?: string; validationDiff?: string }
   | DraftPresentState
-  | {
-      kind: 'generating'
-      messages: string[]
-      chunks: Array<{ kind: 'text' | 'thinking'; content: string }>
-      startedAtMs: number
-    }
+  | { kind: 'generating' }
   | { kind: 'reviewUnsaved'; result: ReviewResult; diff: string; validationDiff: string; generationElapsedSec?: number }
   | { kind: 'merged'; status?: string }
   | { kind: 'submitted' }
@@ -49,9 +44,13 @@ export type ReviewStateEvent =
       status?: string
       providerReadiness?: ProviderReadiness
     }
-  | { type: 'reviewGenerating'; message: string; nowMs: number }
-  | { type: 'reviewChunk'; kind: 'text' | 'thinking'; chunk: string }
-  | { type: 'reviewResult'; result: ReviewResult; diff: string; validationDiff: string; nowMs: number }
+  | {
+      type: 'reviewResult'
+      result: ReviewResult
+      diff: string
+      validationDiff: string
+      generationElapsedSec?: number
+    }
   | { type: 'reviewError'; message: string }
   | { type: 'validationDiffUpdated'; validationDiff: string }
   | { type: 'draftSaved'; reviewId: string }
@@ -60,7 +59,7 @@ export type ReviewStateEvent =
   | { type: 'reviewSubmitError'; message: string }
   | { type: 'draftDeleted' }
   | { type: 'draftDeleteError'; message: string; draft: DraftPresentState | null }
-  | { type: 'startGenerating'; message: string; nowMs: number }
+  | { type: 'startGenerating' }
   | { type: 'keepDraft' }
   | { type: 'reanchorDraft' }
   | {
@@ -184,28 +183,13 @@ export function reviewReducer(state: PaneState, event: ReviewStateEvent): PaneSt
             providerReadiness: event.providerReadiness,
           }
 
-    case 'reviewGenerating':
-      return {
-        kind: 'generating',
-        messages: state.kind === 'generating' ? [...state.messages, event.message] : [event.message],
-        chunks: state.kind === 'generating' ? state.chunks : [],
-        startedAtMs: state.kind === 'generating' ? state.startedAtMs : event.nowMs,
-      }
-
-    case 'reviewChunk':
-      if (state.kind !== 'generating') return state
-      return { ...state, chunks: [...state.chunks, { kind: event.kind, content: event.chunk }] }
-
     case 'reviewResult':
       return {
         kind: 'reviewUnsaved',
         result: event.result,
         diff: event.diff || event.validationDiff,
         validationDiff: event.validationDiff,
-        generationElapsedSec:
-          state.kind === 'generating'
-            ? Math.max(0, Math.round((event.nowMs - state.startedAtMs) / 1000))
-            : undefined,
+        generationElapsedSec: event.generationElapsedSec,
       }
 
     case 'reviewError':
@@ -260,7 +244,7 @@ export function reviewReducer(state: PaneState, event: ReviewStateEvent): PaneSt
     }
 
     case 'startGenerating':
-      return { kind: 'generating', messages: [event.message], chunks: [], startedAtMs: event.nowMs }
+      return { kind: 'generating' }
 
     case 'keepDraft':
       return state.kind === 'deleteError' ? state.draft : state

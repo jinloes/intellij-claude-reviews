@@ -168,6 +168,10 @@ body,
   100% { left: 140%; }
 }
 
+.review-progress-indicator {
+  animation: progress-slide 1.5s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -176,5 +180,10 @@ body,
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
+  }
+
+  .review-progress-indicator {
+    left: 0;
+    width: 100%;
   }
 }

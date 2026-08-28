@@ -3,9 +3,10 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  Loader2,
+  Square,
   XCircle,
 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import {
   formatActivityDuration,
   formatReviewActivityLabel,
@@ -15,16 +16,18 @@ import {
 
 interface ReviewActivityLogProps {
   activity: ReviewActivity
+  onCancel?: () => void
 }
 
-export function ReviewActivityLog({ activity }: ReviewActivityLogProps) {
+export function ReviewActivityLog({ activity, onCancel }: ReviewActivityLogProps) {
   const [manualExpansion, setManualExpansion] = useState<{
     runId: number
     outcome: ReviewActivityOutcome
     expanded: boolean
   } | null>(null)
   const [nowMs, setNowMs] = useState(() => Date.now())
-  const listRef = useRef<HTMLOListElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
+  const autoScrollRef = useRef(true)
   const contentId = useId()
   const expanded = manualExpansion?.runId === activity.runId
     && manualExpansion.outcome === activity.outcome
@@ -38,8 +41,12 @@ export function ReviewActivityLog({ activity }: ReviewActivityLogProps) {
   }, [activity.outcome, activity.runId])
 
   useEffect(() => {
+    autoScrollRef.current = true
+  }, [activity.runId])
+
+  useEffect(() => {
     const list = listRef.current
-    if (expanded && list) list.scrollTop = list.scrollHeight
+    if (expanded && list && autoScrollRef.current) list.scrollTop = list.scrollHeight
   }, [activity.entries.length, expanded])
 
   if (activity.outcome === 'idle' || activity.entries.length === 0) return null
@@ -49,72 +56,111 @@ export function ReviewActivityLog({ activity }: ReviewActivityLogProps) {
     (activity.endedAtMs ?? nowMs) - (activity.startedAtMs ?? nowMs),
   )
   const summary = activitySummary(activity.outcome, elapsedMs)
+  const running = activity.outcome === 'running'
+  const currentEntry = activity.entries[activity.entries.length - 1]
+  const visibleEntries = running ? activity.entries.slice(0, -1) : activity.entries
 
   return (
     <section
       aria-label="Review generation activity"
-      className="overflow-hidden rounded-lg border border-border bg-card"
+      className="w-full max-w-[56rem] overflow-hidden rounded-lg border border-border bg-card"
     >
-      <button
-        type="button"
-        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-muted/40"
-        aria-expanded={expanded}
-        aria-controls={contentId}
-        aria-label={`${expanded ? 'Hide' : 'Show'} review activity`}
-        onClick={() => setManualExpansion({
-          runId: activity.runId,
-          outcome: activity.outcome,
-          expanded: !expanded,
-        })}
-      >
-        {expanded ? (
-          <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
-        ) : (
-          <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-        )}
-        <span className="min-w-0 flex-1">
-          <span className="block text-sm font-medium">Review activity</span>
-          <span className="block truncate text-xs text-muted-foreground">
-            {activity.outcome === 'running'
-              ? formatReviewActivityLabel(
-                activity.entries[activity.entries.length - 1]?.message ?? '',
-              )
-              : summary}
+      <div className="flex flex-col sm:flex-row">
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+          aria-expanded={expanded}
+          aria-controls={contentId}
+          aria-label={`${expanded ? 'Hide' : 'Show'} details for ${running ? 'Generating review' : 'Review activity'}`}
+          onClick={() => {
+            if (!expanded) autoScrollRef.current = true
+            setManualExpansion({
+              runId: activity.runId,
+              outcome: activity.outcome,
+              expanded: !expanded,
+            })
+          }}
+        >
+          {expanded ? (
+            <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+          )}
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-medium">
+              {running ? 'Generating review' : 'Review activity'}
+            </span>
+            <span className="block truncate text-xs text-muted-foreground">
+              {running ? formatReviewActivityLabel(currentEntry?.message ?? '') : summary}
+            </span>
           </span>
-        </span>
-        {activity.outcome === 'running' && (
-          <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
-            {formatActivityDuration(elapsedMs)}
-          </span>
+          {running && (
+            <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+              {formatActivityDuration(elapsedMs)}
+            </span>
+          )}
+        </button>
+        {running && onCancel && (
+          <div className="flex items-center justify-end px-3 pb-2 sm:pl-0 sm:pb-0">
+            <Button variant="outline" size="sm" onClick={onCancel} className="gap-1.5">
+              <Square className="h-3 w-3 fill-current" />
+              Stop generation
+            </Button>
+          </div>
         )}
-      </button>
+      </div>
+
+      {running && (
+        <div
+          className="relative h-0.5 overflow-hidden bg-border"
+          role="progressbar"
+          aria-label="Review generation progress"
+          aria-valuetext={formatReviewActivityLabel(currentEntry?.message ?? 'Generating review')}
+        >
+          <div
+            className="review-progress-indicator absolute inset-y-0 w-2/5 rounded-full bg-primary"
+          />
+        </div>
+      )}
 
       {expanded && (
         <div id={contentId} className="border-t border-border px-3 py-2">
-          <ol ref={listRef} className="max-h-48 space-y-2 overflow-y-auto">
-            {activity.entries.map((entry, index) => {
-              const isLast = index === activity.entries.length - 1
-              const isCurrent = activity.outcome === 'running' && isLast
-              return (
-                <li key={`${entry.startedAtMs}-${index}`} className="flex items-start gap-2 text-xs">
-                  <ActivityIcon
-                    outcome={isLast ? activity.outcome : 'completed'}
-                    active={isCurrent}
-                  />
-                  <span className="min-w-0 flex-1 break-words">
-                    {formatReviewActivityLabel(entry.message)}
-                  </span>
-                  <time className="shrink-0 tabular-nums text-muted-foreground">
-                    +{formatActivityDuration(
-                      entry.startedAtMs - (activity.startedAtMs ?? entry.startedAtMs),
-                    )}
-                  </time>
-                </li>
-              )
-            })}
-          </ol>
+          {visibleEntries.length > 0 ? (
+            // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- Scrollable history needs a keyboard focus target.
+            <div ref={listRef} tabIndex={0} role="region"
+              aria-label="Review activity entries"
+              className="max-h-48 space-y-2 overflow-y-auto rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              onScroll={(event) => {
+                const list = event.currentTarget
+                autoScrollRef.current = list.scrollHeight - list.scrollTop - list.clientHeight <= 4
+              }}
+            >
+              <ol className="space-y-2">
+                {visibleEntries.map((entry, index) => {
+                  const isLast = !running && index === visibleEntries.length - 1
+                  return (
+                    <li key={`${entry.startedAtMs}-${index}`} className="flex items-start gap-2 text-xs">
+                      <ActivityIcon outcome={isLast ? activity.outcome : 'completed'} />
+                      <span className="min-w-0 flex-1 break-words">
+                        {formatReviewActivityLabel(entry.message)}
+                      </span>
+                      <time className="shrink-0 tabular-nums text-muted-foreground">
+                        +{formatActivityDuration(
+                          entry.startedAtMs - (activity.startedAtMs ?? entry.startedAtMs),
+                        )}
+                      </time>
+                    </li>
+                  )
+                })}
+              </ol>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Completed steps will appear here as the review progresses.
+            </p>
+          )}
           <p className="mt-2 border-t border-border pt-2 text-[11px] text-muted-foreground">
-            Shows lifecycle and tool names only. Private reasoning, arguments, and file contents are not displayed.
+            Shows lifecycle and tool names only. Provider output, private reasoning, arguments, and file contents are not displayed.
           </p>
         </div>
       )}
@@ -122,16 +168,7 @@ export function ReviewActivityLog({ activity }: ReviewActivityLogProps) {
   )
 }
 
-function ActivityIcon({
-  outcome,
-  active,
-}: {
-  outcome: ReviewActivityOutcome
-  active: boolean
-}) {
-  if (active) {
-    return <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
-  }
+function ActivityIcon({ outcome }: { outcome: ReviewActivityOutcome }) {
   if (outcome === 'failed') {
     return <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-status-changes" />
   }

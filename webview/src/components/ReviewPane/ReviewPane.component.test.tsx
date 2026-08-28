@@ -161,7 +161,8 @@ describe('ReviewPane review submission', () => {
 
       await user.click(screen.getByRole('button', { name: 'Generate Review' }))
       expect(screen.getByRole('region', { name: 'Review generation activity' })).toBeVisible()
-      expect(screen.getAllByText('Starting review')).toHaveLength(2)
+      expect(within(screen.getByTestId('review-scroll-body')).getAllByText('Starting review')).toHaveLength(1)
+      expect(screen.getByRole('button', { name: 'Stop generation' })).toBeVisible()
 
       act(() => {
         hostMessage({
@@ -170,7 +171,24 @@ describe('ReviewPane review submission', () => {
           message: 'read_file',
         })
       })
-      expect(screen.getAllByText('Reading files')).toHaveLength(2)
+      expect(within(screen.getByTestId('review-scroll-body')).getAllByText('Reading files')).toHaveLength(1)
+
+      act(() => {
+        hostMessage({
+          type: 'reviewChunk',
+          prKey: 'acme/widget#42',
+          kind: 'thinking',
+          chunk: 'PRIVATE_PROVIDER_REASONING_SENTINEL',
+        })
+        hostMessage({
+          type: 'reviewChunk',
+          prKey: 'acme/widget#42',
+          kind: 'text',
+          chunk: 'RAW_PROVIDER_TEXT_SENTINEL',
+        })
+      })
+      expect(screen.queryByText(/PRIVATE_PROVIDER_REASONING_SENTINEL/)).not.toBeInTheDocument()
+      expect(screen.queryByText(/RAW_PROVIDER_TEXT_SENTINEL/)).not.toBeInTheDocument()
 
       act(() => {
         hostMessage({
@@ -182,8 +200,49 @@ describe('ReviewPane review submission', () => {
         })
       })
       expect(screen.getByText(/Completed in/)).toBeVisible()
-      await user.click(screen.getByRole('button', { name: 'Show review activity' }))
+      await user.click(screen.getByRole('button', { name: 'Show details for Review activity' }))
       expect(screen.getByText('Review complete')).toBeVisible()
+    })
+
+    it('keeps the stop action next to progress and sends a scoped cancellation', async () => {
+      const user = userEvent.setup()
+      const cefQuery = vi.fn()
+      ;(window as unknown as { cefQuery?: typeof cefQuery }).cefQuery = cefQuery
+      render(<ReviewPane pr={pr} />)
+      loadReviewableDiff(diffWithFiles(1))
+
+      await user.click(screen.getByRole('button', { name: 'Generate Review' }))
+      const activity = screen.getByRole('region', { name: 'Review generation activity' })
+      const stop = within(activity).getByRole('button', { name: 'Stop generation' })
+      expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
+
+      await user.click(stop)
+
+      const messages = cefQuery.mock.calls.map(([arg]) => JSON.parse(arg.request) as { type: string })
+      expect(messages).toContainEqual(expect.objectContaining({ type: 'cancelReview' }))
+    })
+
+    it('places failure recovery before activity and retry instructions', async () => {
+      const user = userEvent.setup()
+      ;(window as unknown as { cefQuery?: ReturnType<typeof vi.fn> }).cefQuery = vi.fn()
+      render(<ReviewPane pr={pr} />)
+      loadReviewableDiff(diffWithFiles(1))
+
+      await user.click(screen.getByRole('button', { name: 'Generate Review' }))
+      act(() => {
+        hostMessage({
+          type: 'reviewError',
+          prKey: 'acme/widget#42',
+          message: 'Provider failed. Check credentials and retry.',
+        })
+      })
+
+      const alert = screen.getByRole('alert')
+      const activity = screen.getByRole('region', { name: 'Review generation activity' })
+      const instructions = screen.getByText('Adjust instructions before retry').closest('details')!
+      expect(alert.compareDocumentPosition(activity) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+      expect(activity.compareDocumentPosition(instructions) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+      expect(screen.getByRole('button', { name: 'Try Again' })).toBeVisible()
     })
 
     it('keeps chunking off when the diff is truncated', async () => {

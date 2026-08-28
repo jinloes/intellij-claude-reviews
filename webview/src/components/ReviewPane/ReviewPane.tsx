@@ -70,6 +70,7 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
 
   const reviewOverrides = model.showReviewOverrides ? (
     <ReviewOverrides
+      summaryLabel={model.state.kind === 'error' ? 'Adjust instructions before retry' : undefined}
       focusAreas={model.focusAreasOverride}
       customInstructions={model.customInstructionsOverride}
       chunkedMode={model.chunkedMode}
@@ -219,13 +220,17 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
           <ContextMenuTrigger asChild>
             <div ref={refs.reviewBodyRef} data-testid="review-scroll-body" className="flex-1 overflow-y-auto min-h-0">
               {model.state.kind === 'noDraft' && paneContent}
-              {reviewOverrides}
-              {model.state.kind === 'generating' && paneContent}
+              {model.state.kind === 'error' && paneContent}
+              {model.state.kind !== 'error' && reviewOverrides}
               {model.activity.outcome !== 'idle' && (
                 <div className="px-4 pt-3">
-                  <ReviewActivityLog activity={model.activity} />
+                  <ReviewActivityLog
+                    activity={model.activity}
+                    onCancel={model.activity.outcome === 'running' ? actions.cancel : undefined}
+                  />
                 </div>
               )}
+              {model.state.kind === 'error' && reviewOverrides}
               {model.result && model.qualityReport && model.qualityRiskCount > 0 && !model.qualityExpanded && (
                 <div className="px-4 pt-3">
                   <QualityCheckBadge count={model.qualityRiskCount} onReview={actions.runQualityCheck} />
@@ -240,7 +245,10 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
                   />
                 </div>
               )}
-              {model.state.kind !== 'noDraft' && model.state.kind !== 'generating' && paneContent}
+              {model.state.kind !== 'noDraft'
+                && model.state.kind !== 'generating'
+                && model.state.kind !== 'error'
+                && paneContent}
             </div>
           </ContextMenuTrigger>
           <ContextMenuContent>
@@ -311,7 +319,6 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
           deleting={model.deleting}
           onSave={actions.save}
           onSubmit={actions.submit}
-          onCancel={actions.cancel}
           onRegenerate={actions.generate}
           onDelete={actions.deleteDraft}
           onRunQualityCheck={actions.runQualityCheck}

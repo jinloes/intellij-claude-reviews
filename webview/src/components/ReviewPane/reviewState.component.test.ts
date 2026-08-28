@@ -100,21 +100,15 @@ describe('reviewReducer host transitions', () => {
       expectedKind: 'merged',
     },
     {
-      name: 'starts generation from a host status',
-      state: { kind: 'draftLoading' },
-      event: { type: 'reviewGenerating', message: 'Starting', nowMs: 1_000 },
-      expectedKind: 'generating',
-    },
-    {
       name: 'starts generation from a local command',
       state: { kind: 'noDraft' },
-      event: { type: 'startGenerating', message: 'Starting', nowMs: 1_000 },
+      event: { type: 'startGenerating' },
       expectedKind: 'generating',
     },
     {
       name: 'accepts a review result',
-      state: { kind: 'generating', messages: ['Starting'], chunks: [], startedAtMs: 1_000 },
-      event: { type: 'reviewResult', result, diff, validationDiff: diff, nowMs: 3_000 },
+      state: { kind: 'generating' },
+      event: { type: 'reviewResult', result, diff, validationDiff: diff, generationElapsedSec: 2 },
       expectedKind: 'reviewUnsaved',
     },
     {
@@ -163,25 +157,19 @@ describe('reviewReducer host transitions', () => {
     expect(reviewReducer(state, event).kind).toBe(expectedKind)
   })
 
-  it('appends generation status and chunks without resetting elapsed time', () => {
-    const generating: PaneState = {
+  it('keeps provider output out of the generation state', () => {
+    expect(reviewReducer({ kind: 'noDraft' }, { type: 'startGenerating' })).toEqual({
       kind: 'generating',
-      messages: ['Starting'],
-      chunks: [],
-      startedAtMs: 1_000,
-    }
-    const withStatus = reviewReducer(generating, {
-      type: 'reviewGenerating',
-      message: 'Reading files',
-      nowMs: 2_000,
     })
-    const withChunk = reviewReducer(withStatus, { type: 'reviewChunk', kind: 'thinking', chunk: 'Considering…' })
+  })
 
-    expect(withChunk).toMatchObject({
-      kind: 'generating',
-      messages: ['Starting', 'Reading files'],
-      chunks: [{ kind: 'thinking', content: 'Considering…' }],
-      startedAtMs: 1_000,
+  it('preserves the controller-computed generation duration on the result', () => {
+    expect(reviewReducer(
+      { kind: 'generating' },
+      { type: 'reviewResult', result, diff, validationDiff: diff, generationElapsedSec: 2 },
+    )).toMatchObject({
+      kind: 'reviewUnsaved',
+      generationElapsedSec: 2,
     })
   })
 
