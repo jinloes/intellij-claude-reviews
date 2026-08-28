@@ -138,6 +138,8 @@ Shared Vite/React/TypeScript UI used by both IDE hosts.
 - `src/components/ReviewPane/useReviewController.ts` - PR-scoped bridge events, autosave, mutation
   watchdogs, review commands, chat sizing, and the view-model/action contract.
 - `src/components/ReviewPane/reviewState.ts` - Pure review lifecycle transitions and state selectors.
+- `src/components/ReviewPane/reviewActivity.ts`, `ReviewActivityLog.tsx` - Timestamped review-generation
+  lifecycle/tool activity state and its expandable, privacy-safe timeline.
 - `src/components/ReviewPane/ReviewOverrides.tsx`, `ReviewQuality.tsx`, `ReviewContent.tsx`,
   `ReviewFooter.tsx`, and `OrphanComments.tsx` - Feature-private review presentation modules.
 - `src/lib/reviewQuality.ts` - Quality heuristics and in-memory repair suggestions.

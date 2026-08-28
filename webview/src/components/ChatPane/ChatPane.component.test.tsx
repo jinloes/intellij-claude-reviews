@@ -87,6 +87,44 @@ describe('ChatPane', () => {
     expect(onPendingMessageSent).toHaveBeenCalledTimes(1)
   })
 
+  it('retains verification context while pending and after the response', async () => {
+    const cefQuery = vi.fn()
+    Object.assign(window, { cefQuery })
+    const view = render(
+      <ChatPane
+        pr={pr}
+        contextSummary={['PR title/body', 'diff']}
+        pendingMessage={{
+          q: 'Verify this review comment',
+          ctx: 'focused context',
+          id: 124,
+          contextSummary: ['draft comment', 'diff excerpt', 'PR worktree (read-only)'],
+        }}
+        onPendingMessageSent={vi.fn()}
+      />,
+    )
+
+    const focusedContext = 'Context: draft comment, diff excerpt, PR worktree (read-only)'
+    expect(await screen.findByText(focusedContext)).toBeVisible()
+    view.rerender(<ChatPane pr={pr} contextSummary={['PR title/body', 'diff']} />)
+    expect(screen.getByText(focusedContext)).toBeVisible()
+
+    act(() => {
+      const hostWindow = window as unknown as {
+        __handleMessage: (message: unknown) => void
+      }
+      hostWindow.__handleMessage({
+        protocolVersion: 1,
+        type: 'chatResponse',
+        prKey: 'acme/widget#42',
+        response: 'Confirmed',
+      })
+    })
+
+    expect(await screen.findByText('Confirmed')).toBeVisible()
+    expect(screen.getByText(focusedContext)).toBeVisible()
+  })
+
   it('renders a structured verify-comment response as a card instead of raw JSON', async () => {
     Object.assign(window, { cefQuery: vi.fn() })
     render(<ChatPane pr={pr} />)
@@ -102,6 +140,7 @@ describe('ChatPane', () => {
         response: JSON.stringify({
           verdict: 'invalid',
           why: 'The diff shows the null check already exists at line 12.',
+          evidence: ['src/value.ts:12', 'src/value.ts:readValue'],
           action: 'revise',
           replacementComment: 'This check is redundant with the guard added above.',
         }),
@@ -111,6 +150,9 @@ describe('ChatPane', () => {
     expect(await screen.findByText('Invalid')).toBeVisible()
     expect(screen.getByText(/Suggested action: Revise/)).toBeVisible()
     expect(screen.getByText('The diff shows the null check already exists at line 12.')).toBeVisible()
+    expect(screen.getByText('Evidence checked')).toBeVisible()
+    expect(screen.getByText('src/value.ts:12')).toBeVisible()
+    expect(screen.getByText('src/value.ts:readValue')).toBeVisible()
     expect(screen.getByText('This check is redundant with the guard added above.')).toBeVisible()
     expect(screen.queryByText(/"verdict":"invalid"/)).not.toBeInTheDocument()
   })
@@ -251,4 +293,3 @@ describe('ChatPane', () => {
     expect(onApplyVerifyAction).toHaveBeenCalledTimes(1)
   })
 })
-

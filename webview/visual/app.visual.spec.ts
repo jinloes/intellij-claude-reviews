@@ -431,9 +431,11 @@ test('Verify with AI keeps review, chat, and footer usable in a constrained view
   await expect(body).toBeVisible()
   await expect(savedButton).toBeVisible()
   await expect(page.getByRole('textbox', { name: 'Ask about this pull request' })).toBeVisible()
-  await expect(page.getByTestId('chat-messages')).toContainText('Verify whether the draft review comment is supported by the reference data.')
+  await expect(page.getByTestId('chat-messages')).toContainText('Verify whether the draft review comment is supported by the pull-request evidence.')
   await expect(page.getByTestId('chat-messages')).toContainText('"verdict":"valid|invalid|unclear"')
+  await expect(page.getByTestId('chat-messages')).toContainText('"evidence":["relative/path:line or symbol"]')
   await expect(page.getByTestId('chat-messages')).toContainText('"action":"keep|revise|delete"')
+  await expect(chat).toContainText('Context: draft comment, diff excerpt, PR worktree (read-only)')
 
   const geometry = await Promise.all([body.boundingBox(), chatPanel.boundingBox(), savedButton.boundingBox()])
   expect(geometry.every((box) => box !== null)).toBe(true)

@@ -309,7 +309,6 @@ export function PaneContent({
       )
 
     case 'generating': {
-      const latestMessage = state.messages[state.messages.length - 1] ?? 'Starting review…'
       const isThinking = elapsed >= 10 && state.chunks.length === 0
       const latestChunks = state.chunks.slice(-5)
       return (
@@ -317,7 +316,7 @@ export function PaneContent({
           <div className="flex items-center gap-3">
             <Loader2 className="w-4 h-4 text-primary animate-spin shrink-0" />
             <div className="flex-1 min-w-0">
-              <p className="text-sm text-foreground/80 truncate">{latestMessage}</p>
+              <p className="text-sm text-foreground/80 truncate">Generating review…</p>
               <p className="text-xs text-muted-foreground font-mono mt-0.5">
                 {elapsed < 2 ? 'Starting…' : formatElapsed(elapsed)}
               </p>

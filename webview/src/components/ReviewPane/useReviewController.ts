@@ -37,6 +37,13 @@ import {
   type PaneState,
   type Verdict,
 } from './reviewState'
+import {
+  appendReviewActivity,
+  emptyReviewActivity,
+  finishReviewActivity,
+  startReviewActivity,
+  type ReviewActivity,
+} from './reviewActivity'
 import { buildExampleFixPrompt, buildVerifyCommentPrompt, resolveVerifyTarget } from './verifyPrompt'
 
 export interface DiffPreflight {
@@ -54,11 +61,13 @@ export interface PendingChatMessage {
   ctx: string
   id: number
   token?: string
+  contextSummary?: string[]
 }
 
 export interface ReviewViewModel {
   pr: PR | null
   state: PaneState
+  activity: ReviewActivity
   result: ReviewResult | null
   diff: string
   validationDiff: string
@@ -243,6 +252,7 @@ export function useReviewController({
   onDirtyStateChange,
 }: UseReviewControllerProps): ReviewController {
   const [state, dispatch] = useReducer(reviewReducer, initialPaneState)
+  const [activity, setReviewActivity] = useState<ReviewActivity>(emptyReviewActivity)
   const [focusAreasOverride, setFocusAreasOverride] = useState('')
   const [customInstructionsOverride, setCustomInstructionsOverride] = useState('')
   const [saving, setSaving] = useState(false)
@@ -292,6 +302,7 @@ export function useReviewController({
 
   useEffect(() => {
     dispatch({ type: 'reset', hasPr: Boolean(pr) })
+    setReviewActivity(emptyReviewActivity())
     setFocusAreasOverride('')
     setCustomInstructionsOverride('')
     setChunkedMode(false)
@@ -354,9 +365,12 @@ export function useReviewController({
           break
         }
 
-        case 'reviewGenerating':
-          dispatch({ type: 'reviewGenerating', message: message.message, nowMs: Date.now() })
+        case 'reviewGenerating': {
+          const nowMs = Date.now()
+          dispatch({ type: 'reviewGenerating', message: message.message, nowMs })
+          setReviewActivity((current) => appendReviewActivity(current, message.message, nowMs))
           break
+        }
 
         case 'reviewChunk':
           dispatch({ type: 'reviewChunk', kind: message.kind, chunk: message.chunk })
@@ -366,17 +380,26 @@ export function useReviewController({
           const diff = message.diff ?? message.validationDiff ?? ''
           const validationDiff = message.validationDiff ?? diff
           const result = normalizeReviewResult(message.result, validationDiff)
+          const nowMs = Date.now()
           setFocusedCommentIdx(0)
           activeReviewOperationIdRef.current = null
           generatedBaselineRef.current = result
-          dispatch({ type: 'reviewResult', result, diff, validationDiff, nowMs: Date.now() })
+          setReviewActivity((current) =>
+            finishReviewActivity(current, 'completed', 'Review complete', nowMs),
+          )
+          dispatch({ type: 'reviewResult', result, diff, validationDiff, nowMs })
           break
         }
 
-        case 'reviewError':
+        case 'reviewError': {
+          const nowMs = Date.now()
           activeReviewOperationIdRef.current = null
+          setReviewActivity((current) =>
+            finishReviewActivity(current, 'failed', 'Review failed', nowMs),
+          )
           dispatch({ type: 'reviewError', message: message.message })
           break
+        }
 
         case 'validationDiffUpdated':
           if (generatedBaselineRef.current) {
@@ -722,11 +745,15 @@ export function useReviewController({
         return
       }
       const operationId = newOperationId()
+      const nowMs = Date.now()
       activeReviewOperationIdRef.current = operationId
+      setReviewActivity((current) =>
+        startReviewActivity(current, 'Preparing engine-owned review batches…', nowMs),
+      )
       dispatch({
         type: 'startGenerating',
         message: 'Preparing engine-owned review batches…',
-        nowMs: Date.now(),
+        nowMs,
       })
       sendToHost({
         type: 'generateReview',
@@ -743,8 +770,10 @@ export function useReviewController({
     }
 
     const operationId = newOperationId()
+    const nowMs = Date.now()
     activeReviewOperationIdRef.current = operationId
-    dispatch({ type: 'startGenerating', message: 'Starting review…', nowMs: Date.now() })
+    setReviewActivity((current) => startReviewActivity(current, 'Starting review…', nowMs))
+    dispatch({ type: 'startGenerating', message: 'Starting review…', nowMs })
     sendToHost({
       type: 'generateReview',
       operationId,
@@ -760,6 +789,9 @@ export function useReviewController({
     if (!pr) return
     const operationId = activeReviewOperationIdRef.current
     if (!operationId) return
+    setReviewActivity((current) =>
+      finishReviewActivity(current, 'cancelled', 'Review cancelled', Date.now()),
+    )
     sendToHost({ type: 'cancelReview', operationId })
     activeReviewOperationIdRef.current = null
     dispatch({ type: 'draftLoading' })
@@ -873,7 +905,13 @@ export function useReviewController({
     const id = Date.now()
     const token = `verify-${id}`
     verifyTargetsRef.current.set(token, comment)
-    setPendingChatMessage({ q: question, ctx: context, id, token })
+    setPendingChatMessage({
+      q: question,
+      ctx: context,
+      id,
+      token,
+      contextSummary: ['draft comment', 'diff excerpt', 'PR worktree (read-only)'],
+    })
   }
 
   function handleApplyVerifyAction(verify: VerifyResult, token: string) {
@@ -902,7 +940,12 @@ export function useReviewController({
   function handleSuggestFixComment(comment: LineComment) {
     const { question, context } = buildExampleFixPrompt(comment, validationDiff || diff)
     if (!chatVisible) setChatVisible(true)
-    setPendingChatMessage({ q: question, ctx: context, id: Date.now() })
+    setPendingChatMessage({
+      q: question,
+      ctx: context,
+      id: Date.now(),
+      contextSummary: ['draft comment', 'diff excerpt'],
+    })
   }
 
   function applyQualityRepair(action: ReviewQualityAction) {
@@ -962,6 +1005,7 @@ export function useReviewController({
     model: {
       pr,
       state,
+      activity,
       result,
       diff,
       validationDiff,

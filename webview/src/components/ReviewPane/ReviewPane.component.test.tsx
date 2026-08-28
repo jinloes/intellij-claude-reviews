@@ -152,6 +152,40 @@ describe('ReviewPane review submission', () => {
       ])
     })
 
+    it('shows generation activity and keeps the completed timeline available', async () => {
+      const user = userEvent.setup()
+      ;(window as unknown as { cefQuery?: ReturnType<typeof vi.fn> }).cefQuery = vi.fn()
+      render(<ReviewPane pr={pr} />)
+      const diff = diffWithFiles(1)
+      loadReviewableDiff(diff)
+
+      await user.click(screen.getByRole('button', { name: 'Generate Review' }))
+      expect(screen.getByRole('region', { name: 'Review generation activity' })).toBeVisible()
+      expect(screen.getAllByText('Starting review')).toHaveLength(2)
+
+      act(() => {
+        hostMessage({
+          type: 'reviewGenerating',
+          prKey: 'acme/widget#42',
+          message: 'read_file',
+        })
+      })
+      expect(screen.getAllByText('Reading files')).toHaveLength(2)
+
+      act(() => {
+        hostMessage({
+          type: 'reviewResult',
+          prKey: 'acme/widget#42',
+          result: { summary: 'Generated review.', verdict: 'COMMENT', lineComments: [] },
+          diff,
+          validationDiff: diff,
+        })
+      })
+      expect(screen.getByText(/Completed in/)).toBeVisible()
+      await user.click(screen.getByRole('button', { name: 'Show review activity' }))
+      expect(screen.getByText('Review complete')).toBeVisible()
+    })
+
     it('keeps chunking off when the diff is truncated', async () => {
       const user = userEvent.setup()
       ;(window as unknown as { cefQuery?: ReturnType<typeof vi.fn> }).cefQuery = vi.fn()

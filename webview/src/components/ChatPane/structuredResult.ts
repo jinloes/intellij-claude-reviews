@@ -9,6 +9,7 @@ export interface VerifyResult {
   kind: 'verify'
   verdict: VerifyVerdict
   why: string
+  evidence: string[]
   action: VerifyAction
   replacementComment: string | null
 }
@@ -43,11 +44,12 @@ function extractJsonCandidate(content: string): string {
 }
 
 function parseVerifyResult(value: Record<string, unknown>): VerifyResult | null {
-  const { verdict, why, action, replacementComment } = value
+  const { verdict, why, evidence, action, replacementComment } = value
   if (
     typeof verdict !== 'string'
     || !['valid', 'invalid', 'unclear'].includes(verdict)
     || typeof why !== 'string'
+    || (evidence !== undefined && !isStringArray(evidence))
     || typeof action !== 'string'
     || !['keep', 'revise', 'delete'].includes(action)
     || (replacementComment !== null && typeof replacementComment !== 'string')
@@ -58,6 +60,7 @@ function parseVerifyResult(value: Record<string, unknown>): VerifyResult | null 
     kind: 'verify',
     verdict: verdict as VerifyVerdict,
     why,
+    evidence: evidence === undefined ? [] : evidence,
     action: action as VerifyAction,
     replacementComment: replacementComment ?? null,
   }
@@ -103,4 +106,3 @@ export function parseStructuredResult(content: string): StructuredResult | null 
   if (!isRecord(value)) return null
   return parseVerifyResult(value) ?? parseExampleFixResult(value)
 }
-

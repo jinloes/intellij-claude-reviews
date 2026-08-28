@@ -16,6 +16,7 @@ describe('parseStructuredResult — verify schema', () => {
       kind: 'verify',
       verdict: 'invalid',
       why: 'The diff shows the check is present at line 12.',
+      evidence: [],
       action: 'revise',
       replacementComment: 'This is missing null-checking for the optional field.',
     })
@@ -33,6 +34,33 @@ describe('parseStructuredResult — verify schema', () => {
 
     expect(result?.kind).toBe('verify')
     expect(result).toMatchObject({ action: 'keep', replacementComment: null })
+  })
+
+  it('parses inspected worktree evidence', () => {
+    const content = JSON.stringify({
+      verdict: 'valid',
+      why: 'Confirmed in the caller.',
+      evidence: ['src/auth.ts:authorizeUser', 'src/routes.ts:42'],
+      action: 'keep',
+      replacementComment: null,
+    })
+
+    expect(parseStructuredResult(content)).toMatchObject({
+      kind: 'verify',
+      evidence: ['src/auth.ts:authorizeUser', 'src/routes.ts:42'],
+    })
+  })
+
+  it('rejects non-list evidence', () => {
+    const content = JSON.stringify({
+      verdict: 'valid',
+      why: 'Confirmed.',
+      evidence: 'src/auth.ts:12',
+      action: 'keep',
+      replacementComment: null,
+    })
+
+    expect(parseStructuredResult(content)).toBeNull()
   })
 
   it('unwraps a fenced ```json code block despite instructions not to use one', () => {
@@ -132,4 +160,3 @@ describe('parseStructuredResult — non-JSON / free-form chat', () => {
     expect(parseStructuredResult(JSON.stringify([1, 2, 3]))).toBeNull()
   })
 })
-

@@ -16,6 +16,7 @@ import { ChatPane } from '../ChatPane'
 import { LiveStatus } from '../a11y/LiveStatus'
 import { AccessibleResizer } from '../layout/AccessibleResizer'
 import { chatHeightBounds } from './chatHeight'
+import { ReviewActivityLog } from './ReviewActivityLog'
 import { PaneContent } from './ReviewContent'
 import { ReviewFooter } from './ReviewFooter'
 import { ReviewOverrides } from './ReviewOverrides'
@@ -219,6 +220,12 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
             <div ref={refs.reviewBodyRef} data-testid="review-scroll-body" className="flex-1 overflow-y-auto min-h-0">
               {model.state.kind === 'noDraft' && paneContent}
               {reviewOverrides}
+              {model.state.kind === 'generating' && paneContent}
+              {model.activity.outcome !== 'idle' && (
+                <div className="px-4 pt-3">
+                  <ReviewActivityLog activity={model.activity} />
+                </div>
+              )}
               {model.result && model.qualityReport && model.qualityRiskCount > 0 && !model.qualityExpanded && (
                 <div className="px-4 pt-3">
                   <QualityCheckBadge count={model.qualityRiskCount} onReview={actions.runQualityCheck} />
@@ -233,7 +240,7 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
                   />
                 </div>
               )}
-              {model.state.kind !== 'noDraft' && paneContent}
+              {model.state.kind !== 'noDraft' && model.state.kind !== 'generating' && paneContent}
             </div>
           </ContextMenuTrigger>
           <ContextMenuContent>

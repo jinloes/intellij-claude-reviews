@@ -13,6 +13,7 @@ interface Message {
   role: 'user' | 'assistant'
   content: string
   isError?: boolean
+  contextSummary?: string[]
   /**
    * Opaque caller token copied from the `pendingMessage` this reply answers. ChatPane never
    * interprets it — it exists so the caller can map a verify result back to the exact comment
@@ -25,7 +26,13 @@ interface Props {
   pr: PR
   selectedContext?: string
   onContextUsed?: () => void
-  pendingMessage?: { q: string; ctx: string; id: number; token?: string }
+  pendingMessage?: {
+    q: string
+    ctx: string
+    id: number
+    token?: string
+    contextSummary?: string[]
+  }
   onPendingMessageSent?: () => void
   contextSummary?: string[]
   /** Applies a verify verdict's suggested action to the comment identified by `token`. */
@@ -55,10 +62,12 @@ export function ChatPane({
   const [streaming, setStreaming] = useState('')
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  const [activeContextSummary, setActiveContextSummary] = useState<string[] | null>(null)
   const [appliedTokens, setAppliedTokens] = useState<Set<string>>(new Set())
   const messagesRef = useRef<HTMLDivElement>(null)
   const sentPendingMessageIdRef = useRef<number | null>(null)
   const pendingTokenRef = useRef<string | undefined>(undefined)
+  const pendingContextSummaryRef = useRef<string[]>([])
   const activeOperationIdRef = useRef<string | null>(null)
 
   useEffect(() => {
@@ -66,8 +75,10 @@ export function ChatPane({
     setStreaming('')
     setInput('')
     setBusy(false)
+    setActiveContextSummary(null)
     setAppliedTokens(new Set())
     pendingTokenRef.current = undefined
+    pendingContextSummaryRef.current = []
     activeOperationIdRef.current = null
   }, [pr.number, pr.owner, pr.repo])
 
@@ -81,23 +92,44 @@ export function ChatPane({
           break
         case 'chatResponse': {
           const token = pendingTokenRef.current
+          const responseContextSummary = pendingContextSummaryRef.current.length > 0
+            ? [...pendingContextSummaryRef.current]
+            : undefined
           pendingTokenRef.current = undefined
+          pendingContextSummaryRef.current = []
+          setActiveContextSummary(null)
           setStreaming('')
-          setMessages((prev) => [...prev, { role: 'assistant', content: msg.response, token }])
+          setMessages((prev) => [...prev, {
+            role: 'assistant',
+            content: msg.response,
+            token,
+            contextSummary: responseContextSummary,
+          }])
           setBusy(false)
           activeOperationIdRef.current = null
           break
         }
-        case 'chatError':
+        case 'chatError': {
+          const responseContextSummary = pendingContextSummaryRef.current.length > 0
+            ? [...pendingContextSummaryRef.current]
+            : undefined
           pendingTokenRef.current = undefined
+          pendingContextSummaryRef.current = []
+          setActiveContextSummary(null)
           setStreaming('')
           setMessages((prev) => [
             ...prev,
-            { role: 'assistant', content: msg.message, isError: true },
+            {
+              role: 'assistant',
+              content: msg.message,
+              isError: true,
+              contextSummary: responseContextSummary,
+            },
           ])
           setBusy(false)
           activeOperationIdRef.current = null
           break
+        }
         default:
           break
       }
@@ -107,15 +139,22 @@ export function ChatPane({
   useEffect(() => {
     if (!pendingMessage || busy || sentPendingMessageIdRef.current === pendingMessage.id) return
     const { q, ctx, id, token } = pendingMessage
+    const requestContextSummary = pendingMessage.contextSummary ?? contextSummary
     sentPendingMessageIdRef.current = id
     pendingTokenRef.current = token
-    setMessages((prev) => [...prev, { role: 'user', content: q }])
+    pendingContextSummaryRef.current = [...requestContextSummary]
+    setActiveContextSummary(requestContextSummary)
+    setMessages((prev) => [...prev, {
+      role: 'user',
+      content: q,
+      contextSummary: requestContextSummary,
+    }])
     setBusy(true)
     onPendingMessageSent?.()
     const operationId = newOperationId()
     activeOperationIdRef.current = operationId
     sendToHost({ type: 'askClaude', operationId, context: ctx, question: q })
-  }, [pendingMessage, busy, onPendingMessageSent])
+  }, [pendingMessage, busy, onPendingMessageSent, contextSummary])
 
   function handleApplyVerifyAction(result: VerifyResult, token: string) {
     onApplyVerifyAction?.(result, token)
@@ -134,6 +173,9 @@ export function ChatPane({
     setMessages([])
     setStreaming('')
     setBusy(false)
+    setActiveContextSummary(null)
+    pendingTokenRef.current = undefined
+    pendingContextSummaryRef.current = []
     activeOperationIdRef.current = null
     sendToHost({ type: 'clearChat', operationId })
   }
@@ -142,7 +184,9 @@ export function ChatPane({
     const q = input.trim()
     if (!q || busy) return
     const ctx = selectedContext ?? ''
-    setMessages((prev) => [...prev, { role: 'user', content: q }])
+    pendingContextSummaryRef.current = [...contextSummary]
+    setActiveContextSummary(contextSummary)
+    setMessages((prev) => [...prev, { role: 'user', content: q, contextSummary }])
     setInput('')
     setBusy(true)
     onContextUsed?.()
@@ -159,6 +203,13 @@ export function ChatPane({
   }
 
   const hasContent = messages.length > 0 || !!streaming || busy
+  const latestMessageContext = [...messages]
+    .reverse()
+    .find((message) => message.contextSummary && message.contextSummary.length > 0)
+    ?.contextSummary
+  const displayedContextSummary = busy && activeContextSummary && activeContextSummary.length > 0
+    ? activeContextSummary
+    : (latestMessageContext ?? contextSummary)
 
   return (
     <section className="flex flex-1 min-h-0 flex-col border-t border-border bg-card" aria-labelledby="chat-heading">
@@ -167,9 +218,12 @@ export function ChatPane({
         <h2 id="chat-heading" className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
           Chat
         </h2>
-        {contextSummary.length > 0 && (
-          <span className="min-w-0 flex-1 truncate px-2 text-[11px] text-muted-foreground">
-            Context: {contextSummary.join(', ')}
+        {displayedContextSummary.length > 0 && (
+          <span
+            className="min-w-0 flex-1 truncate px-2 text-[11px] text-muted-foreground"
+            title={`Context: ${displayedContextSummary.join(', ')}`}
+          >
+            Context: {displayedContextSummary.join(', ')}
           </span>
         )}
         {hasContent && (
@@ -378,6 +432,7 @@ function VerifyResultCard({
         <span className="text-[11px] text-muted-foreground">Suggested action: {ACTION_LABEL[result.action]}</span>
       </div>
       <p className="whitespace-pre-wrap">{result.why}</p>
+      <TextList title="Evidence checked" items={result.evidence} />
       {result.action === 'revise' && result.replacementComment && (
         <div>
           <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground mb-1">Suggested replacement</p>
@@ -442,5 +497,3 @@ function ExampleFixResultCard({ result }: { result: ExampleFixResult }) {
     </div>
   )
 }
-
-

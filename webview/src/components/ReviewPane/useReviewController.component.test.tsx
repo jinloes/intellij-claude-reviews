@@ -236,4 +236,124 @@ describe('useReviewController', () => {
     })
     expect(result.current.model.state.kind).toBe('draftLoading')
   })
+
+  it('tracks review activity through status updates and completion, then resets it for a new PR', () => {
+    const cefQuery = vi.fn()
+    ;(window as unknown as { cefQuery?: typeof cefQuery }).cefQuery = cefQuery
+    const { result, rerender } = renderHook(
+      ({ selectedPr }) => useReviewController({ pr: selectedPr }),
+      { initialProps: { selectedPr: pr } },
+    )
+
+    act(() => result.current.actions.generate())
+    expect(result.current.model.activity).toMatchObject({
+      outcome: 'running',
+      entries: [{ message: 'Starting review…' }],
+    })
+
+    act(() => {
+      hostMessage({
+        type: 'reviewGenerating',
+        prKey: 'acme/widget#42',
+        message: 'read_file',
+      })
+    })
+    expect(
+      result.current.model.activity.entries[
+        result.current.model.activity.entries.length - 1
+      ]?.message,
+    ).toBe('read_file')
+
+    act(() => {
+      hostMessage({
+        type: 'reviewResult',
+        prKey: 'acme/widget#42',
+        result: review,
+        diff,
+        validationDiff: diff,
+      })
+    })
+    expect(result.current.model.activity.outcome).toBe('completed')
+    expect(
+      result.current.model.activity.entries[
+        result.current.model.activity.entries.length - 1
+      ]?.message,
+    ).toBe('Review complete')
+
+    rerender({ selectedPr: { ...pr, number: 43 } })
+    expect(result.current.model.activity).toEqual({
+      runId: 0,
+      outcome: 'idle',
+      startedAtMs: null,
+      endedAtMs: null,
+      entries: [],
+    })
+  })
+
+  it('marks review activity failed when generation errors', () => {
+    ;(window as unknown as { cefQuery?: ReturnType<typeof vi.fn> }).cefQuery = vi.fn()
+    const { result } = renderHook(() => useReviewController({ pr }))
+
+    act(() => result.current.actions.generate())
+    act(() => {
+      hostMessage({
+        type: 'reviewError',
+        prKey: 'acme/widget#42',
+        message: 'Provider failed',
+      })
+    })
+
+    expect(result.current.model.activity.outcome).toBe('failed')
+    expect(
+      result.current.model.activity.entries[
+        result.current.model.activity.entries.length - 1
+      ]?.message,
+    ).toBe('Review failed')
+  })
+
+  it('marks review activity cancelled and ignores a late provider error', () => {
+    ;(window as unknown as { cefQuery?: ReturnType<typeof vi.fn> }).cefQuery = vi.fn()
+    const { result } = renderHook(() => useReviewController({ pr }))
+
+    act(() => result.current.actions.generate())
+    act(() => result.current.actions.cancel())
+    expect(result.current.model.activity.outcome).toBe('cancelled')
+    expect(
+      result.current.model.activity.entries[
+        result.current.model.activity.entries.length - 1
+      ]?.message,
+    ).toBe('Review cancelled')
+
+    act(() => {
+      hostMessage({
+        type: 'reviewError',
+        prKey: 'acme/widget#42',
+        message: 'Cancelled by user',
+      })
+    })
+    expect(result.current.model.activity.outcome).toBe('cancelled')
+  })
+
+  it('labels verify requests with their read-only worktree context', () => {
+    const { result } = renderHook(() => useReviewController({ pr }))
+    act(() => {
+      hostMessage({
+        type: 'draftLoaded',
+        prKey: 'acme/widget#42',
+        prState: 'DRAFT_PRESENT',
+        reviewId: 'draft-1',
+        result: review,
+        diff,
+        validationDiff: diff,
+      })
+    })
+
+    act(() => result.current.actions.verifyComment(review.lineComments[0]))
+
+    expect(result.current.model.pendingChatMessage?.contextSummary).toEqual([
+      'draft comment',
+      'diff excerpt',
+      'PR worktree (read-only)',
+    ])
+  })
 })
