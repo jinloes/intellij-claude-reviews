@@ -20,6 +20,11 @@ Update docs as part of each coding task:
 - Add to `ARCHITECTURE.md` "Key design decisions" only for non-obvious constraints future code must respect.
 - Update `ARCHITECTURE.md` "Settings persistence" when new persisted settings are added.
 - Update `ARCHITECTURE.md` "Local data files" when persistent files are added.
+- Update affected Mermaid sources under `diagrams/` when code changes alter depicted components,
+  boundaries, ownership, persistence, or workflows. In particular, keep `architecture.md` aligned
+  with host/sidecar/engine boundaries and keep `review-generation-sequence.md` aligned with PR
+  context loading, worktree setup, generation stages, cancellation, and result delivery.
+- Update `diagrams/README.md` and documentation links when diagrams are added, removed, or renamed.
 - Keep this file focused on workflow rules; keep implementation details in code.
 - Keep file/class inventories out of `ARCHITECTURE.md`; put them in `CODEMAP.md`.
 

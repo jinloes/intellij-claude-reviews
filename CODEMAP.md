@@ -28,10 +28,17 @@ context makes them unambiguous.
 - `README.md` - User setup, development, checks, and release flow.
 - `AGENTS.md` - Agent workflow, testing rules, and cross-host obligations.
 - `ARCHITECTURE.md` - Stable design constraints, settings persistence, and local data.
+- `diagrams/` - Mermaid architecture and PR review-generation sequence diagrams.
 - `.github/workflows/ci.yml` - Push/PR checks, Java 17 sidecar smoke test, and packaged-VSIX assertion.
 - `.github/workflows/release.yml` - Tag-driven IntelliJ ZIP and VSIX GitHub releases.
 - `scripts/portable-process.mjs` and `run-gradle.mjs` - Shell-free npm and Gradle wrapper
   invocation used by portable packaging/tests and targeted host CI.
+
+### `diagrams/`
+
+- `README.md` - Diagram index and maintenance guidance.
+- `architecture.md` - Host, transport, engine, external-system, and persistence boundaries.
+- `review-generation-sequence.md` - End-to-end PR selection and review-generation sequence.
 
 ### `core/`
 

@@ -21,6 +21,11 @@ GitHub credentials remain inside `github-engine`, while provider processes and r
 remain inside `review-engine`. Every engine capability must remain reachable from both hosts through
 the parity boundary described below.
 
+Visual references:
+
+- [System architecture diagram](diagrams/architecture.md)
+- [PR review generation sequence](diagrams/review-generation-sequence.md)
+
 ## Key design decisions
 
 Only decisions that encode active constraints future code must respect and are not obvious from source.

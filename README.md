@@ -169,6 +169,7 @@ code, or sensitive pull-request content.
 - `sidecar/` - Thin stdio JSON-RPC process adapter used by the VS Code extension
 - `vscode-extension/` - VS Code host integration
 - `webview/` - Shared React webview UI
+- `diagrams/` - Mermaid architecture and PR review-generation diagrams
 - `.github/workflows/release.yml` - Tag-driven release workflow for both plugin artifacts
 - `AGENTS.md` - Agent workflow, test requirements, and parity rules
 - `ARCHITECTURE.md` - Architecture details and design constraints
@@ -310,5 +311,5 @@ User-facing behavior must stay aligned between IntelliJ and VS Code. If you upda
 
 - GitHub authentication and API behavior are shared in `github-engine`; hosts never receive or persist GitHub tokens.
 - Review-provider CLI setup remains host-specific, while prompt and review semantics stay aligned.
-- For design constraints and persistence files, see `ARCHITECTURE.md`. For implementation entry
-  points and related tests, see `CODEMAP.md`.
+- For system visuals, see `diagrams/`. For design constraints and persistence files, see
+  `ARCHITECTURE.md`. For implementation entry points and related tests, see `CODEMAP.md`.
