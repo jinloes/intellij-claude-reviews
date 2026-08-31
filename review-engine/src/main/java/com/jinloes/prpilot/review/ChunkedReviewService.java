@@ -40,17 +40,33 @@ public final class ChunkedReviewService {
         ReviewResult review(PRReviewRequest request) throws IOException, InterruptedException;
     }
 
+    @FunctionalInterface
+    interface PassProviderCall {
+        ReviewPassResult review(PRReviewRequest request) throws IOException, InterruptedException;
+    }
+
     public ReviewResult review(
             PRReviewRequest request, Consumer<String> onStatus, ProviderCall providerCall)
+            throws IOException, InterruptedException {
+        return reviewPass(
+                        request,
+                        onStatus,
+                        passRequest ->
+                                ReviewPassResult.withoutLedger(providerCall.review(passRequest)))
+                .review();
+    }
+
+    ReviewPassResult reviewPass(
+            PRReviewRequest request, Consumer<String> onStatus, PassProviderCall providerCall)
             throws IOException, InterruptedException {
         List<DiffBatch> batches = buildBatches(request.getDiff());
         if (batches.size() <= 1) return providerCall.review(request);
 
-        List<ReviewResult> results = new ArrayList<>();
+        List<ReviewPassResult> passes = new ArrayList<>();
         for (int index = 0; index < batches.size(); index++) {
             DiffBatch batch = batches.get(index);
             onStatus.accept("Reviewing batch " + (index + 1) + " of " + batches.size() + "…");
-            results.add(
+            passes.add(
                     providerCall.review(
                             copyRequest(
                                     request,
@@ -59,15 +75,28 @@ public final class ChunkedReviewService {
                                             request.getCustomInstructions(),
                                             batchInstructions(batch, index, batches.size())))));
         }
+        List<ReviewResult> results = passes.stream().map(ReviewPassResult::review).toList();
 
         onStatus.accept("Reconciling cross-file contracts and batch findings…");
         try {
-            return providerCall.review(reconciliationRequest(request, batches, results));
+            ReviewPassResult reconciled =
+                    providerCall.review(reconciliationRequest(request, batches, results));
+            List<ReviewPassResult> allPasses = new ArrayList<>(passes);
+            allPasses.add(reconciled);
+            return ReviewPassResult.mergeLedger(reconciled.review(), allPasses);
         } catch (IOException exception) {
             onStatus.accept(
                     "Global reconciliation was unavailable; showing a clearly marked batch-only result.");
-            return mergeFallback(results);
+            return ReviewPassResult.mergeLedger(mergeFallback(results), passes);
         }
+    }
+
+    PRReviewRequest finalValidationRequest(PRReviewRequest request) {
+        List<DiffBatch> batches = buildBatches(request.getDiff());
+        if (batches.size() <= 1) {
+            return request;
+        }
+        return copyRequest(request, buildContractIndex(batches), request.getCustomInstructions());
     }
 
     private PRReviewRequest reconciliationRequest(

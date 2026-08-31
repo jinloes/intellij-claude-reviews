@@ -221,6 +221,11 @@
           "type": "boolean",
           "default": true,
           "description": "Run a second self-critique pass that re-validates each finding against the diff and the same context the first pass saw, dropping misattributed, unsupported, and CI-duplicated ones. On by default for precision; turn it off to roughly halve review latency."
+        },
+        "pr-pilot.reviewSupervisorEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run bounded coverage supervision and at most one targeted follow-up pass for high-risk changes the first pass did not inspect. Off by default because it adds latency."
         }
       }
     }

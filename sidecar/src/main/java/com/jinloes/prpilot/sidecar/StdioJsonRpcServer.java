@@ -978,9 +978,18 @@ final class StdioJsonRpcServer {
         JsonNode params = request.get("params");
         if (params == null
                 || !params.isObject()
-                || !hasOnlyFields(params, Set.of("provider", "model", "generated", "submitted"))
+                || !hasOnlyFields(
+                        params,
+                        Set.of(
+                                "provider",
+                                "model",
+                                "reviewSupervisorEnabled",
+                                "generated",
+                                "submitted"))
                 || !params.path("provider").isTextual()
-                || !params.path("model").isTextual()) {
+                || !params.path("model").isTextual()
+                || (params.has("reviewSupervisorEnabled")
+                        && !params.path("reviewSupervisorEnabled").isBoolean())) {
             return error(requestId(request), -32602, "Invalid params");
         }
         List<ReviewEngineApi.OutcomeCommentParam> generated =
@@ -997,6 +1006,7 @@ final class StdioJsonRpcServer {
                             new ReviewEngineApi.RecordOutcomeParams(
                                     params.path("provider").textValue(),
                                     params.path("model").textValue(),
+                                    params.path("reviewSupervisorEnabled").asBoolean(false),
                                     generated,
                                     submitted));
         }

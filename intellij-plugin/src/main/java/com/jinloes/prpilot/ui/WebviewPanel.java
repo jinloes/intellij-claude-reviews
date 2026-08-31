@@ -1456,7 +1456,10 @@ public class WebviewPanel implements Disposable {
                                                                     provider,
                                                                     generationSettings
                                                                             .runtime()
-                                                                            .model())));
+                                                                            .model(),
+                                                                    generationSettings
+                                                                            .runtime()
+                                                                            .supervisorEnabled())));
                                             pendingReviewId = null;
                                         }
                                         publishIfCurrentGeneration(
@@ -1677,9 +1680,10 @@ public class WebviewPanel implements Disposable {
         pushMessage(new PrDraftStatusMsg("prDraftStatusUpdated", number, owner, repo, false));
     }
 
-    static ReviewOutcomeLog.Metadata generationMetadata(ReviewProvider provider, String model) {
+    static ReviewOutcomeLog.Metadata generationMetadata(
+            ReviewProvider provider, String model, boolean supervisorEnabled) {
         return new ReviewOutcomeLog.Metadata(
-                ClaudeService.PROMPT_VERSION,
+                ClaudeService.reviewPipelineVersion(supervisorEnabled),
                 provider.name().toLowerCase(java.util.Locale.ROOT),
                 model);
     }

@@ -25,6 +25,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.AfterEach;
@@ -653,6 +654,50 @@ class StdioJsonRpcServerTest {
 
         assertThat(generations).hasValue(2);
         assertThat(output.size()).isZero();
+    }
+
+    @Test
+    void reviewsGenerateForwardsTheSupervisorSetting() throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        AtomicReference<ReviewEngineApi.GenerateReviewParams> received = new AtomicReference<>();
+        CountDownLatch generated = new CountDownLatch(1);
+        ReviewSessionService fakeReview =
+                new ReviewSessionService() {
+                    @Override
+                    public ReviewResult generate(
+                            ReviewEngineApi.GenerateReviewParams params,
+                            Consumer<String> onStatus,
+                            BiConsumer<String, String> onChunk) {
+                        received.set(params);
+                        generated.countDown();
+                        return new ReviewResult("summary", "APPROVE", java.util.List.of());
+                    }
+                };
+        server =
+                new StdioJsonRpcServer(
+                        objectMapper,
+                        frameCodec,
+                        new SidecarBootstrapService(),
+                        new GitHubEngine(),
+                        fakeReview,
+                        reviewExecutor);
+        server.run(new ByteArrayInputStream(new byte[0]), output);
+
+        JsonNode response =
+                server.handle(
+                        ("{\"jsonrpc\":\"2.0\",\"method\":\"reviews/generate\",\"params\":{"
+                                        + "\"operationId\":\"supervised\",\"provider\":\"claude\","
+                                        + "\"model\":\"\",\"effort\":\"\",\"inheritMcp\":false,"
+                                        + "\"reviewSupervisorEnabled\":true,"
+                                        + "\"pr\":{\"title\":\"T\",\"htmlUrl\":\"\",\"owner\":\"o\","
+                                        + "\"repo\":\"r\",\"number\":1,\"body\":\"\",\"author\":\"a\","
+                                        + "\"createdAt\":\"2024-01-01\",\"isDraft\":false},"
+                                        + "\"diff\":\"\",\"ciStatus\":\"\"}}")
+                                .getBytes(StandardCharsets.UTF_8));
+
+        assertThat(response).isNull();
+        assertThat(generated.await(1, TimeUnit.SECONDS)).isTrue();
+        assertThat(received.get().reviewSupervisorEnabled()).isTrue();
     }
 
     @Test

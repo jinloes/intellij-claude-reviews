@@ -213,6 +213,12 @@ class CopilotServiceTest {
             assertThat(CopilotService.permissionDecision("write", true).getKind())
                     .isEqualTo("reject");
         }
+
+        @Test
+        void deniesReadToolsForToolFreeSupervisorSessions() {
+            assertThat(CopilotService.permissionDecision("read", false, false).getKind())
+                    .isEqualTo("reject");
+        }
     }
 
     @Nested
@@ -280,12 +286,31 @@ class CopilotServiceTest {
             assertThat(sessionRequest.workingDir()).isEqualTo(new File("/tmp/pr-pilot-repo"));
             assertThat(sessionRequest.inheritMcp()).isFalse();
             assertThat(sessionRequest.configDir()).isNull();
+            assertThat(sessionRequest.allowReadTools()).isTrue();
 
             FakeRuntimeSession session = client.lastSession;
             assertThat(session).isNotNull();
             assertThat(session.lastPrompt).contains("<pr_diff>");
             assertThat(session.lastTimeoutMs).isEqualTo(30L * 60L * 1000L);
             assertThat(session.closeCount.get()).isEqualTo(1);
+        }
+
+        @Test
+        void toolFreeCompletionUsesItsBoundedTimeout() throws Exception {
+            FakeRuntimeFactory factory =
+                    factoryFor(
+                            () -> {
+                                FakeRuntimeSession session = new FakeRuntimeSession();
+                                session.sendAction = current -> current.emitMessage("{}");
+                                return session;
+                            });
+            CopilotService service = new CopilotService(null, factory);
+
+            service.completeReviewPrompt(
+                    "supervise", "", "high", false, null, false, 90_000, ignored -> {});
+
+            assertThat(factory.lastClient.lastSessionRequest.allowReadTools()).isFalse();
+            assertThat(factory.lastClient.lastSession.lastTimeoutMs).isEqualTo(90_000);
         }
 
         @Test

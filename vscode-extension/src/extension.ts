@@ -609,7 +609,7 @@ interface ViewState {
     generatedReviews: Map<string, {
         result: ReviewResult;
         editedResult: ReviewResult | null;
-        attribution: { provider: Provider; model: string };
+        attribution: { provider: Provider; model: string; reviewSupervisorEnabled: boolean };
     }>;
     mutationQueue: Promise<void>;
     chatHistory: Map<string, claude.ChatMessage[]>;
@@ -817,6 +817,7 @@ interface ReviewGenerationSettings {
     inheritMcp: boolean;
     configDir: string;
     selfCritique: boolean;
+    supervisorEnabled: boolean;
     githubBaseUrl: string;
     guidance: ResolvedReviewGuidance;
 }
@@ -849,6 +850,7 @@ function snapshotReviewGenerationSettings(): ReviewGenerationSettings {
             : false,
         configDir: selectedProvider === 'copilot' ? c.get<string>('copilotConfigDir', '').trim() : '',
         selfCritique: c.get<boolean>('reviewSelfCritique', true),
+        supervisorEnabled: c.get<boolean>('reviewSupervisorEnabled', false),
         githubBaseUrl: c.get<string>('githubBaseUrl', 'https://github.com'),
         guidance,
     };
@@ -1224,6 +1226,7 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
                 inheritMcp: settings.inheritMcp,
                 configDir: isCopilot ? settings.configDir : undefined,
                 selfCritique: settings.selfCritique,
+                reviewSupervisorEnabled: settings.supervisorEnabled,
                 chunkedReview: msg.chunkedReview === true,
                 pr: {
                     title,
@@ -1276,7 +1279,11 @@ async function handleGenerateReview(state: ViewState, msg: Record<string, unknow
         state.generatedReviews.set(key, {
             result,
             editedResult: null,
-            attribution: { provider: settings.provider, model: settings.model },
+            attribution: {
+                provider: settings.provider,
+                model: settings.model,
+                reviewSupervisorEnabled: settings.supervisorEnabled,
+            },
         });
         push(state, {
             type: 'reviewResult',
@@ -1411,6 +1418,7 @@ async function recordReviewOutcome(state: ViewState, key: string): Promise<void>
     await sidecarClient.recordReviewOutcome(
         tracked.attribution.provider,
         tracked.attribution.model,
+        tracked.attribution.reviewSupervisorEnabled,
         toOutcome(generated.lineComments),
         toOutcome(submitted.lineComments),
     );

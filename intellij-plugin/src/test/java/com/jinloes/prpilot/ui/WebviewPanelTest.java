@@ -621,9 +621,10 @@ class WebviewPanelTest {
         @Test
         void capturesGenerationTimeProviderAndModel() {
             var metadata =
-                    WebviewPanel.generationMetadata(ReviewProvider.COPILOT, "claude-sonnet-4.6");
+                    WebviewPanel.generationMetadata(
+                            ReviewProvider.COPILOT, "claude-sonnet-4.6", true);
 
-            assertThat(metadata.promptVersion()).isNotBlank();
+            assertThat(metadata.promptVersion()).endsWith("-supervisor-on");
             assertThat(metadata.provider()).isEqualTo("copilot");
             assertThat(metadata.model()).isEqualTo("claude-sonnet-4.6");
         }

@@ -69,6 +69,7 @@ public interface ReviewEngineApi {
             boolean inheritMcp,
             String configDir,
             boolean selfCritique,
+            boolean reviewSupervisorEnabled,
             PrParams pr,
             String diff,
             String priorReview,
@@ -133,6 +134,7 @@ public interface ReviewEngineApi {
     record RecordOutcomeParams(
             String provider,
             String model,
+            boolean reviewSupervisorEnabled,
             List<OutcomeCommentParam> generated,
             List<OutcomeCommentParam> submitted) {}
 

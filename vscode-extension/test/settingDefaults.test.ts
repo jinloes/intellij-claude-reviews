@@ -54,6 +54,12 @@ test('reviewSelfCritique reader fallback matches the contribution default', () =
     assert.equal(readerFallback('reviewSelfCritique'), String(property.default));
 });
 
+test('reviewSupervisorEnabled defaults to off and matches the reader fallback', () => {
+    const property = packageJsonDefaults()['pr-pilot.reviewSupervisorEnabled'] as { default: boolean };
+    assert.equal(property.default, false);
+    assert.equal(readerFallback('reviewSupervisorEnabled'), String(property.default));
+});
+
 test('review-guidance profile settings default to the built-in profile', () => {
     const properties = packageJsonDefaults();
     assert.equal(properties['pr-pilot.reviewGuidanceGlobs'], undefined);

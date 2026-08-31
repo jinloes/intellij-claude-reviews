@@ -152,6 +152,9 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
          * reading. Turn it off to roughly halve review latency.
          */
         public boolean reviewSelfCritique = true;
+
+        /** Enables bounded coverage supervision and at most one targeted follow-up review pass. */
+        public boolean reviewSupervisorEnabled = false;
     }
 
     private State myState = new State();
@@ -405,5 +408,13 @@ public class PluginSettings implements PersistentStateComponent<PluginSettings.S
 
     public void setReviewSelfCritique(boolean value) {
         myState.reviewSelfCritique = value;
+    }
+
+    public boolean isReviewSupervisorEnabled() {
+        return myState.reviewSupervisorEnabled;
+    }
+
+    public void setReviewSupervisorEnabled(boolean value) {
+        myState.reviewSupervisorEnabled = value;
     }
 }

@@ -50,6 +50,7 @@ export interface SettingsState {
     reviewGuidanceProfiles: ReviewGuidanceProfile[];
     activeReviewGuidanceProfileId: string;
     reviewSelfCritique: boolean;
+    reviewSupervisorEnabled: boolean;
     notificationsEnabled: boolean;
     notifyReviewRequested: boolean;
     notifyStarredRepos: boolean;
@@ -330,6 +331,11 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
     <div class="field">
       <label><input type="checkbox" id="reviewSelfCritique" style="width:auto;margin-right:6px;">Run a self-critique validation pass</label>
       <div class="hint">Higher precision, but roughly doubles review time.</div>
+    </div>
+
+    <div class="field">
+      <label><input type="checkbox" id="reviewSupervisorEnabled" style="width:auto;margin-right:6px;">Inspect high-risk coverage gaps</label>
+      <div class="hint">Runs a bounded coverage check and at most one targeted follow-up. Off by default because it adds latency.</div>
     </div>
   </div>
 
@@ -646,6 +652,7 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
   $('focusAreas').addEventListener('change', () => saveGuidanceField('reviewFocusAreas'));
   $('customInstructions').addEventListener('change', () => saveGuidanceField('reviewCustomInstructions'));
   $('reviewSelfCritique').addEventListener('change', () => save('reviewSelfCritique', $('reviewSelfCritique').checked));
+  $('reviewSupervisorEnabled').addEventListener('change', () => save('reviewSupervisorEnabled', $('reviewSupervisorEnabled').checked));
   $('notificationsEnabled').addEventListener('change', () => {
     state.notificationsEnabled = $('notificationsEnabled').checked;
     applyNotificationVisibility(state.notificationsEnabled);
@@ -699,6 +706,7 @@ export function buildSettingsHtml(cspSource: string, nonce: string): string {
       renderGuidanceProfileOptions();
       loadGuidanceFields();
       $('reviewSelfCritique').checked = state.reviewSelfCritique !== false;
+      $('reviewSupervisorEnabled').checked = state.reviewSupervisorEnabled === true;
       $('notificationsEnabled').checked = state.notificationsEnabled === true;
       $('notifyReviewRequested').checked = state.notifyReviewRequested === true;
       $('notifyStarredRepos').checked = state.notifyStarredRepos === true;

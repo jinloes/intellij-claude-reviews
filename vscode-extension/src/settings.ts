@@ -40,6 +40,7 @@ function readState(notificationHealth: NotificationHealth = EMPTY_NOTIFICATION_H
         reviewGuidanceProfiles: normalizeReviewGuidanceProfiles(c.get<unknown>('reviewGuidanceProfiles', [])) ?? [],
         activeReviewGuidanceProfileId: c.get<string>('activeReviewGuidanceProfileId', ''),
         reviewSelfCritique: c.get<boolean>('reviewSelfCritique', true),
+        reviewSupervisorEnabled: c.get<boolean>('reviewSupervisorEnabled', false),
         notificationsEnabled: c.get<boolean>('notificationsEnabled', false),
         notifyReviewRequested: c.get<boolean>('notifyReviewRequested', true),
         notifyStarredRepos: c.get<boolean>('notifyStarredRepos', false),
@@ -52,7 +53,7 @@ const ALLOWED_KEYS = new Set([
     'reviewProvider', 'reviewModel', 'reviewModelCopilot', 'reviewEffort', 'githubBaseUrl',
     'copilotInheritMcp', 'copilotAutoEnableMcpOnReview', 'copilotConfigDir', 'reviewFocusAreas',
     'reviewCustomInstructions', 'reviewGuidanceProfiles',
-    'activeReviewGuidanceProfileId', 'reviewSelfCritique',
+    'activeReviewGuidanceProfileId', 'reviewSelfCritique', 'reviewSupervisorEnabled',
     'notificationsEnabled', 'notifyReviewRequested', 'notifyStarredRepos', 'notificationPollMinutes',
 ]);
 
@@ -60,6 +61,7 @@ const BOOLEAN_KEYS = new Set([
     'copilotInheritMcp',
     'copilotAutoEnableMcpOnReview',
     'reviewSelfCritique',
+    'reviewSupervisorEnabled',
     'notificationsEnabled',
     'notifyReviewRequested',
     'notifyStarredRepos',

@@ -96,6 +96,7 @@ public class PluginSettingsComponent {
     private boolean updatingReviewGuidanceProfile;
     private final JCheckBox reviewSelfCritiqueBox =
             new JCheckBox("Validate findings with a second pass");
+    private final JCheckBox reviewSupervisorBox = new JCheckBox("Inspect high-risk coverage gaps");
     private final JComboBox<ReviewProvider> providerCombo =
             new JComboBox<>(ReviewProvider.values());
     private final JBLabel modelLabel = new JBLabel("Model:");
@@ -368,6 +369,12 @@ public class PluginSettingsComponent {
                         hintLabel(
                                 "<html><small>Re-checks each finding against the diff to improve"
                                         + " precision; roughly doubles review time.</small></html>"));
+        JPanel supervisorField =
+                fieldWithHint(
+                        reviewSupervisorBox,
+                        hintLabel(
+                                "<html><small>Runs a bounded coverage check and at most one targeted"
+                                        + " follow-up. Off by default because it adds latency.</small></html>"));
         JPanel providerField = contentField(providerCombo);
 
         mainPanel =
@@ -402,6 +409,7 @@ public class PluginSettingsComponent {
                         .addSeparator(8)
                         .addComponent(sectionTitle("Review validation"), 1)
                         .addComponentToRightColumn(validationField, 1)
+                        .addComponentToRightColumn(supervisorField, 1)
                         .addSeparator(8)
                         .addComponent(sectionTitle("Notifications"), 1)
                         .addComponent(notificationsEnabledBox, 1)
@@ -617,6 +625,14 @@ public class PluginSettingsComponent {
 
     public void setReviewSelfCritique(boolean v) {
         reviewSelfCritiqueBox.setSelected(v);
+    }
+
+    public boolean isReviewSupervisorEnabled() {
+        return reviewSupervisorBox.isSelected();
+    }
+
+    public void setReviewSupervisorEnabled(boolean value) {
+        reviewSupervisorBox.setSelected(value);
     }
 
     private static JBLabel sectionTitle(String text) {

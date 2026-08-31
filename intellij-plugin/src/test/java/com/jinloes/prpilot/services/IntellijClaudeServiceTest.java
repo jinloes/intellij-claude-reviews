@@ -19,6 +19,7 @@ class IntellijClaudeServiceTest {
             PluginSettings.State initial = new PluginSettings.State();
             initial.reviewProvider = "copilot";
             initial.reviewModelCopilot = "generation-model";
+            initial.reviewSupervisorEnabled = true;
             settings.loadState(initial);
 
             IntellijClaudeService.ReviewRuntimeSettings snapshot =
@@ -28,6 +29,7 @@ class IntellijClaudeServiceTest {
             settings.setReviewModel("later-model");
             assertThat(snapshot.provider()).isEqualTo(ReviewProvider.COPILOT);
             assertThat(snapshot.model()).isEqualTo("generation-model");
+            assertThat(snapshot.supervisorEnabled()).isTrue();
         }
     }
 

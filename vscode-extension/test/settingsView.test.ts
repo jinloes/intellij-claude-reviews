@@ -129,6 +129,7 @@ test('buildSettingsHtml renders reusable review-guidance profile controls', () =
     assert.match(html, /id="renameGuidanceProfile"/);
     assert.match(html, /id="deleteGuidanceProfile"/);
     assert.match(html, /id="reviewSelfCritique"/);
+    assert.match(html, /id="reviewSupervisorEnabled"/);
     assert.match(html, /type: 'updateReviewGuidanceState'/);
     assert.match(html, /profiles: guidanceProfiles/);
     assert.match(html, /activeProfileId: activeGuidanceProfileId/);

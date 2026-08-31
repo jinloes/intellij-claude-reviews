@@ -140,6 +140,15 @@ class PluginSettingsTest {
     }
 
     @Test
+    void reviewSupervisorDefaultsToFalseAndRoundTrips() {
+        PluginSettings settings = new PluginSettings();
+
+        assertThat(settings.isReviewSupervisorEnabled()).isFalse();
+        settings.setReviewSupervisorEnabled(true);
+        assertThat(settings.isReviewSupervisorEnabled()).isTrue();
+    }
+
+    @Test
     void copilotInheritMcpDefaultsToFalse() {
         PluginSettings s = new PluginSettings();
         assertThat(s.isCopilotInheritMcp()).isFalse();

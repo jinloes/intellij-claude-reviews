@@ -275,6 +275,7 @@ export interface SidecarGenerateReviewParams {
     inheritMcp: boolean;
     configDir?: string;
     selfCritique: boolean;
+    reviewSupervisorEnabled: boolean;
     chunkedReview: boolean;
     pr: SidecarPrInput;
     diff: string;
@@ -1118,11 +1119,18 @@ export class SidecarClient {
     async recordReviewOutcome(
         provider: string,
         model: string,
+        reviewSupervisorEnabled: boolean,
         generated: OutcomeComment[],
         submitted: OutcomeComment[],
     ): Promise<void> {
         try {
-            await this.request('reviews/recordOutcome', { provider, model, generated, submitted });
+            await this.request('reviews/recordOutcome', {
+                provider,
+                model,
+                reviewSupervisorEnabled,
+                generated,
+                submitted,
+            });
         } catch (err) {
             console.warn('[pr-pilot] Review outcome logging failed:', err instanceof Error ? err.message : String(err));
         }

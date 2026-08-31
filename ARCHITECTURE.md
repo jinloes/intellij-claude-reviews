@@ -49,7 +49,7 @@ CI runs full-page Playwright + axe scenarios (`npm run test:a11y`) using `playwr
 
 PR-scoped bridge messages carry a mandatory canonical `prKey` (`owner/repo#number`), and the webview rejects them when it is absent or does not match the active PR. Draft saves additionally carry a monotonically increasing `saveId` that both hosts echo on `draftSaved`/`draftSaveError`. `ReviewPane` keeps separate in-flight and acknowledged snapshots: dispatching a save never advances the saved baseline, stale acknowledgements are ignored, and dirty state clears only when the matching success arrives. PR-switch/page-hide flushes may send a newer snapshot while an older save is in flight, which is why positional “last request wins” assumptions are invalid. A save with an explicit result remains persistable after its PR stops being active, but its completion must update only per-PR bookkeeping and never the new selection's UI state.
 
-Review generation is similarly fenced by a host-local generation ID in addition to the PR selection revision. Starting or cancelling a review invalidates the prior ID before cancelling the provider process; every status, chunk, result, and error callback checks both identities. Provider/model/effort/MCP/self-critique and resolved guidance settings are snapshotted once when the request begins, and outcome attribution stores the generation-time provider/model beside the generated result per PR rather than reading mutable settings at submit time. The webview carries the final merged model-authored result separately on every draft save so chunked reviews are compared against that full baseline rather than the final batch. Worktree cleanup must cancel and invalidate provider work before removing the directory; disposal and chat clearing follow the same cancellation-first rule. VS Code fetches the larger validation diff concurrently; when it completes after `reviewResult`, it uses the narrow `validationDiffUpdated` bridge event rather than replaying `draftLoaded` and resetting review state.
+Review generation is similarly fenced by a host-local generation ID in addition to the PR selection revision. Starting or cancelling a review invalidates the prior ID before cancelling the provider process; every status, chunk, result, and error callback checks both identities. Provider/model/effort/MCP/self-critique/supervisor and resolved guidance settings are snapshotted once when the request begins, and outcome attribution stores the generation-time provider/model/supervisor mode beside the generated result per PR rather than reading mutable settings at submit time. The webview carries the final merged model-authored result separately on every draft save so chunked reviews are compared against that full baseline rather than the final batch. Worktree cleanup must cancel and invalidate provider work before removing the directory; disposal and chat clearing follow the same cancellation-first rule. VS Code fetches the larger validation diff concurrently; when it completes after `reviewResult`, it uses the narrow `validationDiffUpdated` bridge event rather than replaying `draftLoaded` and resetting review state.
 
 `reviewChunk` remains a host protocol notification for transport compatibility, but the shared webview must neither persist nor render its provider `text` or `thinking` payloads. `ReviewActivity` is the single user-visible generation model and accepts only lifecycle/status messages, which are reduced to safe phase or tool labels before display. This keeps private reasoning and partial provider output out of both the DOM and accessibility tree.
 
@@ -228,7 +228,8 @@ Three parts of the pipeline previously treated `"confidence": "low"` as a way to
 
 The self-critique directive is keyed on `confidence`, not on type, for a related reason: its input is `draftReviewJson` over an already-parsed draft, so by then no low-confidence `"issue"` exists and the old "drop a low-confidence issue" rule could never match anything. It now requires each surviving low-confidence comment to be confirmed and raised, or dropped.
 
-`PROMPT_VERSION` is `2026-08-confidence-gate`; outcomes logged under earlier versions reflect the previous gating and should not be pooled with these.
+`PROMPT_VERSION` is `2026-09-supervised-coverage`. Outcome logging appends
+`-supervisor-on` or `-supervisor-off`, so supervised and baseline results are not pooled.
 
 ### Prompt-injection hardening
 When wrapping untrusted payloads in XML-like tags, escape matching closing tags inside payload to prevent tag breakout. Repository guidelines, PR metadata, descriptions, diffs, prior reviews, and chat context remain untrusted reference data even when tag escaping is applied; the latest `<user_message>` is the authorized request but cannot override persona or confidentiality constraints. Chat builders retain only ten history turns and bound each turn, PR context, focused context, and current request before provider execution. Provider capability isolation is the primary security boundary.
@@ -313,6 +314,37 @@ returns complete, visibly marked degraded batch summaries rather than silently p
 sliced merge as globally synthesized output. Truncated or large diffs recommend chunking but never
 enable it without the reviewer selecting the option.
 
+### Bounded review supervision
+
+`ReviewPipelineService` owns the review pipeline for both hosts:
+
+`primary/chunk batches -> reconciliation -> coverage analysis -> optional prioritization ->
+one targeted follow-up -> final self-critique -> deterministic CI suppression`.
+
+The persisted `reviewSupervisorEnabled` setting defaults to `false`. The base review emits an
+engine-internal inspection ledger in both modes so the output contract stays stable; when the
+setting is off, the engine does not analyze that ledger, make supervisor/follow-up calls, or filter
+anchors. When enabled:
+
+- `InspectionManifest` assigns stable IDs to changed files and hunks and records changed new-side
+  lines. `ReviewPassParser` accepts only manifest IDs and repository-confined evidence paths.
+- `ReviewCoverageAnalyzer` deterministically identifies uninspected high-risk hunks. It does not
+  infer gaps when the provider omitted its ledger and caps candidates at 12.
+- Three or fewer gaps are prioritized deterministically. Larger sets get one tool-free,
+  90-second provider call that sees only gap metadata and baseline finding locations and may select
+  at most three supplied IDs.
+- The engine authors the follow-up objectives and allows one six-minute, read-only worktree pass
+  with MCP disabled. Baseline and follow-up findings are merged and deduplicated.
+- `ReviewAnchorValidator` removes findings not attached to changed new-side lines before the
+  existing final critique and CI suppression gates run once. Chunked reviews use their bounded
+  contract index for the final critique rather than re-sending the full diff.
+
+The primary pass remains terminal on failure. Supervisor selection, follow-up, and final critique
+I/O or parse failures keep the best available review; interruption is always propagated. Aggregate
+logs contain counts and elapsed time only, never paths, snippets, prompts, directives, or tool
+arguments. User-visible activity reports generic stages (`Checking review coverage...`,
+`Prioritizing missed areas...`, and `Inspecting missed areas...`) rather than model reasoning.
+
 ### Notification parity
 Background PR notifications are available in both hosts and are off by default. The first poll seeds existing PRs silently. Both hosts support review-requested PR notifications and optional starred-repository PR notifications, using the persisted settings listed below. Each notification is labeled with its provenance (`Review requested` vs `★ Starred repo`) so a starred-repo PR — which need not appear in the main list's current-repo scope — is never mistaken for a review request; when a PR matches both sources, review-requested takes precedence. The labeling/merge logic is shared-shaped across hosts (`PRNotificationService.mergeCandidates`/`notificationTitle` in IntelliJ, `notifications.ts` `mergeBySource`/`notificationMessage` in VS Code). Notification actions now route into PR Pilot itself (`activatePR`) instead of straight to the browser: the shared list pins the opened PR into the list when needed and marks it as notification-opened even if it is outside the current discovery scope. The seen-PR set is persisted across reloads/restarts (IntelliJ via `SeenPRSet`, VS Code via extension `globalState`) so PRs that appear while the editor is closed are still announced on the next poll rather than silently absorbed by a re-seed. Changing the notification scope (enable/disable, review-requested, starred repos, or GitHub base URL) re-seeds silently so existing in-scope PRs are not announced retroactively.
 
@@ -320,7 +352,7 @@ Background PR notifications are available in both hosts and are off by default. 
 Client-side validation partitions comments: keep in-hunk, snap within +-3 lines, orphan otherwise. Orphans are excluded from inline POST and appended to review body section.
 
 ### Security constraints
-`githubBaseUrl` must be an HTTPS origin without credentials, an explicit port, path, query, or fragment; external links must use HTTPS. GitHub/provider tokens are not persisted by PR Pilot. Provider review input is adversarial: do not enable tools, MCP discovery, shell/write permissions, or broader environment capabilities by default. A detached worktree protects the active checkout but is not a machine sandbox, so explicit capability elevation must remain visible in settings.
+`githubBaseUrl` must be an HTTPS origin without credentials, an explicit port, path, query, or fragment; external links must use HTTPS. GitHub/provider tokens are not persisted by PR Pilot. Provider review input is adversarial: do not enable shell/write permissions or broader environment capabilities by default. Primary review and the single supervisor follow-up may use only read-only tools in the detached PR worktree; supervisor prioritization has no tools, and both supervisor calls have MCP disabled. A detached worktree protects the active checkout but is not a machine sandbox, so explicit capability elevation must remain visible in settings.
 
 ### Repo detection and webview hosting
 Repo detection walks upward to `.git/config` and reads the `[remote "origin"]` URL specifically (not the first `url=` in the file) so multi-remote/fork setups resolve to origin consistently across hosts, handling SCP and `ssh://` remotes correctly. Webview assets are served via loopback `HttpServer` for proper same-origin module loading; path normalization blocks traversal.
@@ -359,6 +391,8 @@ The `.vscode/launch.json` config `Run PR Pilot Extension Against Target Repo` pr
 - `reviewGuidanceProfiles` (default `[]`) — named reusable bundles of focus areas and custom instructions. Profiles use stable IDs so renames preserve selection. Invalid, duplicate, or missing IDs fall back to the built-in legacy defaults rather than partially applying a profile. The legacy `guidanceGlobs` profile field remains readable and is preserved on edits for forward compatibility, but is not exposed in settings UI.
 - `activeReviewGuidanceProfileId` (default `""`) — selected profile ID; blank selects the built-in defaults stored in `reviewFocusAreas`, `reviewCustomInstructions`, and `reviewGuidanceGlobs`. Keeping those fields as the built-in profile makes upgrades migration-free.
 - `reviewSelfCritique` (default `true`) — runs a second validation pass (`ClaudeService.buildCritiquePrompt`) that re-checks every finding against the diff and the same context sections the first pass saw, dropping misattributed, unsupported, and CI-duplicated comments. On by default because a misattributed comment costs the reviewer more than the extra pass does; disabling it roughly halves review latency. Shared by both providers.
+- `reviewSupervisorEnabled` (default `false`) — checks the primary inspection ledger for unreviewed
+  high-risk hunks and may run one bounded, targeted read-only follow-up. Shared by both providers.
 - `reviewGuidanceGlobs` (legacy, hidden) — retained in existing host settings and profiles for compatibility. It is not contributed as a public VS Code setting, rendered in either settings UI, or sent to a provider because the existing `reviews/readGuidelines` capability reads only the untrusted PR worktree.
 
 Profiles are host-owned settings/UI state, not an engine capability. Each host resolves the active profile into the existing engine inputs; focus areas and custom instructions remain active, while guidance globs wait for the base-commit capability. Per-review non-empty focus/custom-instruction overrides still take precedence over the resolved active profile.
@@ -379,7 +413,7 @@ IntelliJ-only (`intellij-plugin`'s `PendingReviewIndex`/`SeenPRSet`); VS Code pe
 | `~/.pr-pilot/review-outcomes.jsonl` | Append-only outcome log: one JSON object per generated/submitted comment (`ReviewOutcomeLog`, engine-owned), written by both hosts on submit |
 
 ### Outcome logging is stateless because IntelliJ does not use `ReviewSessionService`
-`reviews/recordOutcome` takes **both** the generated and the submitted comment sets from its caller rather than the engine remembering the generated review between calls. The obvious design — snapshot it in `ReviewSessionService.generate` — silently fails on IntelliJ, which calls `ClaudeService`/`CopilotService` in-process through `IntellijClaudeService` and never touches `ReviewSessionService` at all (that type is sidecar-only). Each host therefore retains the half it was previously discarding: IntelliJ keeps `generatedResult` because `handleSaveDraft` overwrites `lastResult` with the edits, and VS Code keeps `editedReviewResult` because it only ever sees the edits in the `saveDraft` message. Classification, fingerprinting, and `promptVersion` stay engine-owned, so the hosts hold UI state and implement no logic. `promptVersion` is stamped engine-side and is deliberately not a parameter — a host cannot know which prompt the engine build ships. A draft **loaded from GitHub** is never logged: it was not generated in this session, so diffing against it would record every comment as `kept`.
+`reviews/recordOutcome` takes **both** the generated and the submitted comment sets from its caller rather than the engine remembering the generated review between calls. The obvious design — snapshot it in `ReviewSessionService.generate` — silently fails on IntelliJ, which calls `ClaudeService`/`CopilotService` in-process through `IntellijClaudeService` and never touches `ReviewSessionService` at all (that type is sidecar-only). Each host therefore retains the half it was previously discarding: IntelliJ keeps `generatedResult` because `handleSaveDraft` overwrites `lastResult` with the edits, and VS Code keeps `editedReviewResult` because it only ever sees the edits in the `saveDraft` message. Classification, fingerprinting, and the base `promptVersion` stay engine-owned, so the hosts hold UI state and implement no logic. The host supplies only the snapshotted supervisor boolean; the engine uses it to suffix its own version and keep the two pipeline modes separable. A draft **loaded from GitHub** is never logged: it was not generated in this session, so diffing against it would record every comment as `kept`.
 
 ### The outcome log stores hashes, never comment text or file paths
 `ReviewOutcomeLog` writes only `(recordedAt, promptVersion, provider, model, commentFingerprint, outcome, type, severity, confidence)`. The fingerprint is a SHA-256 prefix over `file + line + whitespace-normalized body`, which is enough to correlate the same finding across prompt versions — the log's entire purpose — without persisting review prose or repository structure to disk. It is the only append-mode file under `~/.pr-pilot`: the whole-file JSON stores use tmp+`ATOMIC_MOVE`, but rewriting a growing log on every submit does not scale, so this one uses `O_APPEND` with a `MAX_LOG_BYTES` cap because nothing prunes it. Every failure is logged and swallowed — instrumentation must never break a review submission.

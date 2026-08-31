@@ -7,12 +7,12 @@ import com.jinloes.prpilot.model.PRReviewRequest;
 import com.jinloes.prpilot.model.PullRequest;
 import com.jinloes.prpilot.model.ReviewResult;
 import com.jinloes.prpilot.review.CancellationToken;
-import com.jinloes.prpilot.review.ChunkedReviewService;
 import com.jinloes.prpilot.review.ClaudeService;
 import com.jinloes.prpilot.review.CopilotService;
 import com.jinloes.prpilot.review.GitWorktreeService;
 import com.jinloes.prpilot.review.RepoGuidelinesReader;
 import com.jinloes.prpilot.review.ReviewOutcomeLog;
+import com.jinloes.prpilot.review.ReviewPipelineService;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -41,7 +41,6 @@ public class ReviewSessionService implements ReviewEngineApi {
     private final OperationRegistry activeOperations = new OperationRegistry();
     private final ReviewOutcomeLog outcomeLog;
     private final GitWorktreeService worktreeService;
-    private final ChunkedReviewService chunkedReviewService = new ChunkedReviewService();
 
     public ReviewSessionService() {
         this(new ReviewOutcomeLog(), new GitWorktreeService());
@@ -99,20 +98,19 @@ public class ReviewSessionService implements ReviewEngineApi {
                     startOperation(
                             params.operationId(), cancellationToken, service::cancelCurrentRequest);
             try {
-                ChunkedReviewService.ProviderCall call =
-                        chunkRequest ->
-                                service.reviewPR(
-                                        chunkRequest,
-                                        params.model(),
-                                        params.effort(),
-                                        onStatus,
-                                        onChunk,
-                                        params.inheritMcp(),
-                                        params.configDir(),
-                                        params.selfCritique());
-                return params.chunkedReview()
-                        ? chunkedReviewService.review(request, onStatus, call)
-                        : call.review(request);
+                return ReviewPipelineService.forCopilot(
+                                service,
+                                params.model(),
+                                params.effort(),
+                                params.inheritMcp(),
+                                params.configDir())
+                        .review(
+                                request,
+                                params.chunkedReview(),
+                                params.selfCritique(),
+                                params.reviewSupervisorEnabled(),
+                                onStatus,
+                                onChunk);
             } finally {
                 activeOperations.finish(operation);
             }
@@ -123,17 +121,14 @@ public class ReviewSessionService implements ReviewEngineApi {
                 startOperation(
                         params.operationId(), cancellationToken, service::cancelCurrentRequest);
         try {
-            ChunkedReviewService.ProviderCall call =
-                    chunkRequest ->
-                            service.reviewPR(
-                                    chunkRequest,
-                                    params.model(),
-                                    params.selfCritique(),
-                                    onStatus,
-                                    onChunk);
-            return params.chunkedReview()
-                    ? chunkedReviewService.review(request, onStatus, call)
-                    : call.review(request);
+            return ReviewPipelineService.forClaude(service, params.model())
+                    .review(
+                            request,
+                            params.chunkedReview(),
+                            params.selfCritique(),
+                            params.reviewSupervisorEnabled(),
+                            onStatus,
+                            onChunk);
         } finally {
             activeOperations.finish(operation);
         }
@@ -298,7 +293,9 @@ public class ReviewSessionService implements ReviewEngineApi {
         if (params == null) return new RecordOutcomeResult(0);
         ReviewOutcomeLog.Metadata metadata =
                 new ReviewOutcomeLog.Metadata(
-                        ClaudeService.PROMPT_VERSION, params.provider(), params.model());
+                        ClaudeService.reviewPipelineVersion(params.reviewSupervisorEnabled()),
+                        params.provider(),
+                        params.model());
         int recorded =
                 outcomeLog.record(
                         toLineComments(params.generated()),

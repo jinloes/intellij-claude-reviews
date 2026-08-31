@@ -55,6 +55,14 @@ guidance.
 - `review/ClaudeService.java` - Claude CLI execution and canonical review/chat prompts.
 - `review/CopilotService.java` - Copilot SDK execution with the same review API.
 - `review/ChunkedReviewService.java` - Shared diff batching and mandatory global reconciliation.
+- `review/ReviewPipelineService.java` - Shared primary/chunked orchestration, bounded supervision,
+  final critique, cancellation checkpoints, fallback behavior, and final CI suppression.
+- `review/InspectionManifest.java`, `ReviewPassParser.java`, `InspectionLedger.java`, and
+  `EvidenceRef.java` - Stable changed targets plus validated inspection/evidence accounting.
+- `review/ReviewCoverageAnalyzer.java`, `CoverageGap.java`, `ReviewSupervisorPrompts.java`, and
+  `FollowUpDirective.java` - High-risk gap detection and bounded follow-up selection.
+- `review/ReviewAnchorValidator.java` and `ReviewResultMerger.java` - Changed-line filtering and
+  baseline/follow-up deduplication.
 - `review/CancellationToken.java` - Shared cancellation state.
 - `review/BoundedProcessRunner.java` - Bounded subprocess lifecycle and output draining.
 - `review/CopilotModelDiscovery.java` - Session-cached Copilot model probing.
@@ -186,8 +194,8 @@ VS Code host integration. All GitHub and review generation routes through the Ja
 ### Review generation
 
 `ReviewPane`/`App.tsx` -> host bridge -> `ReviewEngineApi` -> `ReviewSessionService` ->
-`ChunkedReviewService` when opted in -> provider service -> status/chunk notifications -> host bridge
--> shared webview.
+`ReviewPipelineService` -> direct or chunked primary pass -> optional bounded supervisor/follow-up ->
+final critique/CI suppression -> status/chunk notifications -> host bridge -> shared webview.
 
 ### GitHub operations
 

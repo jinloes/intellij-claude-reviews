@@ -111,15 +111,9 @@ public class CopilotService {
             String configDir,
             boolean selfCritique)
             throws IOException, InterruptedException {
-        String prompt = ClaudeService.buildPrompt(request);
-        log.info(
-                "Copilot review prompt: {} chars — diff {} chars, CI {} chars, commits {} chars",
-                prompt.length(),
-                StringUtils.length(request.getDiff()),
-                StringUtils.length(request.getCiStatus()),
-                StringUtils.length(request.getCommits()));
-        ReviewResult draft =
-                runReview(prompt, model, effort, inheritMcp, configDir, onStatus, onChunk);
+        ReviewPassResult pass =
+                reviewPass(request, model, effort, onStatus, onChunk, inheritMcp, configDir);
+        ReviewResult draft = pass.review();
         if (!selfCritique) {
             return CiFindingSuppressor.suppress(draft, request.getCiAnnotations());
         }
@@ -141,6 +135,73 @@ public class CopilotService {
             log.warn("Copilot self-critique pass failed; keeping first-pass review", e);
             return CiFindingSuppressor.suppress(draft, request.getCiAnnotations());
         }
+    }
+
+    ReviewPassResult reviewPass(
+            PRReviewRequest request,
+            String model,
+            String effort,
+            Consumer<String> onStatus,
+            BiConsumer<String, String> onChunk,
+            boolean inheritMcp,
+            String configDir)
+            throws IOException, InterruptedException {
+        InspectionManifest manifest = InspectionManifest.fromDiff(request.getDiff());
+        String prompt = ClaudeService.buildPrompt(request, manifest);
+        log.info(
+                "Copilot review prompt: {} chars — diff {} chars, CI {} chars, commits {} chars",
+                prompt.length(),
+                StringUtils.length(request.getDiff()),
+                StringUtils.length(request.getCiStatus()),
+                StringUtils.length(request.getCommits()));
+        onStatus.accept(STATUS_GENERATING);
+        String raw =
+                runSession(
+                        prompt,
+                        model,
+                        effort,
+                        inheritMcp,
+                        configDir,
+                        true,
+                        REQUEST_TIMEOUT_MS,
+                        onStatus,
+                        onChunk);
+        if (StringUtils.isBlank(raw)) {
+            throw new IOException("copilot produced no output.");
+        }
+        onStatus.accept(STATUS_PARSING);
+        try {
+            return ReviewPassParser.parse(raw, manifest, workingDir);
+        } catch (Exception parseEx) {
+            log.warn("Failed to parse Copilot review JSON (output chars: {})", raw.length());
+            throw new IOException("Failed to parse review JSON from Copilot output.", parseEx);
+        }
+    }
+
+    String completeReviewPrompt(
+            String prompt,
+            String model,
+            String effort,
+            boolean inheritMcp,
+            String configDir,
+            boolean allowReadTools,
+            long timeoutMillis,
+            Consumer<String> onStatus)
+            throws IOException, InterruptedException {
+        return runSession(
+                prompt,
+                model,
+                effort,
+                inheritMcp,
+                configDir,
+                allowReadTools,
+                timeoutMillis,
+                onStatus,
+                null);
+    }
+
+    void throwIfCancelled() throws InterruptedException {
+        cancellationToken.throwIfCancelled();
     }
 
     public ReviewResult reviewPR(
@@ -171,7 +232,17 @@ public class CopilotService {
             BiConsumer<String, String> onChunk)
             throws IOException, InterruptedException {
         onStatus.accept(STATUS_GENERATING);
-        String raw = runSession(prompt, model, effort, inheritMcp, configDir, onStatus, onChunk);
+        String raw =
+                runSession(
+                        prompt,
+                        model,
+                        effort,
+                        inheritMcp,
+                        configDir,
+                        true,
+                        REQUEST_TIMEOUT_MS,
+                        onStatus,
+                        onChunk);
         if (StringUtils.isBlank(raw)) {
             throw new IOException("copilot produced no output.");
         }
@@ -200,6 +271,8 @@ public class CopilotService {
                 effort,
                 inheritMcp,
                 configDir,
+                true,
+                REQUEST_TIMEOUT_MS,
                 ignored -> {},
                 (kind, chunk) -> onChunk.accept(chunk));
     }
@@ -233,6 +306,8 @@ public class CopilotService {
                 effort,
                 inheritMcp,
                 configDir,
+                true,
+                REQUEST_TIMEOUT_MS,
                 ignored -> {},
                 (kind, chunk) -> onChunk.accept(chunk));
     }
@@ -254,6 +329,8 @@ public class CopilotService {
             String effort,
             boolean inheritMcp,
             String configDir,
+            boolean allowReadTools,
+            long timeoutMillis,
             Consumer<String> onStatus,
             BiConsumer<String, String> onChunk)
             throws IOException, InterruptedException {
@@ -273,7 +350,9 @@ public class CopilotService {
             client.start();
             cancellationToken.throwIfCancelled();
             RuntimeSession session =
-                    client.createSession(buildSessionRequest(model, effort, inheritMcp, configDir));
+                    client.createSession(
+                            buildSessionRequest(
+                                    model, effort, inheritMcp, configDir, allowReadTools));
             currentRun.attachSession(session);
             cancellationToken.throwIfCancelled();
 
@@ -311,7 +390,7 @@ public class CopilotService {
                                 }
                             }));
 
-            String responseMessage = session.sendAndWait(prompt, REQUEST_TIMEOUT_MS);
+            String responseMessage = session.sendAndWait(prompt, timeoutMillis);
             cancellationToken.throwIfCancelled();
 
             String raw =
@@ -353,14 +432,19 @@ public class CopilotService {
     }
 
     private SessionRequest buildSessionRequest(
-            String model, String effort, boolean inheritMcp, String configDir) {
+            String model,
+            String effort,
+            boolean inheritMcp,
+            String configDir,
+            boolean allowReadTools) {
         String trimmedConfigDir = configDir != null ? configDir.trim() : null;
         return new SessionRequest(
                 model,
                 normalizeReasoningEffort(effort),
                 workingDir,
                 inheritMcp,
-                StringUtils.isNotEmpty(trimmedConfigDir) ? trimmedConfigDir : null);
+                StringUtils.isNotEmpty(trimmedConfigDir) ? trimmedConfigDir : null,
+                allowReadTools);
     }
 
     private IOException asIOException(Exception ex) {
@@ -390,7 +474,12 @@ public class CopilotService {
     record ClientRequest(String cliPath, File workingDir, Map<String, String> environment) {}
 
     record SessionRequest(
-            String model, String effort, File workingDir, boolean inheritMcp, String configDir) {}
+            String model,
+            String effort,
+            File workingDir,
+            boolean inheritMcp,
+            String configDir,
+            boolean allowReadTools) {}
 
     interface RuntimeFactory {
         RuntimeClient createClient(ClientRequest request);
@@ -459,7 +548,8 @@ public class CopilotService {
                             CompletableFuture.completedFuture(
                                     permissionDecision(
                                             permissionRequest.getKind(),
-                                            sessionRequest.inheritMcp()));
+                                            sessionRequest.inheritMcp(),
+                                            sessionRequest.allowReadTools()));
             SessionConfig config =
                     new SessionConfig()
                             .setOnPermissionRequest(permissionHandler)
@@ -472,6 +562,9 @@ public class CopilotService {
                             // an arbitrary process). Trusted MCP servers are injected explicitly
                             // below from the user's own config dir instead.
                             .setEnableConfigDiscovery(false);
+            if (!sessionRequest.allowReadTools()) {
+                config.setAvailableTools(List.of());
+            }
             if (sessionRequest.inheritMcp()) {
                 Map<String, McpServerConfig> trusted =
                         CopilotMcpConfig.loadTrustedServers(sessionRequest.configDir());
@@ -611,7 +704,12 @@ public class CopilotService {
     }
 
     static PermissionRequestResult permissionDecision(String kind, boolean allowMcp) {
-        if ("read".equals(kind)) {
+        return permissionDecision(kind, allowMcp, true);
+    }
+
+    static PermissionRequestResult permissionDecision(
+            String kind, boolean allowMcp, boolean allowReadTools) {
+        if (allowReadTools && "read".equals(kind)) {
             return PermissionRequestResult.approveOnce();
         }
         if (allowMcp && "mcp".equals(kind)) {

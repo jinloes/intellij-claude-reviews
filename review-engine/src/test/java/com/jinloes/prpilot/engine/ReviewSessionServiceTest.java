@@ -143,6 +143,7 @@ class ReviewSessionServiceTest {
                             new ReviewEngineApi.RecordOutcomeParams(
                                     "claude",
                                     "sonnet",
+                                    false,
                                     List.of(comment("kept"), comment("dropped")),
                                     List.of(comment("kept"))));
 
@@ -155,11 +156,14 @@ class ReviewSessionServiceTest {
         void stampsTheEnginesOwnPromptVersionRatherThanTrustingTheCaller() throws IOException {
             service.recordOutcome(
                     new ReviewEngineApi.RecordOutcomeParams(
-                            "copilot", "gpt-5", List.of(comment("x")), List.of()));
+                            "copilot", "gpt-5", true, List.of(comment("x")), List.of()));
 
             String line = Files.readAllLines(logFile, StandardCharsets.UTF_8).get(0);
             assertThat(line)
-                    .contains("\"promptVersion\":\"" + ClaudeService.PROMPT_VERSION + "\"")
+                    .contains(
+                            "\"promptVersion\":\""
+                                    + ClaudeService.reviewPipelineVersion(true)
+                                    + "\"")
                     .contains("\"provider\":\"copilot\"")
                     .contains("\"model\":\"gpt-5\"");
         }
@@ -170,7 +174,7 @@ class ReviewSessionServiceTest {
             assertThat(
                             service.recordOutcome(
                                             new ReviewEngineApi.RecordOutcomeParams(
-                                                    "claude", "sonnet", null, null))
+                                                    "claude", "sonnet", false, null, null))
                                     .recorded())
                     .isZero();
         }
@@ -179,7 +183,7 @@ class ReviewSessionServiceTest {
         void carriesSeverityAndConfidenceThroughToTheRecord() throws IOException {
             service.recordOutcome(
                     new ReviewEngineApi.RecordOutcomeParams(
-                            "claude", "sonnet", List.of(comment("x")), List.of()));
+                            "claude", "sonnet", false, List.of(comment("x")), List.of()));
 
             String line = Files.readAllLines(logFile, StandardCharsets.UTF_8).get(0);
             assertThat(line)

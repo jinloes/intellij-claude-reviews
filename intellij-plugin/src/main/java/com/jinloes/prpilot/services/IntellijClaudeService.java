@@ -5,9 +5,9 @@ import com.jinloes.prpilot.model.ChatMessage;
 import com.jinloes.prpilot.model.PRReviewRequest;
 import com.jinloes.prpilot.model.ReviewProvider;
 import com.jinloes.prpilot.model.ReviewResult;
-import com.jinloes.prpilot.review.ChunkedReviewService;
 import com.jinloes.prpilot.review.ClaudeService;
 import com.jinloes.prpilot.review.CopilotService;
+import com.jinloes.prpilot.review.ReviewPipelineService;
 import com.jinloes.prpilot.settings.PluginSettings;
 import java.util.List;
 import java.util.function.BiConsumer;
@@ -40,6 +40,7 @@ public class IntellijClaudeService {
         private final boolean forceMcpOnReview;
         private final String configDir;
         private final boolean selfCritique;
+        private final boolean supervisorEnabled;
 
         private ReviewRuntimeSettings(
                 ReviewProvider provider,
@@ -48,7 +49,8 @@ public class IntellijClaudeService {
                 boolean inheritMcp,
                 boolean forceMcpOnReview,
                 String configDir,
-                boolean selfCritique) {
+                boolean selfCritique,
+                boolean supervisorEnabled) {
             this.provider = provider;
             this.model = model;
             this.effort = effort;
@@ -56,6 +58,7 @@ public class IntellijClaudeService {
             this.forceMcpOnReview = forceMcpOnReview;
             this.configDir = configDir;
             this.selfCritique = selfCritique;
+            this.supervisorEnabled = supervisorEnabled;
         }
 
         public ReviewProvider provider() {
@@ -65,11 +68,14 @@ public class IntellijClaudeService {
         public String model() {
             return model;
         }
+
+        public boolean supervisorEnabled() {
+            return supervisorEnabled;
+        }
     }
 
     private final ClaudeService claude;
     private final CopilotService copilot;
-    private final ChunkedReviewService chunkedReviewService = new ChunkedReviewService();
 
     public IntellijClaudeService() {
         this.claude = new ClaudeService();
@@ -114,29 +120,23 @@ public class IntellijClaudeService {
                 "Review interrupted.",
                 onError,
                 () -> {
-                    ChunkedReviewService.ProviderCall call =
-                            chunkRequest ->
-                                    settings.provider == ReviewProvider.COPILOT
-                                            ? copilot.reviewPR(
-                                                    chunkRequest,
-                                                    settings.model,
-                                                    settings.effort,
-                                                    wrappedStatus,
-                                                    wrappedChunk,
-                                                    resolveReviewInheritMcp(
-                                                            settings.inheritMcp,
-                                                            settings.forceMcpOnReview),
-                                                    settings.configDir,
-                                                    settings.selfCritique)
-                                            : claude.reviewPR(
-                                                    chunkRequest,
-                                                    settings.model,
-                                                    settings.selfCritique,
-                                                    wrappedStatus,
-                                                    wrappedChunk);
-                    return chunkedReview
-                            ? chunkedReviewService.review(request, wrappedStatus, call)
-                            : call.review(request);
+                    ReviewPipelineService pipeline =
+                            settings.provider == ReviewProvider.COPILOT
+                                    ? ReviewPipelineService.forCopilot(
+                                            copilot,
+                                            settings.model,
+                                            settings.effort,
+                                            resolveReviewInheritMcp(
+                                                    settings.inheritMcp, settings.forceMcpOnReview),
+                                            settings.configDir)
+                                    : ReviewPipelineService.forClaude(claude, settings.model);
+                    return pipeline.review(
+                            request,
+                            chunkedReview,
+                            settings.selfCritique,
+                            settings.supervisorEnabled,
+                            wrappedStatus,
+                            wrappedChunk);
                 },
                 onComplete);
     }
@@ -286,7 +286,8 @@ public class IntellijClaudeService {
                 settings.isCopilotInheritMcp(),
                 settings.isCopilotAutoEnableMcpOnReview(),
                 settings.getCopilotConfigDir(),
-                settings.isReviewSelfCritique());
+                settings.isReviewSelfCritique(),
+                settings.isReviewSupervisorEnabled());
     }
 
     private static <T> void runOnPooledThread(
