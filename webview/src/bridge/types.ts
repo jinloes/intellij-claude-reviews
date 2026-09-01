@@ -16,6 +16,7 @@ export interface PRListStatus {
   currentRepo?: string
   resultLimit: number
   limited: boolean
+  reviewStatusAvailable: boolean
 }
 
 export interface PRLoadingMessage {
@@ -192,7 +193,10 @@ export interface PR {
   htmlUrl: string
   isDraft: boolean
   hasReviewDraft: boolean
+  reviewStatus: ReviewStatus
 }
+
+export type ReviewStatus = 'UNREVIEWED' | 'REVIEWED' | 'UPDATED_SINCE_REVIEW' | 'UNAVAILABLE'
 
 export interface ProviderReadiness {
   provider: 'claude' | 'copilot'

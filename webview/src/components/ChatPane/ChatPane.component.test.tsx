@@ -14,6 +14,7 @@ const pr: PR = {
   htmlUrl: 'https://github.com/acme/widget/pull/42',
   isDraft: false,
   hasReviewDraft: false,
+  reviewStatus: 'UNREVIEWED',
 }
 
 describe('ChatPane', () => {

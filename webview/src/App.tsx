@@ -33,6 +33,7 @@ const DEV_PRS: PR[] = [
     htmlUrl: '#',
     isDraft: false,
     hasReviewDraft: true,
+    reviewStatus: 'REVIEWED',
   },
   {
     number: 4819,
@@ -44,6 +45,7 @@ const DEV_PRS: PR[] = [
     htmlUrl: '#',
     isDraft: true,
     hasReviewDraft: false,
+    reviewStatus: 'UPDATED_SINCE_REVIEW',
   },
   {
     number: 312,
@@ -55,6 +57,7 @@ const DEV_PRS: PR[] = [
     htmlUrl: '#',
     isDraft: false,
     hasReviewDraft: false,
+    reviewStatus: 'UNREVIEWED',
   },
   {
     number: 4815,
@@ -66,6 +69,7 @@ const DEV_PRS: PR[] = [
     htmlUrl: '#',
     isDraft: true,
     hasReviewDraft: true,
+    reviewStatus: 'UNAVAILABLE',
   },
   {
     number: 88,
@@ -77,6 +81,7 @@ const DEV_PRS: PR[] = [
     htmlUrl: '#',
     isDraft: false,
     hasReviewDraft: false,
+    reviewStatus: 'UNREVIEWED',
   },
 ]
 

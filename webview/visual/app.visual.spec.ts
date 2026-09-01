@@ -226,15 +226,54 @@ test('setup remains usable at 200% zoom', async ({ page }) => {
 test('populated discovery layout', async ({ page }) => {
   await page.goto('/')
   await pushHostMessage(page, { type: 'themeChanged', theme: 'light' })
-  await pushHostMessage(page, { type: 'prListLoaded', prs: [examplePr, { ...examplePr, number: 43, title: 'Add long translated review workflow guidance', isDraft: true }] })
+  await pushHostMessage(page, {
+    type: 'prListLoaded',
+    prs: [
+      examplePr,
+      {
+        ...examplePr,
+        number: 43,
+        title: 'Add long translated review workflow guidance',
+        repo: 'workflows',
+        isDraft: true,
+        hasReviewDraft: true,
+        reviewStatus: 'UPDATED_SINCE_REVIEW',
+      },
+    ],
+    listStatus: {
+      searchScope: 'currentRepo',
+      currentRepo: 'acme/platform',
+      resultLimit: 50,
+      limited: false,
+      reviewStatusAvailable: true,
+    },
+  })
   await expectViewportFilled(page)
   await expect(page).toHaveScreenshot('discovery-light.png')
 })
 
 test('narrow pseudo-localized layout', async ({ page }) => {
-  await page.setViewportSize({ width: 320, height: 720 })
+  await page.setViewportSize({ width: 320, height: 568 })
   await page.goto('/?locale=pseudo')
-  await pushHostMessage(page, { type: 'prListLoaded', prs: [examplePr] })
+  await pushHostMessage(page, {
+    type: 'prListLoaded',
+    prs: [{
+      ...examplePr,
+      title: 'Update authentication after the security review changed',
+      isDraft: true,
+      hasReviewDraft: true,
+      reviewStatus: 'UPDATED_SINCE_REVIEW',
+    }],
+    listStatus: {
+      searchScope: 'currentRepo',
+      currentRepo: 'acme/platform',
+      resultLimit: 50,
+      limited: false,
+      reviewStatusAvailable: true,
+    },
+  })
+  await expect(page.locator('nav li > button').first()).toBeInViewport()
+  await expectNoHorizontalOverflow(page, 'nav')
   await expect(page).toHaveScreenshot('narrow-pseudo.png')
 })
 
@@ -243,14 +282,31 @@ test('PR-list toolbar adapts to minimum, default, and wide containers', async ({
   for (const [paneWidth, theme, locale] of [
     [220, 'light', 'pseudo'],
     [280, 'dark', 'en'],
-    [340, 'highContrastDark', 'en'],
-    [420, 'light', 'en'],
+    [320, 'highContrastDark', 'en'],
+    [520, 'light', 'en'],
   ] as const) {
+    await page.setViewportSize({
+      width: paneWidth === 520 ? paneWidth : 1_200,
+      height: 720,
+    })
     await page.goto(`/?locale=${locale}`)
-    await page.evaluate((width) => localStorage.setItem('claude-reviews:divider-width', String(width)), paneWidth)
+    await page.evaluate((width) => {
+      localStorage.setItem('claude-reviews:divider-width', String(width))
+      localStorage.setItem('pr-pilot:first-success-coach-shown', '1')
+    }, paneWidth)
     await page.reload()
     await pushHostMessage(page, { type: 'themeChanged', theme })
-    await pushHostMessage(page, { type: 'prListLoaded', prs: [examplePr] })
+    await pushHostMessage(page, {
+      type: 'prListLoaded',
+      prs: [examplePr, { ...examplePr, number: 43, repo: 'workflows' }],
+      listStatus: {
+        searchScope: 'currentRepo',
+        currentRepo: 'acme/platform',
+        resultLimit: 50,
+        limited: false,
+        reviewStatusAvailable: true,
+      },
+    })
 
     const shell = page.getByTestId('pr-list-shell')
     const toolbar = page.getByTestId('pr-list-toolbar')
@@ -266,7 +322,7 @@ test('PR-list toolbar adapts to minimum, default, and wide containers', async ({
       expect(box!.width).toBeGreaterThanOrEqual(24)
       expect(box!.height).toBeGreaterThanOrEqual(24)
     }
-    if (paneWidth <= 280) {
+    if (paneWidth <= 320) {
       await expect(labels.first()).toBeHidden()
     } else {
       await expect(labels.first()).toBeVisible()
@@ -282,12 +338,42 @@ test('PR-list toolbar adapts to minimum, default, and wide containers', async ({
       await expect(shell).toHaveScreenshot('pr-toolbar-default-dark.png')
     }
   }
+})
 
-  await page.setViewportSize({ width: 520, height: 720 })
+test('discovery exceptions and notification badges remain compact', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 568 })
   await page.goto('/')
-  await pushHostMessage(page, { type: 'prListLoaded', prs: [examplePr] })
-  await expect(page.getByTestId('pr-list-toolbar').locator('.pr-list-toolbar-label').first()).toBeVisible()
-  await expectNoHorizontalOverflow(page, '[data-testid="pr-list-toolbar"]')
+  await page.evaluate(() => localStorage.setItem('pr-pilot:first-success-coach-shown', '1'))
+  await pushHostMessage(page, { type: 'themeChanged', theme: 'highContrastDark' })
+  await pushHostMessage(page, {
+    type: 'prListLoaded',
+    prs: [{
+      ...examplePr,
+      title: 'A very long pull request title that changed after the reviewer submitted feedback',
+      repo: 'a-very-long-repository-name',
+      author: 'a-very-long-reviewer-name',
+      isDraft: true,
+      hasReviewDraft: true,
+      reviewStatus: 'UPDATED_SINCE_REVIEW',
+    }],
+    listStatus: {
+      searchScope: 'currentRepo',
+      resultLimit: 50,
+      limited: true,
+      reviewStatusAvailable: false,
+    },
+  })
+  await pushHostMessage(page, {
+    type: 'activatePR',
+    source: 'notification',
+    pr: { ...examplePr, reviewStatus: 'UNAVAILABLE' },
+  })
+  await page.getByRole('button', { name: 'Show pull requests' }).click()
+
+  await expectNoHorizontalOverflow(page, 'nav')
+  await expect(page.getByText('Review status is unavailable. Refresh to try again.')).toBeVisible()
+  await expect(page.getByText('From notification')).toBeVisible()
+  await expect(page).toHaveScreenshot('discovery-exceptions-narrow-high-contrast.png')
 })
 
 test('no-draft hierarchy keeps the primary action ahead of optional overrides', async ({ page }) => {

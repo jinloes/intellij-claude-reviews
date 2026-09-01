@@ -30,6 +30,7 @@ function pr(owner: string, repo: string, number: number): PR {
     htmlUrl: 'https://github.test',
     isDraft: false,
     hasReviewDraft: false,
+    reviewStatus: 'UNAVAILABLE',
   };
 }
 

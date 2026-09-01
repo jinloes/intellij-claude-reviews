@@ -11,11 +11,11 @@ import java.time.Duration;
 import java.util.Objects;
 
 /**
- * The single authenticated GitHub REST transport for {@code github-engine}.
+ * The single authenticated GitHub HTTP transport for {@code github-engine}.
  *
- * <p>Owns the header set, timeout, and retry/backoff policy so every GitHub call behaves
- * identically. Services above this class map {@link GitHubResponse} onto their own domain results;
- * they must not build {@link HttpRequest}s themselves.
+ * <p>Owns the header set, timeout, and retry/backoff policy so services do not build {@link
+ * HttpRequest}s themselves. Required GitHub calls use the default retry policy; optional enrichment
+ * calls can select a shorter single-attempt deadline.
  *
  * <p>The token is a parameter rather than state: it is resolved per call from {@code gh} and is
  * never logged, returned, or stored here.
@@ -58,10 +58,47 @@ public final class GitHubHttpClient {
     public GitHubResponse get(String url, String token, String accept) {
         HttpRequest request;
         try {
-            request = request(url, token, accept);
+            request = getRequest(url, token, accept, TIMEOUT);
         } catch (IllegalArgumentException exception) {
             return GitHubResponse.networkError();
         }
+        return send(request);
+    }
+
+    /** Issues one authenticated JSON GET with an explicit request deadline and no retries. */
+    public GitHubResponse getOnce(String url, String token, Duration timeout) {
+        HttpRequest request;
+        try {
+            request = getRequest(url, token, ACCEPT_JSON, timeout);
+        } catch (IllegalArgumentException exception) {
+            return GitHubResponse.networkError();
+        }
+        return sendOnce(request);
+    }
+
+    /** Issues an authenticated JSON POST, retrying with the same bounded policy as JSON GETs. */
+    public GitHubResponse postJson(String url, String token, String body) {
+        HttpRequest request;
+        try {
+            request = postRequest(url, token, body, TIMEOUT);
+        } catch (IllegalArgumentException exception) {
+            return GitHubResponse.networkError();
+        }
+        return send(request);
+    }
+
+    /** Issues one authenticated JSON POST with an explicit request deadline and no retries. */
+    public GitHubResponse postJsonOnce(String url, String token, String body, Duration timeout) {
+        HttpRequest request;
+        try {
+            request = postRequest(url, token, body, timeout);
+        } catch (IllegalArgumentException exception) {
+            return GitHubResponse.networkError();
+        }
+        return sendOnce(request);
+    }
+
+    private GitHubResponse send(HttpRequest request) {
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
                 GitHubResponse response = transport.send(request);
@@ -83,6 +120,17 @@ public final class GitHubHttpClient {
         return GitHubResponse.networkError();
     }
 
+    private GitHubResponse sendOnce(HttpRequest request) {
+        try {
+            return transport.send(request);
+        } catch (IOException exception) {
+            return GitHubResponse.networkError();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            return GitHubResponse.networkError();
+        }
+    }
+
     /**
      * Streams an authenticated GET body through {@code reader} so the caller can bound how many
      * bytes it materializes. Single attempt: the diff path orchestrates its own retries because it
@@ -90,18 +138,30 @@ public final class GitHubHttpClient {
      */
     public <T> T stream(String url, String token, String accept, BodyReader<T> reader)
             throws IOException, InterruptedException {
-        return transport.stream(request(url, token, accept), reader);
+        return transport.stream(getRequest(url, token, accept, TIMEOUT), reader);
     }
 
-    private static HttpRequest request(String url, String token, String accept) {
+    private static HttpRequest.Builder requestBuilder(
+            String url, String token, String accept, Duration timeout) {
         return HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .timeout(TIMEOUT)
+                .timeout(timeout)
                 .header("Authorization", "Bearer " + token)
                 .header("Accept", accept)
                 .header("X-GitHub-Api-Version", API_VERSION)
-                .header("User-Agent", USER_AGENT)
-                .GET()
+                .header("User-Agent", USER_AGENT);
+    }
+
+    private static HttpRequest getRequest(
+            String url, String token, String accept, Duration timeout) {
+        return requestBuilder(url, token, accept, timeout).GET().build();
+    }
+
+    private static HttpRequest postRequest(
+            String url, String token, String body, Duration timeout) {
+        return requestBuilder(url, token, ACCEPT_JSON, timeout)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
                 .build();
     }
 

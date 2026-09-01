@@ -16,6 +16,7 @@ const firstPr: PR = {
   htmlUrl: 'https://github.com/acme/widget/pull/42',
   isDraft: false,
   hasReviewDraft: true,
+  reviewStatus: 'UNREVIEWED',
 }
 const secondPr: PR = { ...firstPr, number: 43, title: 'Second pull request' }
 

@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.jinloes.prpilot.engine.GitHubEngineApi;
 import com.jinloes.prpilot.model.PullRequest;
+import com.jinloes.prpilot.model.ReviewStatus;
 import com.jinloes.prpilot.sidecar.github.CheckAuthResult;
 import com.jinloes.prpilot.sidecar.pr.CheckAnnotation;
 import com.jinloes.prpilot.sidecar.pr.CheckRunService;
@@ -152,7 +153,8 @@ class IntellijGitHubServiceTest {
                                             "octocat",
                                             "2026-07-22T12:00:00Z",
                                             "https://github.com/acme/widgets/pull/42",
-                                            true)));
+                                            true,
+                                            ReviewStatus.UPDATED_SINCE_REVIEW)));
 
             assertThat(result).hasSize(1);
             PullRequest pullRequest = result.get(0);
@@ -165,6 +167,7 @@ class IntellijGitHubServiceTest {
             assertThat(pullRequest.getHtmlUrl())
                     .isEqualTo("https://github.com/acme/widgets/pull/42");
             assertThat(pullRequest.isDraft()).isTrue();
+            assertThat(pullRequest.getReviewStatus()).isEqualTo(ReviewStatus.UPDATED_SINCE_REVIEW);
         }
     }
 

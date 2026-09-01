@@ -12,6 +12,7 @@ public final class PullRequest {
     private final String author;
     private final String createdAt;
     private final boolean isDraft;
+    private final ReviewStatus reviewStatus;
 
     public PullRequest(
             String title,
@@ -22,7 +23,17 @@ public final class PullRequest {
             String body,
             String author,
             String createdAt) {
-        this(title, htmlUrl, owner, repo, number, body, author, createdAt, false);
+        this(
+                title,
+                htmlUrl,
+                owner,
+                repo,
+                number,
+                body,
+                author,
+                createdAt,
+                false,
+                ReviewStatus.UNAVAILABLE);
     }
 
     public PullRequest(
@@ -35,6 +46,30 @@ public final class PullRequest {
             String author,
             String createdAt,
             boolean isDraft) {
+        this(
+                title,
+                htmlUrl,
+                owner,
+                repo,
+                number,
+                body,
+                author,
+                createdAt,
+                isDraft,
+                ReviewStatus.UNAVAILABLE);
+    }
+
+    public PullRequest(
+            String title,
+            String htmlUrl,
+            String owner,
+            String repo,
+            int number,
+            String body,
+            String author,
+            String createdAt,
+            boolean isDraft,
+            ReviewStatus reviewStatus) {
         this.title = title;
         this.htmlUrl = htmlUrl;
         this.owner = owner;
@@ -44,6 +79,7 @@ public final class PullRequest {
         this.author = author;
         this.createdAt = createdAt;
         this.isDraft = isDraft;
+        this.reviewStatus = reviewStatus == null ? ReviewStatus.UNAVAILABLE : reviewStatus;
     }
 
     public String getTitle() {
@@ -80,6 +116,15 @@ public final class PullRequest {
 
     public boolean isDraft() {
         return isDraft;
+    }
+
+    public ReviewStatus getReviewStatus() {
+        return reviewStatus;
+    }
+
+    public PullRequest withReviewStatus(ReviewStatus value) {
+        return new PullRequest(
+                title, htmlUrl, owner, repo, number, body, author, createdAt, isDraft, value);
     }
 
     @Override

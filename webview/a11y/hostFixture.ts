@@ -39,6 +39,7 @@ export const examplePr = {
   htmlUrl: 'https://github.com/acme/platform/pull/42',
   isDraft: false,
   hasReviewDraft: false,
+  reviewStatus: 'REVIEWED',
 }
 
 export const exampleDiff = `diff --git a/src/auth.ts b/src/auth.ts

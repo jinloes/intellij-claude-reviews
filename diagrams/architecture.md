@@ -3,7 +3,7 @@
 ```mermaid
 flowchart LR
     Reviewer(["Reviewer"])
-    GitHub[("GitHub API")]
+    GitHub[("GitHub REST and<br/>GraphQL APIs")]
     GhCli["GitHub CLI<br/>token resolution"]
     Provider["Claude CLI or<br/>Copilot runtime"]
     Checkout[("Local repository<br/>and detached PR worktree")]
@@ -35,7 +35,7 @@ flowchart LR
     subgraph Engines["Host-neutral Java 17 engines"]
         subgraph GitHubEngine["github-engine/"]
             GitHubApi["GitHubEngineApi"]
-            GitHubServices["PR discovery, context,<br/>diff, draft, and submission services"]
+            GitHubServices["PR discovery and review freshness,<br/>context, diff, draft, and submission services"]
             GitHubApi --> GitHubServices
         end
 
@@ -51,7 +51,7 @@ flowchart LR
             Session --> Outcomes
         end
 
-        Core["core/<br/>shared PR, review, comment,<br/>chat, and request models"]
+        Core["core/<br/>shared PR, review-status, comment,<br/>chat, and request models"]
         Core -. shared models .-> GitHubApi
         Core -. shared models .-> ReviewApi
     end

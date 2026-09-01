@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.jinloes.prpilot.model.PullRequest;
 import com.jinloes.prpilot.model.ReviewProvider;
+import com.jinloes.prpilot.model.ReviewStatus;
 import com.jinloes.prpilot.services.IntellijClaudeService;
 import com.jinloes.prpilot.services.PendingReviewIndex;
 import com.jinloes.prpilot.sidecar.pr.PrDetail;
@@ -278,7 +279,8 @@ class WebviewPanelTest {
                             "",
                             "octocat",
                             "2026-07-30T12:00:00Z",
-                            true);
+                            true,
+                            ReviewStatus.REVIEWED);
             PrDetail detail =
                     new PrDetail(
                             false,
@@ -298,6 +300,7 @@ class WebviewPanelTest {
             assertThat(hydrated.getAuthor()).isEqualTo("octocat");
             assertThat(hydrated.getCreatedAt()).isEqualTo("2026-07-30T12:00:00Z");
             assertThat(hydrated.isDraft()).isTrue();
+            assertThat(hydrated.getReviewStatus()).isEqualTo(ReviewStatus.REVIEWED);
         }
 
         @Test
@@ -306,6 +309,52 @@ class WebviewPanelTest {
                     new PullRequest("Title", "", "acme", "platform", 7, "", "octocat", "");
 
             assertThat(WebviewPanel.hydratePullRequest(summary, null)).isSameAs(summary);
+        }
+    }
+
+    @Nested
+    class MergeActivatedPr {
+
+        @Test
+        void preservesKnownReviewStatusForNotificationSummary() {
+            PullRequest existing =
+                    new PullRequest(
+                            "List title",
+                            "",
+                            "acme",
+                            "platform",
+                            7,
+                            "",
+                            "octocat",
+                            "",
+                            false,
+                            ReviewStatus.REVIEWED);
+            PullRequest incoming =
+                    new PullRequest(
+                            "Notification title",
+                            "",
+                            "acme",
+                            "platform",
+                            7,
+                            "",
+                            "octocat",
+                            "",
+                            false,
+                            ReviewStatus.UNAVAILABLE);
+
+            PullRequest merged = WebviewPanel.mergeActivatedPr(existing, incoming);
+
+            assertThat(merged.getTitle()).isEqualTo("Notification title");
+            assertThat(merged.getReviewStatus()).isEqualTo(ReviewStatus.REVIEWED);
+        }
+
+        @Test
+        void acceptsNewKnownReviewStatus() {
+            PullRequest existing =
+                    new PullRequest("Old", "", "acme", "platform", 7, "", "octocat", "");
+            PullRequest incoming = existing.withReviewStatus(ReviewStatus.UPDATED_SINCE_REVIEW);
+
+            assertThat(WebviewPanel.mergeActivatedPr(existing, incoming)).isSameAs(incoming);
         }
     }
 

@@ -2,6 +2,7 @@ package com.jinloes.prpilot.sidecar.pr;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.jinloes.prpilot.model.ReviewStatus;
 import com.jinloes.prpilot.sidecar.github.GitHubAuthService;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
@@ -26,6 +27,11 @@ class PrListServiceTest {
                             return PrListService.SearchResponse.success(
                                     false, List.of(pullRequest(1)));
                         },
+                        (baseUrls, token, prs) -> {
+                            assertThat(baseUrls.graphqlUrl())
+                                    .isEqualTo("https://api.github.com/graphql");
+                            return available(prs);
+                        },
                         new PrSearchQueryService());
 
         PrListResult result =
@@ -38,7 +44,9 @@ class PrListServiceTest {
         assertThat(query.get()).isEqualTo("is:pr is:open repo:acme/widgets");
         assertThat(result.status()).isEqualTo("ok");
         assertThat(result.limited()).isFalse();
-        assertThat(result.prs()).containsExactly(pullRequest(1));
+        assertThat(result.reviewStatusAvailable()).isTrue();
+        assertThat(result.prs())
+                .containsExactly(pullRequest(1).withReviewStatus(ReviewStatus.UNREVIEWED));
         assertThat(result.toString()).doesNotContain("secret-token");
     }
 
@@ -57,6 +65,7 @@ class PrListServiceTest {
                             return PrListService.SearchResponse.success(
                                     true, List.of(pullRequest(2)));
                         },
+                        (baseUrls, token, prs) -> available(prs),
                         new PrSearchQueryService());
 
         PrListResult result =
@@ -79,6 +88,7 @@ class PrListServiceTest {
                         (baseUrl, token, query) -> {
                             throw new AssertionError("search must not be called");
                         },
+                        (baseUrls, token, prs) -> available(prs),
                         new PrSearchQueryService());
         PrListService notAuthenticated =
                 new PrListService(
@@ -86,6 +96,7 @@ class PrListServiceTest {
                         (baseUrl, token, query) -> {
                             throw new AssertionError("search must not be called");
                         },
+                        (baseUrls, token, prs) -> available(prs),
                         new PrSearchQueryService());
         PrListService rateLimited =
                 new PrListService(
@@ -93,6 +104,7 @@ class PrListServiceTest {
                         (baseUrl, token, query) ->
                                 PrListService.SearchResponse.of(
                                         PrListService.SearchStatus.RATE_LIMITED),
+                        (baseUrls, token, prs) -> available(prs),
                         new PrSearchQueryService());
 
         assertThat(list(notInstalled).status()).isEqualTo("not_installed");
@@ -111,6 +123,7 @@ class PrListServiceTest {
                         },
                         (baseUrl, token, query) ->
                                 PrListService.SearchResponse.success(false, List.of()),
+                        (baseUrls, token, prs) -> available(prs),
                         new PrSearchQueryService());
 
         PrListResult result =
@@ -137,5 +150,14 @@ class PrListServiceTest {
                 "2026-01-01T00:00:00Z",
                 "https://github.com/acme/widgets/pull/" + number,
                 false);
+    }
+
+    private static PrListService.ReviewStatusResponse available(
+            List<PullRequestSummary> pullRequests) {
+        return new PrListService.ReviewStatusResponse(
+                true,
+                pullRequests.stream()
+                        .map(pr -> pr.withReviewStatus(ReviewStatus.UNREVIEWED))
+                        .toList());
     }
 }

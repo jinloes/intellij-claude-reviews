@@ -3,20 +3,22 @@ package com.jinloes.prpilot.sidecar.github;
 import java.net.URI;
 
 /**
- * A validated GitHub origin, resolved to its REST API base URL and the {@code gh --hostname}
- * argument for that host.
+ * A validated GitHub origin, resolved to its REST and GraphQL API URLs plus the {@code gh
+ * --hostname} argument for that host.
  *
  * <p>Accepts only a bare HTTPS origin — no credentials, port, path, query, or fragment — because
  * the value reaches both a subprocess argument ({@code gh auth token --hostname}) and a request
  * URI. Rejecting anything richer keeps both uses unambiguous.
  *
  * <p>{@code github.com} maps to {@code api.github.com}; any other host is treated as GitHub
- * Enterprise and maps to {@code <origin>/api/v3}. {@link #hostnameArgument()} is null for
- * github.com, since {@code gh} defaults to it and passing {@code --hostname} is unnecessary.
+ * Enterprise and maps to {@code <origin>/api/v3} for REST and {@code <origin>/api/graphql} for
+ * GraphQL. {@link #hostnameArgument()} is null for github.com, since {@code gh} defaults to it and
+ * passing {@code --hostname} is unnecessary.
  */
-public record GitHubApiBase(String apiBaseUrl, String hostnameArgument) {
+public record GitHubApiBase(String apiBaseUrl, String graphqlUrl, String hostnameArgument) {
     private static final String DEFAULT_BASE_URL = "https://github.com";
     private static final String DEFAULT_API_URL = "https://api.github.com";
+    private static final String DEFAULT_GRAPHQL_URL = "https://api.github.com/graphql";
 
     /**
      * Parses a GitHub origin, returning null when it is not a bare HTTPS origin. A null or blank
@@ -42,8 +44,8 @@ public record GitHubApiBase(String apiBaseUrl, String hostnameArgument) {
         }
         String origin = "https://" + uri.getHost().toLowerCase();
         return DEFAULT_BASE_URL.equals(origin)
-                ? new GitHubApiBase(DEFAULT_API_URL, null)
-                : new GitHubApiBase(origin + "/api/v3", uri.getHost());
+                ? new GitHubApiBase(DEFAULT_API_URL, DEFAULT_GRAPHQL_URL, null)
+                : new GitHubApiBase(origin + "/api/v3", origin + "/api/graphql", uri.getHost());
     }
 
     /**

@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.http.HttpRequest;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -232,6 +233,87 @@ class GitHubHttpClientTest {
             assertThat(result.isNetworkError()).isTrue();
             assertThat(backoff.pauses).isEmpty();
             assertThat(Thread.interrupted()).as("interrupt flag is restored").isTrue();
+        }
+
+        @Test
+        void getOnceUsesTheRequestedDeadlineWithoutRetrying() {
+            RecordingBackoff backoff = new RecordingBackoff();
+            ScriptedTransport transport =
+                    new ScriptedTransport(new GitHubResponse(503, ""), ok("unexpected"));
+
+            GitHubResponse result =
+                    new GitHubHttpClient(transport, backoff)
+                            .getOnce("https://api.github.com/user", "token", Duration.ofSeconds(3));
+
+            assertThat(result.statusCode()).isEqualTo(503);
+            assertThat(transport.requests).hasSize(1);
+            assertThat(transport.requests.get(0).timeout()).contains(Duration.ofSeconds(3));
+            assertThat(backoff.pauses).isEmpty();
+        }
+    }
+
+    @Nested
+    @DisplayName("postJson")
+    class PostJson {
+
+        @Test
+        void sendsAnAuthenticatedJsonPost() {
+            ScriptedTransport transport = new ScriptedTransport(ok("{\"data\":{}}"));
+
+            GitHubResponse result =
+                    new GitHubHttpClient(transport, new RecordingBackoff())
+                            .postJson(
+                                    "https://api.github.com/graphql",
+                                    "secret-token",
+                                    "{\"query\":\"query { viewer { login } }\"}");
+
+            assertThat(result.isSuccess()).isTrue();
+            HttpRequest request = transport.requests.get(0);
+            assertThat(request.method()).isEqualTo("POST");
+            assertThat(request.headers().firstValue("Authorization"))
+                    .hasValueSatisfying(value -> assertThat(value).startsWith("Bearer "));
+            assertThat(request.headers().firstValue("Accept"))
+                    .contains(GitHubHttpClient.ACCEPT_JSON);
+            assertThat(request.headers().firstValue("Content-Type")).contains("application/json");
+            assertThat(request.bodyPublisher()).isPresent();
+        }
+
+        @Test
+        void retriesTransientFailures() {
+            RecordingBackoff backoff = new RecordingBackoff();
+            GitHubHttpClient client =
+                    new GitHubHttpClient(
+                            new ScriptedTransport(new GitHubResponse(503, ""), ok("{\"data\":{}}")),
+                            backoff);
+
+            assertThat(
+                            client.postJson(
+                                            "https://api.github.com/graphql",
+                                            "token",
+                                            "{\"query\":\"query { viewer { login } }\"}")
+                                    .isSuccess())
+                    .isTrue();
+            assertThat(backoff.pauses).containsExactly(1);
+        }
+
+        @Test
+        void postJsonOnceUsesTheRequestedDeadlineWithoutRetrying() {
+            RecordingBackoff backoff = new RecordingBackoff();
+            ScriptedTransport transport =
+                    new ScriptedTransport(new IOException("timeout"), ok("{\"data\":{}}"));
+
+            GitHubResponse result =
+                    new GitHubHttpClient(transport, backoff)
+                            .postJsonOnce(
+                                    "https://api.github.com/graphql",
+                                    "token",
+                                    "{\"query\":\"query { viewer { login } }\"}",
+                                    Duration.ofSeconds(3));
+
+            assertThat(result.isNetworkError()).isTrue();
+            assertThat(transport.requests).hasSize(1);
+            assertThat(transport.requests.get(0).timeout()).contains(Duration.ofSeconds(3));
+            assertThat(backoff.pauses).isEmpty();
         }
     }
 

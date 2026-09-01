@@ -15,6 +15,7 @@ const pr: PR = {
   htmlUrl: 'https://github.com/acme/widget/pull/42',
   isDraft: false,
   hasReviewDraft: true,
+  reviewStatus: 'UNREVIEWED',
 }
 
 function diffWithFiles(count: number): string {

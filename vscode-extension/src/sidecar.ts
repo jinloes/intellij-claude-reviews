@@ -98,6 +98,7 @@ export interface SidecarPrListResult {
     query: string | null;
     resultLimit: number;
     limited: boolean;
+    reviewStatusAvailable: boolean;
     prs: Array<{
         number: number;
         title: string;
@@ -107,6 +108,7 @@ export interface SidecarPrListResult {
         createdAt: string;
         htmlUrl: string;
         isDraft: boolean;
+        reviewStatus: 'UNREVIEWED' | 'REVIEWED' | 'UPDATED_SINCE_REVIEW' | 'UNAVAILABLE';
     }>;
 }
 
@@ -379,6 +381,12 @@ const PR_SEARCH_STATUSES = new Set<SidecarPrSearchResult['status']>([
     ...PR_LIST_STATUSES,
     'invalid_request',
 ]);
+const REVIEW_STATUSES = new Set<SidecarPrListResult['prs'][number]['reviewStatus']>([
+    'UNREVIEWED',
+    'REVIEWED',
+    'UPDATED_SINCE_REVIEW',
+    'UNAVAILABLE',
+]);
 
 const PR_DETAIL_STATUSES = new Set<SidecarPrDetailResult['status']>([
     'ok',
@@ -464,6 +472,7 @@ export function parsePrListResult(value: unknown): SidecarPrListResult | null {
         || (result.query !== null && typeof result.query !== 'string')
         || typeof result.resultLimit !== 'number'
         || typeof result.limited !== 'boolean'
+        || typeof result.reviewStatusAvailable !== 'boolean'
         || !Array.isArray(result.prs)) {
         return null;
     }
@@ -477,7 +486,9 @@ export function parsePrListResult(value: unknown): SidecarPrListResult | null {
             || typeof pr.author !== 'string'
             || typeof pr.createdAt !== 'string'
             || typeof pr.htmlUrl !== 'string'
-            || typeof pr.isDraft !== 'boolean') {
+            || typeof pr.isDraft !== 'boolean'
+            || typeof pr.reviewStatus !== 'string'
+            || !REVIEW_STATUSES.has(pr.reviewStatus as SidecarPrListResult['prs'][number]['reviewStatus'])) {
             return null;
         }
         return {
@@ -489,6 +500,7 @@ export function parsePrListResult(value: unknown): SidecarPrListResult | null {
             createdAt: pr.createdAt,
             htmlUrl: pr.htmlUrl,
             isDraft: pr.isDraft,
+            reviewStatus: pr.reviewStatus,
         };
     });
     if (prs.some((pr) => pr === null)) return null;
@@ -498,6 +510,7 @@ export function parsePrListResult(value: unknown): SidecarPrListResult | null {
         query: typeof result.query === 'string' ? result.query : null,
         resultLimit: result.resultLimit,
         limited: result.limited,
+        reviewStatusAvailable: result.reviewStatusAvailable,
         prs: prs as SidecarPrListResult['prs'],
     };
 }
@@ -511,6 +524,7 @@ export function parsePrSearchResult(value: unknown): SidecarPrSearchResult | nul
         ...result,
         status: result.status === 'invalid_request' ? 'api_failed' : result.status,
         query: null,
+        reviewStatusAvailable: false,
     });
     return parsed === null ? null : {
         status: result.status as SidecarPrSearchResult['status'],

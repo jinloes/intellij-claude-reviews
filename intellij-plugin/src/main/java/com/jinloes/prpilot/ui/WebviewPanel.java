@@ -27,6 +27,7 @@ import com.jinloes.prpilot.model.PRReviewRequest;
 import com.jinloes.prpilot.model.PullRequest;
 import com.jinloes.prpilot.model.ReviewProvider;
 import com.jinloes.prpilot.model.ReviewResult;
+import com.jinloes.prpilot.model.ReviewStatus;
 import com.jinloes.prpilot.review.ClaudeService;
 import com.jinloes.prpilot.review.CopilotService;
 import com.jinloes.prpilot.review.GitWorktreeService;
@@ -104,10 +105,15 @@ public class WebviewPanel implements Disposable {
             @JsonProperty("createdAt") String createdAt,
             @JsonProperty("htmlUrl") String htmlUrl,
             @JsonProperty("isDraft") boolean isDraft,
-            @JsonProperty("hasReviewDraft") boolean hasReviewDraft) {}
+            @JsonProperty("hasReviewDraft") boolean hasReviewDraft,
+            @JsonProperty("reviewStatus") ReviewStatus reviewStatus) {}
 
     private record PrListStatus(
-            String searchScope, String currentRepo, int resultLimit, boolean limited) {}
+            String searchScope,
+            String currentRepo,
+            int resultLimit,
+            boolean limited,
+            boolean reviewStatusAvailable) {}
 
     private record PrListMessage(
             String type,
@@ -1978,7 +1984,8 @@ public class WebviewPanel implements Disposable {
                 detail.body(),
                 summary.getAuthor(),
                 summary.getCreatedAt(),
-                summary.isDraft());
+                summary.isDraft(),
+                summary.getReviewStatus());
     }
 
     static boolean matchesPrRequest(PullRequest pr, int number, String owner, String repo) {
@@ -2290,6 +2297,7 @@ public class WebviewPanel implements Disposable {
             String searchScope,
             String currentRepo,
             boolean limited,
+            boolean reviewStatusAvailable,
             ProviderSetupProbe.Result providerSetup) {
         cachedPRs = prs;
         ProviderReadinessDto providerReadiness = providerReadiness(providerSetup);
@@ -2331,7 +2339,12 @@ public class WebviewPanel implements Disposable {
                         "prListLoaded",
                         dtos,
                         defaultRepo,
-                        new PrListStatus(searchScope, currentRepo, PR_SEARCH_LIMIT, limited),
+                        new PrListStatus(
+                                searchScope,
+                                currentRepo,
+                                PR_SEARCH_LIMIT,
+                                limited,
+                                reviewStatusAvailable),
                         providerReadiness));
     }
 
@@ -2367,18 +2380,29 @@ public class WebviewPanel implements Disposable {
                                         entry.owner().equals(pr.getOwner())
                                                 && entry.repo().equals(pr.getRepo())
                                                 && entry.number() == pr.getNumber());
-        if (cachedPRs.stream().anyMatch(existing -> isSamePr(existing, pr))) {
+        PullRequest activatedPr =
+                cachedPRs.stream()
+                        .filter(existing -> isSamePr(existing, pr))
+                        .findFirst()
+                        .map(existing -> mergeActivatedPr(existing, pr))
+                        .orElse(pr);
+        if (cachedPRs.stream().anyMatch(existing -> isSamePr(existing, activatedPr))) {
             cachedPRs =
                     cachedPRs.stream()
-                            .map(existing -> isSamePr(existing, pr) ? pr : existing)
+                            .map(
+                                    existing ->
+                                            isSamePr(existing, activatedPr)
+                                                    ? activatedPr
+                                                    : existing)
                             .toList();
         } else {
             List<PullRequest> next = new ArrayList<>();
-            next.add(pr);
+            next.add(activatedPr);
             next.addAll(cachedPRs);
             cachedPRs = next;
         }
-        pushMessage(new ActivatePrMsg("activatePR", toWebviewPr(pr, hasReviewDraft), source));
+        pushMessage(
+                new ActivatePrMsg("activatePR", toWebviewPr(activatedPr, hasReviewDraft), source));
     }
 
     static Optional<List<PendingReviewIndex.Entry>> healthyDraftEntries(
@@ -2421,7 +2445,15 @@ public class WebviewPanel implements Disposable {
                 pr.getCreatedAt(),
                 pr.getHtmlUrl(),
                 pr.isDraft(),
-                hasReviewDraft);
+                hasReviewDraft,
+                pr.getReviewStatus());
+    }
+
+    static PullRequest mergeActivatedPr(PullRequest existing, PullRequest incoming) {
+        return incoming.getReviewStatus() == ReviewStatus.UNAVAILABLE
+                        && existing.getReviewStatus() != ReviewStatus.UNAVAILABLE
+                ? incoming.withReviewStatus(existing.getReviewStatus())
+                : incoming;
     }
 
     public String getPrStateFilter() {

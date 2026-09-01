@@ -931,6 +931,7 @@ async function handleRefreshPRs(state: ViewState, msg: Record<string, unknown>):
                 currentRepo: currentRepo ?? undefined,
                 resultLimit: found.resultLimit,
                 limited: found.limited,
+                reviewStatusAvailable: found.reviewStatusAvailable,
             },
             providerReadiness: readiness,
         });

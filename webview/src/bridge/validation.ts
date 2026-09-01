@@ -66,6 +66,7 @@ function isPR(value: unknown): value is PR {
     && isString(value.htmlUrl, 4_096)
     && typeof value.isDraft === 'boolean'
     && typeof value.hasReviewDraft === 'boolean'
+    && ['UNREVIEWED', 'REVIEWED', 'UPDATED_SINCE_REVIEW', 'UNAVAILABLE'].includes(value.reviewStatus as string)
 }
 
 function isListStatus(value: unknown): boolean {
@@ -76,6 +77,7 @@ function isListStatus(value: unknown): boolean {
     && (value.resultLimit as number) > 0
     && (value.resultLimit as number) <= MAX_PRS
     && typeof value.limited === 'boolean'
+    && typeof value.reviewStatusAvailable === 'boolean'
 }
 
 function isProviderReadiness(value: unknown): boolean {

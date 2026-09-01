@@ -215,6 +215,7 @@ public class PRToolWindowFactory implements ToolWindowFactory {
                                         webviewPanel.getSearchScope(),
                                         currentRepo,
                                         finalLimited,
+                                        result.reviewStatusAvailable(),
                                         providerSetup);
                             });
         } catch (Exception e) {

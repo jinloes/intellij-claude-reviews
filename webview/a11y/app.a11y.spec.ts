@@ -38,6 +38,46 @@ test('populated discovery and provider-ready review have no axe violations', asy
   await expectNoViolations(page)
 })
 
+test('narrow discovery exceptions and simultaneous statuses have no axe violations', async ({ page }) => {
+  await page.setViewportSize({ width: 220, height: 720 })
+  await page.evaluate(() => localStorage.setItem('pr-pilot:first-success-coach-shown', '1'))
+  await pushHostMessage(page, { type: 'themeChanged', theme: 'highContrastDark' })
+  await pushHostMessage(page, {
+    type: 'prListLoaded',
+    prs: [{
+      ...examplePr,
+      title: 'A long localized title that changed after review',
+      repo: 'a-very-long-repository-name',
+      author: 'a-very-long-reviewer-name',
+      isDraft: true,
+      hasReviewDraft: true,
+      reviewStatus: 'UPDATED_SINCE_REVIEW',
+    }],
+    listStatus: {
+      searchScope: 'currentRepo',
+      resultLimit: 50,
+      limited: true,
+      reviewStatusAvailable: false,
+    },
+  })
+  await pushHostMessage(page, {
+    type: 'activatePR',
+    source: 'notification',
+    pr: { ...examplePr, reviewStatus: 'UNAVAILABLE' },
+  })
+  await page.getByRole('button', { name: 'Show pull requests' }).click()
+
+  const nav = page.getByRole('navigation', { name: 'Pull Requests' })
+  const geometry = await nav.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }))
+  expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth)
+  await expect(page.getByText('Updated since your review')).toBeVisible()
+  await expect(page.getByText('From notification')).toBeVisible()
+  await expectNoViolations(page, 'nav')
+})
+
 test('full-workspace setup has no axe violations', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 568 })
   await pushHostMessage(page, { type: 'themeChanged', theme: 'dark' })

@@ -1,6 +1,7 @@
 export type Severity = 'blocker' | 'major' | 'minor' | 'nit';
 export type Category = 'correctness' | 'security' | 'performance' | 'tests' | 'maintainability' | 'style';
 export type Confidence = 'low' | 'medium' | 'high';
+export type ReviewStatus = 'UNREVIEWED' | 'REVIEWED' | 'UPDATED_SINCE_REVIEW' | 'UNAVAILABLE';
 
 export interface PR {
     number: number;
@@ -12,6 +13,7 @@ export interface PR {
     htmlUrl: string;
     isDraft: boolean;
     hasReviewDraft: boolean;
+    reviewStatus: ReviewStatus;
 }
 
 export interface LineComment {
@@ -32,4 +34,3 @@ export interface ReviewResult {
 }
 
 export type PRSearchScope = 'currentRepo' | 'authored' | 'assigned' | 'reviewRequested';
-

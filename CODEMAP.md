@@ -44,7 +44,9 @@ context makes them unambiguous.
 
 Plain Java 17 shared models with no host dependencies.
 
-- `model/PullRequest.java` - Immutable PR identity and metadata.
+- `model/PullRequest.java` - Immutable PR identity, metadata, and review-freshness state.
+- `model/ReviewStatus.java` - Authenticated-user review freshness (`UNREVIEWED`, `REVIEWED`,
+  `UPDATED_SINCE_REVIEW`, or `UNAVAILABLE`).
 - `model/ReviewResult.java` - Review summary, verdict, and line comments.
 - `model/LineComment.java` - Inline comment anchor and quality metadata.
 - `model/ChatMessage.java` - Immutable chat role and content.
@@ -88,9 +90,15 @@ receive GitHub tokens.
 - `engine/GitHubEngineApi.java` - Complete GitHub capability surface and JSON-RPC wire-name map.
 - `engine/GitHubEngine.java` - Composition root delegating to GitHub services.
 - `sidecar/github/GitHubAuthService.java` - `gh` and GitHub API authentication checks.
+- `sidecar/github/GitHubApiBase.java` - Validated GitHub.com/GHES REST and GraphQL endpoints.
+- `sidecar/github/GitHubHttpClient.java` - Shared authenticated GET/POST transport with the default
+  retry policy and optional single-attempt deadlines.
 - `sidecar/github/CheckAuthResult.java` - Stable authentication diagnosis.
 - `sidecar/pr/PrSearchQueryService.java` - Normalized PR search construction.
-- `sidecar/pr/PrListService.java` - Authenticated PR search with retry and truncation handling.
+- `sidecar/pr/PrListService.java` - Authenticated PR search, truncation, and bounded freshness
+  enrichment.
+- `sidecar/pr/PrReviewStatusService.java` - Viewer lookup plus one GraphQL freshness query for at
+  most 50 list results.
 - `sidecar/pr/PrDetailService.java` - PR metadata and worktree-head lookup.
 - `sidecar/pr/PrDiffService.java` - Byte-bounded review diff retrieval.
 - `sidecar/pr/DraftReviewService.java` - Pending-review lookup and decoding.
@@ -147,7 +155,12 @@ Shared Vite/React/TypeScript UI used by both IDE hosts.
 - `src/App.tsx` - Application state and top-level host workflow.
 - `src/bridge/types.ts` - Cross-host message schemas.
 - `src/components/` - PR discovery, diff, review, chat, settings-adjacent UI, and reusable controls.
-- `src/components/PRList/` - Pull-request discovery, filtering, scope controls, and success coaching.
+- `src/components/PRList/PRList.tsx` - Pull-request discovery state and host-message ingestion.
+- `src/components/PRList/PRListControls.tsx`, `PRListNotices.tsx` - Scope/filter controls and
+  exception-only list notices.
+- `src/components/PRList/PRListItem.tsx`, `PRStatusBadges.tsx` - Title-first rows and readable
+  draft/notification/review-freshness badges.
+- `src/components/PRList/ReadinessCoach.tsx` - Compact persisted first-success confirmation.
 - `src/components/Setup/` - App-level prerequisite recovery UI and the setup reason/action matrix.
 - `src/components/ReviewPane/ReviewPane.tsx` - Review feature composition root and public component API.
 - `src/components/ReviewPane/useReviewController.ts` - PR-scoped bridge events, autosave, mutation
@@ -208,6 +221,10 @@ final critique/CI suppression -> status/chunk notifications -> host bridge -> sh
 
 Shared webview -> host bridge -> `GitHubEngineApi` -> `GitHubEngine` -> focused service in
 `github-engine/sidecar/` -> token-free result -> host bridge -> shared webview.
+
+For discovery, `PrListService` performs REST search, viewer lookup, and one bounded GraphQL
+enrichment through `PrReviewStatusService`; see
+[`diagrams/pr-discovery-sequence.md`](diagrams/pr-discovery-sequence.md).
 
 ### VS Code transport
 

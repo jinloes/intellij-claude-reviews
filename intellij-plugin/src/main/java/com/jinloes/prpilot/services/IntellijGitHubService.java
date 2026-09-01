@@ -92,7 +92,11 @@ public final class IntellijGitHubService {
                         new PrListService.PrListParams(baseUrl(), state, searchScope, currentRepo));
         requireOk(result.status(), result.message());
         return new PullRequestList(
-                toPullRequests(result.prs()), result.limited(), currentRepo, result.query());
+                toPullRequests(result.prs()),
+                result.limited(),
+                result.reviewStatusAvailable(),
+                currentRepo,
+                result.query());
     }
 
     public String detectCurrentRepo(String projectPath) {
@@ -324,7 +328,8 @@ public final class IntellijGitHubService {
                                         "",
                                         pr.author(),
                                         pr.createdAt(),
-                                        pr.isDraft()))
+                                        pr.isDraft(),
+                                        pr.reviewStatus()))
                 .toList();
     }
 
@@ -358,5 +363,9 @@ public final class IntellijGitHubService {
     public record PRHeadInfo(String ref, String sha, boolean isFork, String forkCloneUrl) {}
 
     public record PullRequestList(
-            List<PullRequest> pullRequests, boolean limited, String currentRepo, String query) {}
+            List<PullRequest> pullRequests,
+            boolean limited,
+            boolean reviewStatusAvailable,
+            String currentRepo,
+            String query) {}
 }

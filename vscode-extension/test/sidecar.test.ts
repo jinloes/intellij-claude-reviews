@@ -95,7 +95,7 @@ function createSidecarHarness(
 }
 
 test('supplemental GitHub parsers accept valid token-free results', () => {
-  const pr = { number: 1, title: 'Fix', owner: 'acme', repo: 'widgets', author: 'octo', createdAt: '', htmlUrl: 'https://example/pr/1', isDraft: false };
+  const pr = { number: 1, title: 'Fix', owner: 'acme', repo: 'widgets', author: 'octo', createdAt: '', htmlUrl: 'https://example/pr/1', isDraft: false, reviewStatus: 'UNAVAILABLE' };
   assert.deepEqual(parsePrSearchResult({ status: 'ok', message: 'ok', resultLimit: 50, limited: false, prs: [pr] })?.prs, [pr]);
   assert.deepEqual(parseStarredReposResult({ status: 'ok', message: 'ok', resultLimit: 200, limited: false, repositories: ['acme/widgets'] })?.repositories, ['acme/widgets']);
   assert.equal(parseExistingReviewsResult({ status: 'ok', message: 'ok', summary: 'Review by @octo' })?.summary, 'Review by @octo');
@@ -195,6 +195,7 @@ test('parsePrListResult accepts token-free pull request list results', () => {
       query: 'is:pr is:open author:@me',
       resultLimit: 50,
       limited: false,
+      reviewStatusAvailable: true,
       prs: [{
         number: 42,
         title: 'Example',
@@ -204,6 +205,7 @@ test('parsePrListResult accepts token-free pull request list results', () => {
         createdAt: '2026-01-01T00:00:00Z',
         htmlUrl: 'https://github.com/acme/widgets/pull/42',
         isDraft: false,
+        reviewStatus: 'REVIEWED',
       }],
     }),
     {
@@ -212,6 +214,7 @@ test('parsePrListResult accepts token-free pull request list results', () => {
       query: 'is:pr is:open author:@me',
       resultLimit: 50,
       limited: false,
+      reviewStatusAvailable: true,
       prs: [{
         number: 42,
         title: 'Example',
@@ -221,15 +224,25 @@ test('parsePrListResult accepts token-free pull request list results', () => {
         createdAt: '2026-01-01T00:00:00Z',
         htmlUrl: 'https://github.com/acme/widgets/pull/42',
         isDraft: false,
+        reviewStatus: 'REVIEWED',
       }],
     },
   );
 });
 
 test('parsePrListResult rejects malformed fields and unknown statuses', () => {
-  assert.equal(parsePrListResult({ status: 'unknown', message: 'x', query: null, resultLimit: 50, limited: false, prs: [] }), null);
-  assert.equal(parsePrListResult({ status: 'ok', message: 'x', query: null, resultLimit: 50, limited: false, prs: [{ number: '42' }] }), null);
-  assert.equal(parsePrListResult({ status: 'ok', message: 'x', query: null, resultLimit: 50, limited: false }), null);
+  const base = { status: 'ok', message: 'x', query: null, resultLimit: 50, limited: false, reviewStatusAvailable: true };
+  assert.equal(parsePrListResult({ ...base, status: 'unknown', prs: [] }), null);
+  assert.equal(parsePrListResult({ ...base, prs: [{ number: '42' }] }), null);
+  assert.equal(parsePrListResult({ ...base }), null);
+  assert.equal(parsePrListResult({ ...base, reviewStatusAvailable: undefined, prs: [] }), null);
+  assert.equal(parsePrListResult({
+    ...base,
+    prs: [{
+      number: 42, title: 'x', owner: 'a', repo: 'b', author: 'c', createdAt: '',
+      htmlUrl: 'https://example.test', isDraft: false, reviewStatus: 'UNKNOWN',
+    }],
+  }), null);
 });
 
 test('parsePrDetailResult accepts nullable repository metadata', () => {

@@ -32,6 +32,7 @@ class GitHubApiBaseTest {
             GitHubApiBase base = GitHubApiBase.parse("https://github.com");
 
             assertThat(base.apiBaseUrl()).isEqualTo("https://api.github.com");
+            assertThat(base.graphqlUrl()).isEqualTo("https://api.github.com/graphql");
         }
 
         @Test
@@ -44,6 +45,7 @@ class GitHubApiBaseTest {
             GitHubApiBase base = GitHubApiBase.parse("https://github.mycompany.com");
 
             assertThat(base.apiBaseUrl()).isEqualTo("https://github.mycompany.com/api/v3");
+            assertThat(base.graphqlUrl()).isEqualTo("https://github.mycompany.com/api/graphql");
             assertThat(base.hostnameArgument()).isEqualTo("github.mycompany.com");
         }
 

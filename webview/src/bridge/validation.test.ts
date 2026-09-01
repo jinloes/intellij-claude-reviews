@@ -91,19 +91,46 @@ void test('validates PR list metadata', () => {
     htmlUrl: 'https://github.com/acme/platform/pull/42',
     isDraft: false,
     hasReviewDraft: true,
+    reviewStatus: 'UPDATED_SINCE_REVIEW',
   }
   assert.notEqual(parseIncomingMessage({
     ...version,
     type: 'prListLoaded',
     prs: [pr],
     defaultRepo: 'acme/platform',
-    listStatus: { searchScope: 'currentRepo', currentRepo: 'acme/platform', resultLimit: 50, limited: false },
+    listStatus: {
+      searchScope: 'currentRepo',
+      currentRepo: 'acme/platform',
+      resultLimit: 50,
+      limited: false,
+      reviewStatusAvailable: true,
+    },
   }), null)
   assert.equal(parseIncomingMessage({
     ...version,
     type: 'prListLoaded',
     prs: [pr],
-    listStatus: { searchScope: 'invalid', resultLimit: 50, limited: false },
+    listStatus: {
+      searchScope: 'invalid',
+      resultLimit: 50,
+      limited: false,
+      reviewStatusAvailable: true,
+    },
+  }), null)
+  assert.equal(parseIncomingMessage({
+    ...version,
+    type: 'prListLoaded',
+    prs: [{ ...pr, reviewStatus: 'UNKNOWN' }],
+  }), null)
+  assert.equal(parseIncomingMessage({
+    ...version,
+    type: 'prListLoaded',
+    prs: [pr],
+    listStatus: {
+      searchScope: 'currentRepo',
+      resultLimit: 50,
+      limited: false,
+    },
   }), null)
 })
 

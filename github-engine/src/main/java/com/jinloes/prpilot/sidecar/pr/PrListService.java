@@ -20,21 +20,25 @@ public final class PrListService {
 
     private final GitHubAuthService.TokenResolver tokenResolver;
     private final SearchClient searchClient;
+    private final ReviewStatusClient reviewStatusClient;
     private final PrSearchQueryService queryService;
 
     public PrListService() {
         this(
                 new GitHubAuthService.ProcessTokenResolver(),
                 new HttpSearchClient(),
+                new PrReviewStatusService(),
                 new PrSearchQueryService());
     }
 
     PrListService(
             GitHubAuthService.TokenResolver tokenResolver,
             SearchClient searchClient,
+            ReviewStatusClient reviewStatusClient,
             PrSearchQueryService queryService) {
         this.tokenResolver = Objects.requireNonNull(tokenResolver);
         this.searchClient = Objects.requireNonNull(searchClient);
+        this.reviewStatusClient = Objects.requireNonNull(reviewStatusClient);
         this.queryService = Objects.requireNonNull(queryService);
     }
 
@@ -66,7 +70,16 @@ public final class PrListService {
         SearchResponse response =
                 searchClient.search(baseUrls.apiBaseUrl(), tokenResolution.token(), query);
         return switch (response.status()) {
-            case OK -> PrListResult.success(query, response.limited(), response.prs());
+            case OK -> {
+                ReviewStatusResponse reviewStatuses =
+                        reviewStatusClient.enrich(
+                                baseUrls, tokenResolution.token(), response.prs());
+                yield PrListResult.success(
+                        query,
+                        response.limited(),
+                        reviewStatuses.available(),
+                        reviewStatuses.prs());
+            }
             case NOT_AUTHENTICATED ->
                     PrListResult.failure(
                             "not_authenticated",
@@ -86,6 +99,17 @@ public final class PrListService {
 
     interface SearchClient {
         SearchResponse search(String apiBaseUrl, String token, String query);
+    }
+
+    interface ReviewStatusClient {
+        ReviewStatusResponse enrich(
+                GitHubApiBase baseUrls, String token, List<PullRequestSummary> pullRequests);
+    }
+
+    record ReviewStatusResponse(boolean available, List<PullRequestSummary> prs) {
+        ReviewStatusResponse {
+            prs = List.copyOf(prs);
+        }
     }
 
     record SearchResponse(SearchStatus status, boolean limited, List<PullRequestSummary> prs) {
