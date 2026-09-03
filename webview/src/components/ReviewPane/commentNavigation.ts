@@ -1,3 +1,14 @@
+export function adjacentCommentIndex(
+  focusedIndex: number,
+  direction: -1 | 1,
+  commentCount: number,
+): number {
+  if (commentCount <= 0) return 0
+
+  const currentIndex = Math.min(Math.max(focusedIndex, 0), commentCount - 1)
+  return (currentIndex + direction + commentCount) % commentCount
+}
+
 /**
  * Returns the inline-comment index to focus after one comment is removed.
  *

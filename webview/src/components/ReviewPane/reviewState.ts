@@ -14,17 +14,32 @@ export type DraftPresentState = {
   generationElapsedSec?: number
 }
 
+export type GeneratingState = {
+  kind: 'generating'
+  result: ReviewResult | null
+  diff: string
+  validationDiff: string
+  replacingDraft: boolean
+  generationElapsedSec?: number
+}
+
 export type PaneState =
   | { kind: 'idle' }
   | { kind: 'draftLoading' }
   | { kind: 'noDraft'; diff?: string; validationDiff?: string; providerReadiness?: ProviderReadiness }
   | { kind: 'authError'; message: string; diff?: string; validationDiff?: string }
   | DraftPresentState
-  | { kind: 'generating' }
+  | GeneratingState
   | { kind: 'reviewUnsaved'; result: ReviewResult; diff: string; validationDiff: string; generationElapsedSec?: number }
   | { kind: 'merged'; status?: string }
   | { kind: 'submitted' }
-  | { kind: 'error'; message: string }
+  | {
+      kind: 'error'
+      message: string
+      result?: ReviewResult | null
+      diff?: string
+      validationDiff?: string
+    }
   | { kind: 'saveError'; message: string; result: ReviewResult | null; diff: string; validationDiff: string }
   | { kind: 'submitError'; message: string; result: ReviewResult | null; diff: string; validationDiff: string }
   | { kind: 'deleteError'; message: string; draft: DraftPresentState }
@@ -86,18 +101,20 @@ export function normalizeReviewResult(result: ReviewResult, diff: string): Revie
 }
 
 export function diffOf(state: PaneState): string {
-  if (state.kind === 'reviewUnsaved') return state.diff
+  if (state.kind === 'reviewUnsaved' || state.kind === 'generating') return state.diff
   if (state.kind === 'draftPresent') return state.diff ?? ''
-  if (state.kind === 'noDraft' || state.kind === 'authError') return state.diff ?? ''
+  if (state.kind === 'noDraft' || state.kind === 'authError' || state.kind === 'error') {
+    return state.diff ?? ''
+  }
   if (state.kind === 'saveError' || state.kind === 'submitError') return state.diff
   if (state.kind === 'deleteError') return state.draft.diff ?? ''
   return ''
 }
 
 export function validationDiffOf(state: PaneState): string {
-  if (state.kind === 'reviewUnsaved') return state.validationDiff
+  if (state.kind === 'reviewUnsaved' || state.kind === 'generating') return state.validationDiff
   if (state.kind === 'draftPresent') return state.validationDiff ?? state.diff ?? ''
-  if (state.kind === 'noDraft' || state.kind === 'authError') {
+  if (state.kind === 'noDraft' || state.kind === 'authError' || state.kind === 'error') {
     return state.validationDiff ?? state.diff ?? ''
   }
   if (state.kind === 'saveError' || state.kind === 'submitError') return state.validationDiff
@@ -106,7 +123,10 @@ export function validationDiffOf(state: PaneState): string {
 }
 
 export function resultOf(state: PaneState): ReviewResult | null {
-  if (state.kind === 'draftPresent' || state.kind === 'reviewUnsaved') return state.result
+  if (state.kind === 'draftPresent' || state.kind === 'reviewUnsaved' || state.kind === 'generating') {
+    return state.result
+  }
+  if (state.kind === 'error') return state.result ?? null
   if (state.kind === 'saveError' || state.kind === 'submitError') return state.result
   if (state.kind === 'deleteError') return state.draft.result
   return null
@@ -193,12 +213,27 @@ export function reviewReducer(state: PaneState, event: ReviewStateEvent): PaneSt
       }
 
     case 'reviewError':
-      return { kind: 'error', message: event.message }
+      return state.kind === 'generating'
+        ? {
+            kind: 'error',
+            message: event.message,
+            result: state.result,
+            diff: state.diff,
+            validationDiff: state.validationDiff,
+          }
+        : { kind: 'error', message: event.message }
 
     case 'validationDiffUpdated': {
       const validationDiff = event.validationDiff
       if (state.kind === 'draftPresent' || state.kind === 'reviewUnsaved') {
         return { ...state, validationDiff, result: normalizeReviewResult(state.result, validationDiff) }
+      }
+      if (state.kind === 'generating') {
+        return {
+          ...state,
+          validationDiff,
+          result: state.result ? normalizeReviewResult(state.result, validationDiff) : null,
+        }
       }
       if (state.kind === 'saveError' || state.kind === 'submitError') {
         return {
@@ -244,7 +279,14 @@ export function reviewReducer(state: PaneState, event: ReviewStateEvent): PaneSt
     }
 
     case 'startGenerating':
-      return { kind: 'generating' }
+      return {
+        kind: 'generating',
+        result: resultOf(state),
+        diff: diffOf(state),
+        validationDiff: validationDiffOf(state),
+        replacingDraft: resultOf(state) !== null,
+        generationElapsedSec: 'generationElapsedSec' in state ? state.generationElapsedSec : undefined,
+      }
 
     case 'keepDraft':
       return state.kind === 'deleteError' ? state.draft : state

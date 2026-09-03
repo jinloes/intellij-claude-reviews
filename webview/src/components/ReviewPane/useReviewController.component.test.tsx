@@ -259,6 +259,7 @@ describe('useReviewController', () => {
         message: 'read_file',
       })
     })
+
     expect(
       result.current.model.activity.entries[
         result.current.model.activity.entries.length - 1
@@ -289,6 +290,88 @@ describe('useReviewController', () => {
       endedAtMs: null,
       entries: [],
     })
+  })
+
+  it('preserves the focused finding when a replacement review completes', () => {
+    const replacementReview: ReviewResult = {
+      ...review,
+      lineComments: [
+        review.lineComments[0],
+        { ...review.lineComments[0], body: 'Second finding.' },
+      ],
+    }
+    ;(window as unknown as { cefQuery?: ReturnType<typeof vi.fn> }).cefQuery = vi.fn()
+    const { result } = renderHook(() => useReviewController({ pr }))
+
+    act(() => {
+      hostMessage({
+        type: 'draftLoaded',
+        prKey: 'acme/widget#42',
+        prState: 'DRAFT_PRESENT',
+        reviewId: 'draft-1',
+        result: replacementReview,
+        diff,
+        validationDiff: diff,
+      })
+    })
+    act(() => result.current.actions.focusNextComment())
+    expect(result.current.model.focusedCommentIdx).toBe(1)
+
+    act(() => result.current.actions.generate())
+    expect(result.current.model.state).toMatchObject({
+      kind: 'generating',
+      replacingDraft: true,
+      result: replacementReview,
+    })
+
+    act(() => {
+      hostMessage({
+        type: 'reviewResult',
+        prKey: 'acme/widget#42',
+        result: replacementReview,
+        diff,
+        validationDiff: diff,
+      })
+    })
+
+    expect(result.current.model.focusedCommentIdx).toBe(1)
+
+    act(() => result.current.actions.generate())
+    act(() => {
+      hostMessage({
+        type: 'reviewResult',
+        prKey: 'acme/widget#42',
+        result: review,
+        diff,
+        validationDiff: diff,
+      })
+    })
+
+    expect(result.current.model.focusedCommentIdx).toBe(0)
+  })
+
+  it('requests focus again when navigating a lone comment', () => {
+    const { result } = renderHook(() => useReviewController({ pr }))
+    act(() => {
+      hostMessage({
+        type: 'draftLoaded',
+        prKey: 'acme/widget#42',
+        prState: 'DRAFT_PRESENT',
+        reviewId: 'draft-1',
+        result: review,
+        diff,
+        validationDiff: diff,
+      })
+    })
+
+    expect(result.current.model.commentFocusRequestId).toBe(0)
+    act(() => result.current.actions.focusPreviousComment())
+    expect(result.current.model.focusedCommentIdx).toBe(0)
+    expect(result.current.model.commentFocusRequestId).toBe(1)
+
+    act(() => result.current.actions.focusNextComment())
+    expect(result.current.model.focusedCommentIdx).toBe(0)
+    expect(result.current.model.commentFocusRequestId).toBe(2)
   })
 
   it('marks review activity failed when generation errors', () => {

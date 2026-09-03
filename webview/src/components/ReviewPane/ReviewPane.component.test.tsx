@@ -41,6 +41,41 @@ afterEach(() => {
 })
 
 describe('ReviewPane review submission', () => {
+  it('keeps lone-comment navigation enabled and scrolls on either arrow', async () => {
+    const scrollIntoView = vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(() => {})
+    render(<ReviewPane pr={pr} />)
+    const diff = diffWithFiles(1)
+    act(() => {
+      hostMessage({
+        type: 'draftLoaded',
+        prKey: 'acme/widget#42',
+        prState: 'DRAFT_PRESENT',
+        reviewId: 'draft-1',
+        result: {
+          summary: 'Saved review.',
+          verdict: 'COMMENT',
+          lineComments: [{ file: 'src/file-0.ts', line: 1, type: 'issue', body: 'Review this line.' }],
+        },
+        diff,
+        validationDiff: diff,
+      })
+    })
+
+    const previous = screen.getByRole('button', { name: 'Previous comment' })
+    const next = screen.getByRole('button', { name: 'Next comment' })
+    expect(screen.getAllByText('1/1')).toHaveLength(2)
+    expect(previous).toBeEnabled()
+    expect(next).toBeEnabled()
+
+    scrollIntoView.mockClear()
+    fireEvent.click(previous)
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled())
+
+    scrollIntoView.mockClear()
+    fireEvent.click(next)
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled())
+  })
+
   it('discards a pending edit without saving it during PR cleanup', async () => {
     const user = userEvent.setup()
     const cefQuery = vi.fn()
@@ -164,6 +199,10 @@ describe('ReviewPane review submission', () => {
       expect(screen.getByRole('region', { name: 'Review generation activity' })).toBeVisible()
       expect(within(screen.getByTestId('review-scroll-body')).getAllByText('Starting review')).toHaveLength(1)
       expect(screen.getByRole('button', { name: 'Stop generation' })).toBeVisible()
+      expect(screen.getByRole('navigation', { name: 'Review navigation' })).toBeVisible()
+      expect(screen.getByText(/Keep inspecting the changed files/)).toBeVisible()
+      await user.click(screen.getByRole('button', { name: 'Find in diff' }))
+      expect(screen.getByRole('textbox', { name: 'Find in diff' })).toBeVisible()
 
       act(() => {
         hostMessage({
@@ -221,6 +260,69 @@ describe('ReviewPane review submission', () => {
 
       const messages = cefQuery.mock.calls.map(([arg]) => JSON.parse(arg.request) as { type: string })
       expect(messages).toContainEqual(expect.objectContaining({ type: 'cancelReview' }))
+    })
+
+    it('keeps the current draft visible but read-only while generating its replacement', async () => {
+      const user = userEvent.setup()
+      ;(window as unknown as { cefQuery?: ReturnType<typeof vi.fn> }).cefQuery = vi.fn()
+      render(<ReviewPane pr={pr} />)
+      const diff = diffWithFiles(2)
+      act(() => {
+        hostMessage({
+          type: 'draftLoaded',
+          prKey: 'acme/widget#42',
+          prState: 'DRAFT_PRESENT',
+          reviewId: 'draft-1',
+          result: {
+            summary: 'Keep this draft visible.',
+            verdict: 'COMMENT',
+            lineComments: [{
+              file: 'src/file-0.ts',
+              line: 1,
+              type: 'issue',
+              severity: 'major',
+              body: 'Existing finding.',
+            }],
+          },
+          diff,
+          validationDiff: diff,
+        })
+      })
+      await user.click(screen.getByRole('button', { name: 'src/file-1.ts' }))
+      expect(screen.getByTestId('diff-current-file-path')).toHaveTextContent('src/file-1.ts')
+
+      await user.click(screen.getByRole('button', { name: 'Regenerate' }))
+      await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Regenerate' }))
+
+      expect(screen.getByText('Keep this draft visible.')).toBeVisible()
+      expect(screen.getByText(/current draft remains until the new review is ready/)).toBeVisible()
+      expect(screen.getByRole('navigation', { name: 'Review navigation' })).toBeVisible()
+      expect(screen.getByRole('button', { name: 'Verify with AI' })).toBeDisabled()
+      expect(screen.getByRole('button', { name: 'Suggest fix with AI' })).toBeDisabled()
+      expect(screen.getByRole('button', { name: 'More finding actions' })).toBeDisabled()
+      expect(screen.queryByRole('button', { name: 'Comment' })).not.toBeInTheDocument()
+      expect(screen.getByTestId('diff-current-file-path')).toHaveTextContent('src/file-1.ts')
+
+      act(() => {
+        hostMessage({
+          type: 'reviewResult',
+          prKey: 'acme/widget#42',
+          result: {
+            summary: 'Replacement review.',
+            verdict: 'COMMENT',
+            lineComments: [{
+              file: 'src/file-0.ts',
+              line: 1,
+              type: 'issue',
+              severity: 'major',
+              body: 'Replacement finding.',
+            }],
+          },
+          diff,
+          validationDiff: diff,
+        })
+      })
+      expect(screen.getByTestId('diff-current-file-path')).toHaveTextContent('src/file-1.ts')
     })
 
     it('places failure recovery before activity and retry instructions', async () => {
@@ -531,7 +633,9 @@ describe('ReviewPane review submission', () => {
     })
 
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Saved' })).toBeDisabled()
+      expect(screen.getByText('Saved to GitHub')).toBeVisible()
+      expect(screen.queryByRole('button', { name: 'Save now' })).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Review quality.*No risks/ })).toBeVisible()
       expect(onDirtyStateChange).toHaveBeenLastCalledWith(false)
     })
   })

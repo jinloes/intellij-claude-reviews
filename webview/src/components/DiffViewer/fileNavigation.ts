@@ -32,6 +32,22 @@ export function displayPathForFile(file: DiffFileLike): string {
   return file.newPath !== '/dev/null' ? file.newPath : file.oldPath
 }
 
+export function middleTruncateFileName(fileName: string, maxLength = 34): string {
+  if (fileName.length <= maxLength) return fileName
+  if (maxLength < 8) return `${fileName.slice(0, Math.max(1, maxLength - 3))}...`
+
+  const dotIndex = fileName.lastIndexOf('.')
+  const extension = dotIndex > 0 && fileName.length - dotIndex <= 10 ? fileName.slice(dotIndex) : ''
+  const stem = extension ? fileName.slice(0, dotIndex) : fileName
+  const available = maxLength - extension.length - 3
+  if (available < 4) return `${fileName.slice(0, maxLength - 3)}...`
+
+  const prefixLength = Math.max(4, Math.floor(available * 0.35))
+  const suffixLength = available - prefixLength
+  const suffix = suffixLength > 0 ? stem.slice(-suffixLength) : ''
+  return `${stem.slice(0, prefixLength)}...${suffix}${extension}`
+}
+
 export function buildDiffFileNavItems(files: readonly DiffFileLike[], comments: readonly LineComment[]): DiffFileNavItem[] {
   return files.map((file, index) => {
     const displayPath = displayPathForFile(file)
@@ -126,6 +142,4 @@ export function findActiveFileIndex(sectionTopOffsets: readonly number[], sticky
   }
   return activeIndex
 }
-
-
 

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { LineComment } from '@/bridge/types'
-import { buildDiffFileNavItems, buildDiffFileTree, findActiveFileIndex } from './fileNavigation'
+import {
+  buildDiffFileNavItems,
+  buildDiffFileTree,
+  findActiveFileIndex,
+  middleTruncateFileName,
+} from './fileNavigation'
 
 const comments: LineComment[] = [
   { file: 'src/auth.ts', line: 2, type: 'issue', body: 'Check the auth branch.' },
@@ -58,6 +63,11 @@ describe('findActiveFileIndex', () => {
   })
 })
 
-
-
-
+describe('middleTruncateFileName', () => {
+  it('keeps short names intact and preserves long-name extensions and distinguishing suffixes', () => {
+    expect(middleTruncateFileName('AuthService.java')).toBe('AuthService.java')
+    expect(middleTruncateFileName('SharedGeneratedAuthenticationAuthorizationService.java', 32))
+      .toBe('SharedGe...orizationService.java')
+    expect(middleTruncateFileName('LongName.ts', 10)).toBe('Long....ts')
+  })
+})

@@ -1,5 +1,20 @@
 import { describe, expect, it } from 'vitest'
-import { focusedIndexAfterCommentDeletion } from './commentNavigation'
+import { adjacentCommentIndex, focusedIndexAfterCommentDeletion } from './commentNavigation'
+
+describe('adjacentCommentIndex', () => {
+  it('wraps previous navigation from the first comment to the last', () => {
+    expect(adjacentCommentIndex(0, -1, 3)).toBe(2)
+  })
+
+  it('wraps next navigation from the last comment to the first', () => {
+    expect(adjacentCommentIndex(2, 1, 3)).toBe(0)
+  })
+
+  it('keeps a lone comment selected in both directions', () => {
+    expect(adjacentCommentIndex(0, -1, 1)).toBe(0)
+    expect(adjacentCommentIndex(0, 1, 1)).toBe(0)
+  })
+})
 
 describe('focusedIndexAfterCommentDeletion', () => {
   it('selects the next comment when the focused comment is removed before the end', () => {

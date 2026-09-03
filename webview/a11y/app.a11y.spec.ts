@@ -211,6 +211,7 @@ test('generation, long activity, reduced motion, and failure recovery are access
   }
 
   const activity = page.getByRole('region', { name: 'Review generation activity' })
+  await activity.getByRole('button', { name: 'Show details for Generating review' }).click()
   const entries = activity.getByRole('region', { name: 'Review activity entries' })
   await expect(page.getByText('PRIVATE_PROVIDER_REASONING_SENTINEL')).toHaveCount(0)
   await expect(page.getByText('RAW_PROVIDER_TEXT_SENTINEL')).toHaveCount(0)
@@ -284,6 +285,49 @@ test('Comment can be selected from an Approve split menu', async ({ page }) => {
     }).__hostFixture
     return fixture.outgoing.filter((message) => message.type === 'submitReview')
   })).toEqual([expect.objectContaining({ verdict: 'COMMENT' })])
+})
+
+test('finding navigation is keyboard operable and has no axe violations', async ({ page }) => {
+  await page.setViewportSize({ width: 1_440, height: 900 })
+  await pushHostMessage(page, { type: 'prListLoaded', prs: [{ ...examplePr, hasReviewDraft: true }] })
+  await page.getByRole('button', { name: /Improve authentication/ }).click()
+  await pushHostMessage(page, {
+    type: 'draftLoaded',
+    prKey: 'acme/platform#42',
+    prState: 'DRAFT_PRESENT',
+    reviewId: 'draft-findings',
+    diff: exampleDiff,
+    validationDiff: exampleDiff,
+    result: {
+      summary: 'Authentication review',
+      verdict: 'COMMENT',
+      lineComments: [
+        {
+          file: 'src/auth.ts',
+          line: 2,
+          type: 'issue',
+          severity: 'blocker',
+          body: 'Stop when authentication cannot be verified.',
+        },
+        {
+          file: 'src/auth.ts',
+          line: 999,
+          type: 'note',
+          severity: 'minor',
+          body: 'Document the rejected request.',
+        },
+      ],
+    },
+  })
+
+  await page.getByRole('button', { name: /Findings/ }).click()
+  const finding = page.getByRole('list', { name: 'Anchored findings', exact: true }).getByRole('button')
+  await finding.focus()
+  await expect(finding).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(finding).toHaveAttribute('aria-current', 'location')
+  await expect(page.getByRole('list', { name: 'Unanchored findings' })).toBeVisible()
+  await expectNoViolations(page)
 })
 
 test('selected review and chat have no axe violations in a narrow viewport', async ({ page }) => {

@@ -107,7 +107,13 @@ describe('reviewReducer host transitions', () => {
     },
     {
       name: 'accepts a review result',
-      state: { kind: 'generating' },
+      state: {
+        kind: 'generating',
+        result: null,
+        diff,
+        validationDiff: diff,
+        replacingDraft: false,
+      },
       event: { type: 'reviewResult', result, diff, validationDiff: diff, generationElapsedSec: 2 },
       expectedKind: 'reviewUnsaved',
     },
@@ -157,15 +163,52 @@ describe('reviewReducer host transitions', () => {
     expect(reviewReducer(state, event).kind).toBe(expectedKind)
   })
 
-  it('keeps provider output out of the generation state', () => {
-    expect(reviewReducer({ kind: 'noDraft' }, { type: 'startGenerating' })).toEqual({
+  it('retains inspectable diff context without provider output while generating', () => {
+    expect(reviewReducer({
+      kind: 'noDraft',
+      diff,
+      validationDiff: diff,
+    }, { type: 'startGenerating' })).toEqual({
       kind: 'generating',
+      result: null,
+      diff,
+      validationDiff: diff,
+      replacingDraft: false,
+      generationElapsedSec: undefined,
+    })
+  })
+
+  it('retains the current draft as read-only replacement context', () => {
+    expect(reviewReducer(draft, { type: 'startGenerating' })).toMatchObject({
+      kind: 'generating',
+      result,
+      diff,
+      validationDiff: diff,
+      replacingDraft: true,
+    })
+  })
+
+  it('retains generation context when the provider fails', () => {
+    const generating = reviewReducer(draft, { type: 'startGenerating' })
+
+    expect(reviewReducer(generating, { type: 'reviewError', message: 'Provider failed.' })).toEqual({
+      kind: 'error',
+      message: 'Provider failed.',
+      result,
+      diff,
+      validationDiff: diff,
     })
   })
 
   it('preserves the controller-computed generation duration on the result', () => {
     expect(reviewReducer(
-      { kind: 'generating' },
+      {
+        kind: 'generating',
+        result: null,
+        diff,
+        validationDiff: diff,
+        replacingDraft: false,
+      },
       { type: 'reviewResult', result, diff, validationDiff: diff, generationElapsedSec: 2 },
     )).toMatchObject({
       kind: 'reviewUnsaved',
@@ -246,5 +289,13 @@ describe('review state selectors', () => {
     expect(resultOf(errored)).toEqual(result)
     expect(diffOf(errored)).toBe(diff)
     expect(validationDiffOf(errored)).toBe(diff)
+  })
+
+  it('reads retained review data while generation is running', () => {
+    const generating = reviewReducer(draft, { type: 'startGenerating' })
+
+    expect(resultOf(generating)).toEqual(result)
+    expect(diffOf(generating)).toBe(diff)
+    expect(validationDiffOf(generating)).toBe(diff)
   })
 })

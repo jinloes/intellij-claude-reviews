@@ -32,7 +32,7 @@ export function ReviewActivityLog({ activity, onCancel }: ReviewActivityLogProps
   const expanded = manualExpansion?.runId === activity.runId
     && manualExpansion.outcome === activity.outcome
     ? manualExpansion.expanded
-    : activity.outcome === 'running'
+    : false
 
   useEffect(() => {
     if (activity.outcome !== 'running') return
@@ -63,7 +63,7 @@ export function ReviewActivityLog({ activity, onCancel }: ReviewActivityLogProps
   return (
     <section
       aria-label="Review generation activity"
-      className="w-full max-w-[56rem] overflow-hidden rounded-lg border border-border bg-card"
+      className="w-full overflow-hidden rounded-lg border border-border bg-card shadow-sm"
     >
       <div className="flex flex-col sm:flex-row">
         <button

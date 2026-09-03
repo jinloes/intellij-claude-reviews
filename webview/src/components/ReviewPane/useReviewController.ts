@@ -24,7 +24,7 @@ import {
   effectiveChatAvailableHeight,
   loadChatHeight,
 } from './chatHeight'
-import { focusedIndexAfterCommentDeletion } from './commentNavigation'
+import { adjacentCommentIndex, focusedIndexAfterCommentDeletion } from './commentNavigation'
 import {
   diffOf,
   initialPaneState,
@@ -88,6 +88,7 @@ export interface ReviewViewModel {
   deleting: boolean
   autosaveDirty: boolean
   focusedCommentIdx: number
+  commentFocusRequestId: number
   showChat: boolean
   chatVisible: boolean
   selectedContext: string
@@ -127,6 +128,7 @@ export interface ReviewActions {
   runQualityCheck: () => void
   applyQualityRepair: (action: ReviewQualityAction) => void
   collapseQualityCheck: () => void
+  focusComment: (index: number) => void
   focusPreviousComment: () => void
   focusNextComment: () => void
   toggleChat: () => void
@@ -260,6 +262,7 @@ export function useReviewController({
   const [submitting, setSubmitting] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [focusedCommentIdx, setFocusedCommentIdx] = useState(0)
+  const [commentFocusRequestId, setCommentFocusRequestId] = useState(0)
   const [chatVisible, setChatVisible] = useState(false)
   const [selectedContext, setSelectedContext] = useState('')
   const [pendingChatMessage, setPendingChatMessage] = useState<PendingChatMessage | null>(null)
@@ -314,6 +317,7 @@ export function useReviewController({
     setSubmitting(false)
     setDeleting(false)
     setFocusedCommentIdx(0)
+    setCommentFocusRequestId(0)
     setChatVisible(false)
     setSelectedContext('')
     setPendingChatMessage(null)
@@ -385,7 +389,8 @@ export function useReviewController({
           const generationElapsedSec = generationStartedAtRef.current == null
             ? undefined
             : Math.max(0, Math.round((nowMs - generationStartedAtRef.current) / 1000))
-          setFocusedCommentIdx(0)
+          const inlineCommentCount = validateComments(validationDiff, result.lineComments).adjusted.length
+          setFocusedCommentIdx((index) => Math.min(index, Math.max(0, inlineCommentCount - 1)))
           activeReviewOperationIdRef.current = null
           generationStartedAtRef.current = null
           generatedBaselineRef.current = result
@@ -989,7 +994,7 @@ export function useReviewController({
     return true
   }, [])
 
-  const hasReview = state.kind === 'draftPresent' || state.kind === 'reviewUnsaved'
+  const hasReview = result !== null
   const showReviewOverrides = state.kind !== 'draftLoading'
     && state.kind !== 'generating'
     && state.kind !== 'merged'
@@ -1030,6 +1035,7 @@ export function useReviewController({
       deleting,
       autosaveDirty,
       focusedCommentIdx,
+      commentFocusRequestId,
       showChat,
       chatVisible,
       selectedContext,
@@ -1061,9 +1067,14 @@ export function useReviewController({
       runQualityCheck: () => setQualityExpanded(true),
       applyQualityRepair,
       collapseQualityCheck: () => setQualityExpanded(false),
-      focusPreviousComment: () => setFocusedCommentIdx((index) => Math.max(0, index - 1)),
+      focusComment: (index) => setFocusedCommentIdx(index),
+      focusPreviousComment: () => {
+        setFocusedCommentIdx((index) => adjacentCommentIndex(index, -1, partition.adjusted.length))
+        setCommentFocusRequestId((requestId) => requestId + 1)
+      },
       focusNextComment: () => {
-        setFocusedCommentIdx((index) => Math.min(partition.adjusted.length - 1, index + 1))
+        setFocusedCommentIdx((index) => adjacentCommentIndex(index, 1, partition.adjusted.length))
+        setCommentFocusRequestId((requestId) => requestId + 1)
       },
       toggleChat: () => setChatVisible((visible) => !visible),
       openChat: () => setChatVisible(true),

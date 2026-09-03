@@ -68,51 +68,58 @@ export function ReviewFooter({
   qualityReport,
   diffUnavailable,
 }: ReviewFooterProps) {
+  const t = useI18n()
   if (state.kind === 'generating') return null
 
   if (state.kind === 'draftPresent' || state.kind === 'reviewUnsaved') {
     const busy = saving || submitting || deleting
+    const qualityRiskCount = (qualityReport?.issues.reduce(
+      (count, issue) => count + issue.count,
+      0,
+    ) ?? 0) + (diffUnavailable ? 1 : 0)
     return (
       <div className="shrink-0 flex flex-wrap items-center gap-2 px-4 py-2.5 border-t border-border bg-card">
-        {state.kind === 'draftPresent' ? (
-          <AlertDialog>
-            <AlertDialogTrigger asChild>
-              <Button variant="ghost" size="sm" disabled={busy} className="gap-1.5 text-xs">
-                <RotateCcw className="w-3.5 h-3.5" />
-                Regenerate
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Regenerate review?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  The current draft will be discarded and a new review generated from scratch.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction onClick={onRegenerate}>Regenerate</AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
-        ) : (
-          <Button variant="ghost" size="sm" disabled={busy} className="gap-1.5 text-xs" onClick={onRegenerate}>
-            <RotateCcw className="w-3.5 h-3.5" />
-            Regenerate
-          </Button>
-        )}
+        <div className="flex flex-wrap items-center gap-1">
+          {state.kind === 'draftPresent' ? (
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button variant="ghost" size="sm" disabled={busy} className="gap-1.5 text-xs">
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  Regenerate
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Regenerate review?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    The current draft will remain visible while a replacement review is generated.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction onClick={onRegenerate}>Regenerate</AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          ) : (
+            <Button variant="ghost" size="sm" disabled={busy} className="gap-1.5 text-xs" onClick={onRegenerate}>
+              <RotateCcw className="w-3.5 h-3.5" />
+              Regenerate
+            </Button>
+          )}
 
-        <div className="hidden flex-1 sm:block" />
-
-        <div className="flex items-center gap-2">
-          <span className="hidden text-[11px] text-muted-foreground lg:inline">
-            Scans trust risks before submit.
-          </span>
           <Tooltip>
             <TooltipTrigger asChild>
               <Button variant="outline" size="sm" disabled={busy} className="gap-1.5 text-xs" onClick={onRunQualityCheck}>
                 <Check className="w-3.5 h-3.5" />
-                Quality Check
+                <span>{t('review.quality')}</span>
+                <span className={qualityRiskCount > 0 ? 'text-status-issue' : 'text-status-approve'}>
+                  · {qualityRiskCount > 0
+                    ? qualityRiskCount === 1
+                      ? t('review.oneRisk')
+                      : t('review.riskCount', { count: qualityRiskCount })
+                    : t('review.noRisks')}
+                </span>
               </Button>
             </TooltipTrigger>
             <TooltipContent side="top" className="max-w-xs text-xs leading-relaxed">
@@ -123,57 +130,64 @@ export function ReviewFooter({
         </div>
 
         {state.kind === 'draftPresent' && (
-          <AlertDialog>
-            <AlertDialogTrigger asChild>
-              <Button variant="ghost" size="sm" disabled={deleting} className="gap-1.5 text-xs text-destructive hover:text-destructive">
-                {deleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
-                Delete
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Delete draft review?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  This removes the pending review from GitHub permanently.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction
-                  onClick={onDelete}
-                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                >
+          <div className="border-l border-border pl-2">
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button variant="ghost" size="sm" disabled={deleting} className="gap-1.5 text-xs text-destructive hover:text-destructive">
+                  {deleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
                   Delete
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Delete draft review?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    This removes the pending review from GitHub permanently.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={onDelete}
+                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                  >
+                    Delete
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          </div>
         )}
 
+        <div className="hidden flex-1 sm:block" />
+
         <div className="ml-auto flex w-full shrink-0 items-center justify-end gap-2 sm:w-auto">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={onSave}
-                disabled={saving || submitting || deleting || (!autosaveDirty && state.kind === 'draftPresent')}
-                className="gap-1.5 text-xs"
-              >
-                {saving ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : autosaveDirty ? (
-                  <CloudUpload className="w-3.5 h-3.5" />
-                ) : (
-                  <Check className="w-3.5 h-3.5" />
-                )}
-                {saving ? 'Saving…' : autosaveDirty ? 'Save now' : 'Saved'}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="top" className="max-w-xs text-xs leading-relaxed">
-              Changes save to the GitHub draft automatically. Click to save right now.
-            </TooltipContent>
-          </Tooltip>
+          {saving || autosaveDirty ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={onSave}
+                  disabled={saving || submitting || deleting}
+                  className="gap-1.5 text-xs"
+                >
+                  {saving
+                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    : <CloudUpload className="w-3.5 h-3.5" />}
+                  {saving ? t('review.saving') : t('review.saveNow')}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="top" className="max-w-xs text-xs leading-relaxed">
+                Changes save to the GitHub draft automatically. Click to save right now.
+              </TooltipContent>
+            </Tooltip>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 px-2 text-xs text-muted-foreground" role="status">
+              <Check className="h-3.5 w-3.5 text-status-approve" />
+              {t('review.savedToGitHub')}
+            </span>
+          )}
 
           <SubmitSplitButton
             verdict={state.result.verdict}

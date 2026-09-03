@@ -3,7 +3,19 @@ import remarkGfm from 'remark-gfm'
 import { Fragment, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { isDelete, isInsert } from 'react-diff-view'
 import type { ChangeData, FileData, HunkData } from 'react-diff-view'
-import { Check, ChevronDown, ChevronUp, Pencil, Plus, Search, ShieldCheck, Sparkles, Trash2, X } from 'lucide-react'
+import {
+  Check,
+  ChevronDown,
+  ChevronUp,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  Search,
+  ShieldCheck,
+  Sparkles,
+  Trash2,
+  X,
+} from 'lucide-react'
 import hljs from 'highlight.js/lib/core'
 import hljsBash from 'highlight.js/lib/languages/bash'
 import hljsCss from 'highlight.js/lib/languages/css'
@@ -81,9 +93,15 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-  AlertDialogTrigger,
 } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import {
   Select,
   SelectContent,
@@ -99,8 +117,10 @@ import {
   buildDiffFileTree,
   displayPathForFile,
   findActiveFileIndex,
+  middleTruncateFileName,
   type DiffFileTreeNode,
 } from './fileNavigation'
+import { buildFindingNavItems, findingLabel } from './findingNavigation'
 import './DiffViewer.css'
 
 const MAX_CHANGES = 500
@@ -108,12 +128,16 @@ const MAX_CHANGES = 500
 interface Props {
   diff: string
   comments: LineComment[]
+  orphanComments?: LineComment[]
   focusedCommentIdx?: number
+  commentFocusRequestId?: number
+  onFocusComment?: (idx: number) => void
   onEditComment?: (idx: number, body: string) => void
   onDeleteComment?: (idx: number) => void
   onAddComment?: (comment: LineComment) => void
   onVerifyComment?: (comment: LineComment) => void
   onSuggestFixComment?: (comment: LineComment) => void
+  readOnly?: boolean
 }
 
 type IndexedComment = { comment: LineComment; globalIdx: number }
@@ -160,12 +184,16 @@ interface PendingNew {
 export function DiffViewer({
   diff,
   comments,
+  orphanComments = [],
   focusedCommentIdx,
+  commentFocusRequestId,
+  onFocusComment,
   onEditComment,
   onDeleteComment,
   onAddComment,
   onVerifyComment,
   onSuggestFixComment,
+  readOnly = false,
 }: Props) {
   const t = useI18n()
   const [pendingNew, setPendingNew] = useState<PendingNew | null>(null)
@@ -180,8 +208,14 @@ export function DiffViewer({
   const sectionRefs = useRef<Map<string, HTMLElement>>(new Map())
   const scrollParentRef = useRef<HTMLElement | null>(null)
   const [activeFilePath, setActiveFilePath] = useState('')
+  const [navigationView, setNavigationView] = useState<'files' | 'findings'>('files')
   const [pendingScrollPath, setPendingScrollPath] = useState<string | null>(null)
+  const [pendingScrollCommentIdx, setPendingScrollCommentIdx] = useState<number | null>(null)
   const [rawDiffCopied, setRawDiffCopied] = useState(false)
+
+  useEffect(() => {
+    if (readOnly) setPendingNew(null)
+  }, [readOnly])
 
   const openSearch = useCallback(() => {
     setSearchOpen(true)
@@ -256,6 +290,8 @@ export function DiffViewer({
   const allNavItems = useMemo(() => buildDiffFileNavItems(files, comments), [files, comments])
   const visibleNavItems = useMemo(() => buildDiffFileNavItems(visibleFiles, comments), [visibleFiles, comments])
   const fileTree = useMemo(() => buildDiffFileTree(allNavItems), [allNavItems])
+  const findings = useMemo(() => buildFindingNavItems(comments), [comments])
+  const unanchoredFindings = useMemo(() => buildFindingNavItems(orphanComments), [orphanComments])
 
   const updateActiveFile = useCallback(() => {
     if (visibleNavItems.length === 0) return
@@ -290,6 +326,28 @@ export function DiffViewer({
     scrollToFile(displayPath)
   }, [scrollToFile, truncating, visibleNavItems])
 
+  const scrollToComment = useCallback((index: number) => {
+    const target = document.getElementById(`diff-comment-${index}`)
+    if (!target && truncating) {
+      setPendingScrollCommentIdx(index)
+      startTransition(() => setShowAll(true))
+      return false
+    }
+    target?.scrollIntoView({ behavior: scrollBehavior(), block: 'center' })
+    return Boolean(target)
+  }, [truncating])
+
+  const handleSelectFinding = useCallback((index: number, file: string) => {
+    setActiveFilePath(file)
+    onFocusComment?.(index)
+    scrollToComment(index)
+  }, [onFocusComment, scrollToComment])
+
+  const handleSelectUnanchoredFinding = useCallback((index: number) => {
+    document.getElementById(`orphan-comment-${index}`)
+      ?.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest' })
+  }, [])
+
   useEffect(() => {
     setActiveFilePath((current) => {
       if (visibleNavItems.length === 0) return ''
@@ -303,6 +361,11 @@ export function DiffViewer({
     if (!pendingScrollPath) return
     if (scrollToFile(pendingScrollPath)) setPendingScrollPath(null)
   }, [pendingScrollPath, scrollToFile, visibleFiles])
+
+  useEffect(() => {
+    if (pendingScrollCommentIdx === null) return
+    if (scrollToComment(pendingScrollCommentIdx)) setPendingScrollCommentIdx(null)
+  }, [pendingScrollCommentIdx, scrollToComment, visibleFiles])
 
   useEffect(() => {
     const scrollParent = findScrollParent(containerRef.current)
@@ -327,16 +390,8 @@ export function DiffViewer({
 
   useEffect(() => {
     if (focusedCommentIdx === undefined) return
-    const targetId = `diff-comment-${focusedCommentIdx}`
-    const target = document.getElementById(targetId)
-    if (!target && truncating) {
-      // Keep navigation functional even when comments fall outside the initial
-      // 500 changed-line render window.
-      startTransition(() => setShowAll(true))
-      return
-    }
-    target?.scrollIntoView({ behavior: scrollBehavior(), block: 'nearest' })
-  }, [comments, focusedCommentIdx, truncating])
+    scrollToComment(focusedCommentIdx)
+  }, [commentFocusRequestId, focusedCommentIdx, scrollToComment])
 
   if (parseResult.status === 'empty') return null
   if (parseResult.status === 'unrenderable') {
@@ -379,22 +434,100 @@ export function DiffViewer({
     <TooltipProvider delayDuration={400}>
       <div ref={containerRef} className="diff-viewer" tabIndex={-1}>
         <div className="diff-viewer__layout">
-          <nav className="diff-file-nav" aria-label="Changed files">
-            <div className="diff-file-nav__header">
-              <span>Changed files</span>
-              <span className="diff-file-nav__count">{allNavItems.length}</span>
+          <nav className="diff-file-nav" aria-label="Review navigation">
+            <div className="diff-file-nav__tabs" role="group" aria-label="Review navigation views">
+              <button
+                type="button"
+                aria-pressed={navigationView === 'files'}
+                className={cn('diff-file-nav__tab', navigationView === 'files' && 'diff-file-nav__tab--active')}
+                onClick={() => setNavigationView('files')}
+              >
+                Files
+                <span className="diff-file-nav__count">{allNavItems.length}</span>
+              </button>
+              <button
+                type="button"
+                aria-pressed={navigationView === 'findings'}
+                className={cn('diff-file-nav__tab', navigationView === 'findings' && 'diff-file-nav__tab--active')}
+                onClick={() => setNavigationView('findings')}
+              >
+                Findings
+                <span className="diff-file-nav__count">{findings.length + unanchoredFindings.length}</span>
+              </button>
             </div>
             <div className="diff-file-nav__body">
-              <ul className="diff-file-tree">
-                {fileTree.map((node) => (
-                  <FileTreeNodeView
-                    key={node.key}
-                    node={node}
-                    activeFilePath={activeFile?.displayPath ?? ''}
-                    onSelectFile={handleSelectFile}
-                  />
-                ))}
-              </ul>
+              {navigationView === 'files' ? (
+                <ul className="diff-file-tree">
+                  {fileTree.map((node) => (
+                    <FileTreeNodeView
+                      key={node.key}
+                      node={node}
+                      activeFilePath={activeFile?.displayPath ?? ''}
+                      onSelectFile={handleSelectFile}
+                    />
+                  ))}
+                </ul>
+              ) : (
+                <div className="diff-findings">
+                  {findings.length === 0 && unanchoredFindings.length === 0 && (
+                    <p className="diff-findings__empty">No findings in this review.</p>
+                  )}
+                  {findings.length > 0 && (
+                    <ol className="diff-findings__list" aria-label="Anchored findings">
+                      {findings.map((finding) => (
+                        <li key={finding.key}>
+                          <button
+                            type="button"
+                            className={cn(
+                              'diff-findings__item',
+                              finding.index === focusedCommentIdx && 'diff-findings__item--active',
+                            )}
+                            aria-label={`${finding.label} in ${finding.comment.file}, line ${finding.comment.line}: ${finding.preview}`}
+                            aria-current={finding.index === focusedCommentIdx ? 'location' : undefined}
+                            onClick={() => handleSelectFinding(finding.index, finding.comment.file)}
+                          >
+                            <span className={cn('diff-findings__label', findingToneClass(finding.comment))}>
+                              {finding.label}
+                            </span>
+                            <span className="diff-findings__location">
+                              {finding.comment.file}:{finding.comment.line}
+                            </span>
+                            <span className="diff-findings__preview">{finding.preview}</span>
+                          </button>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                  {unanchoredFindings.length > 0 && (
+                    <div className="diff-findings__unanchored">
+                      <p className="diff-findings__section-title">
+                        Unanchored
+                        <span className="diff-file-nav__count">{unanchoredFindings.length}</span>
+                      </p>
+                      <ol className="diff-findings__list" aria-label="Unanchored findings">
+                        {unanchoredFindings.map((finding) => (
+                          <li key={finding.key}>
+                            <button
+                              type="button"
+                              className="diff-findings__item"
+                              aria-label={`Unanchored ${finding.label} in ${finding.comment.file}, line ${finding.comment.line}: ${finding.preview}`}
+                              onClick={() => handleSelectUnanchoredFinding(finding.index)}
+                            >
+                              <span className={cn('diff-findings__label', findingToneClass(finding.comment))}>
+                                {finding.label}
+                              </span>
+                              <span className="diff-findings__location">
+                                {finding.comment.file}:{finding.comment.line}
+                              </span>
+                              <span className="diff-findings__preview">{finding.preview}</span>
+                            </button>
+                          </li>
+                        ))}
+                      </ol>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </nav>
 
@@ -472,7 +605,9 @@ export function DiffViewer({
                     if (element) sectionRefs.current.set(displayPath, element)
                     else sectionRefs.current.delete(displayPath)
                   }}
-                  onLineClick={onAddComment ? ({ line, rowId }) => setPendingNew({ file: displayPath, line, rowId }) : undefined}
+                  onLineClick={onAddComment && !readOnly
+                    ? ({ line, rowId }) => setPendingNew({ file: displayPath, line, rowId })
+                    : undefined}
                   onPendingCancel={() => setPendingNew(null)}
                   onPendingSave={(type, body) => {
                     if (pendingNew) onAddComment?.({ file: pendingNew.file, line: pendingNew.line, type, body })
@@ -482,6 +617,7 @@ export function DiffViewer({
                   onDeleteComment={onDeleteComment}
                   onVerifyComment={onVerifyComment}
                   onSuggestFixComment={onSuggestFixComment}
+                  readOnly={readOnly}
                 />
               )
             })}
@@ -531,6 +667,14 @@ function folderLabel(node: DiffFileTreeNode): string {
   return `${parts[0]}/.../${parts[parts.length - 1]}`
 }
 
+function findingToneClass(comment: LineComment): string {
+  if (comment.severity === 'blocker' || comment.severity === 'major' || comment.type === 'issue') {
+    return 'text-status-issue'
+  }
+  if (comment.severity === 'minor' || comment.type === 'suggestion') return 'text-status-suggestion'
+  return 'text-status-note'
+}
+
 function FileTreeNodeView({
   node,
   activeFilePath,
@@ -554,7 +698,7 @@ function FileTreeNodeView({
           <span className={cn('diff-file-tree__status', `diff-file-tree__status--${node.file.status}`)} aria-hidden="true">
             {statusAbbreviation(node.file.status)}
           </span>
-          <span className="diff-file-tree__label">{node.name}</span>
+          <span className="diff-file-tree__label">{middleTruncateFileName(node.name)}</span>
           {node.file.commentCount > 0 && <span className="diff-file-tree__meta">{node.file.commentCount}</span>}
         </button>
       </li>
@@ -596,6 +740,7 @@ interface FileViewProps {
   onDeleteComment?: (idx: number) => void
   onVerifyComment?: (comment: LineComment) => void
   onSuggestFixComment?: (comment: LineComment) => void
+  readOnly: boolean
 }
 
 function FileView({
@@ -614,6 +759,7 @@ function FileView({
   onDeleteComment,
   onVerifyComment,
   onSuggestFixComment,
+  readOnly,
 }: FileViewProps) {
   return (
     <section
@@ -624,7 +770,7 @@ function FileView({
       aria-labelledby={`diff-file-${CSS.escape(displayPath)}`}
     >
       <div className="diff-file__header">
-        <h3 id={`diff-file-${CSS.escape(displayPath)}`} className="diff-file__path">{displayPath}</h3>
+        <h2 id={`diff-file-${CSS.escape(displayPath)}`} className="diff-file__path">{displayPath}</h2>
         {file.type !== 'modify' && (
           <span className={`diff-file__badge diff-file__badge--${file.type}`}>{file.type}</span>
         )}
@@ -649,6 +795,7 @@ function FileView({
               onDeleteComment={onDeleteComment}
               onVerifyComment={onVerifyComment}
               onSuggestFixComment={onSuggestFixComment}
+              readOnly={readOnly}
             />
           ))}
         </tbody>
@@ -673,6 +820,7 @@ interface HunkRowsProps {
   onDeleteComment?: (idx: number) => void
   onVerifyComment?: (comment: LineComment) => void
   onSuggestFixComment?: (comment: LineComment) => void
+  readOnly: boolean
 }
 
 function HunkRows({
@@ -689,6 +837,7 @@ function HunkRows({
   onDeleteComment,
   onVerifyComment,
   onSuggestFixComment,
+  readOnly,
 }: HunkRowsProps) {
   const highlighted = useMemo(
     () => hunk.changes.map((c) => syntaxHighlight(c.content, filePath)),
@@ -753,6 +902,7 @@ function HunkRows({
                 onDelete={onDeleteComment ? () => onDeleteComment(globalIdx) : undefined}
                 onVerify={onVerifyComment ? () => onVerifyComment(comment) : undefined}
                 onSuggestFix={onSuggestFixComment ? () => onSuggestFixComment(comment) : undefined}
+                readOnly={readOnly}
               />
             ))}
 
@@ -775,16 +925,10 @@ const COMMENT_BADGE_CLASS: Record<LineComment['type'], string> = {
 }
 
 const SEVERITY_BADGE_CLASS: Record<NonNullable<LineComment['severity']>, string> = {
-  blocker: 'text-status-issue border-status-issue/60 bg-status-issue/15',
+  blocker: 'text-status-issue border-status-issue/60 bg-status-issue/5',
   major:   'text-status-issue border-status-issue/40 bg-status-issue/10',
   minor:   'text-status-suggestion border-status-suggestion/40 bg-status-suggestion/10',
   nit:     'text-status-note border-status-note/40 bg-status-note/10',
-}
-
-const CONFIDENCE_BADGE_CLASS: Record<NonNullable<LineComment['confidence']>, string> = {
-  high:   'text-status-approve border-status-approve/40 bg-status-approve/10',
-  medium: 'text-status-comment border-status-comment/40 bg-status-comment/10',
-  low:    'text-muted-foreground border-border bg-muted/40',
 }
 
 interface InlineCommentRowProps {
@@ -795,16 +939,34 @@ interface InlineCommentRowProps {
   onDelete?: () => void
   onVerify?: () => void
   onSuggestFix?: () => void
+  readOnly: boolean
 }
 
-function InlineCommentRow({ comment, globalIdx, focused, onEdit, onDelete, onVerify, onSuggestFix }: InlineCommentRowProps) {
+function InlineCommentRow({
+  comment,
+  globalIdx,
+  focused,
+  onEdit,
+  onDelete,
+  onVerify,
+  onSuggestFix,
+  readOnly,
+}: InlineCommentRowProps) {
   const [editing, setEditing] = useState(false)
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [draft, setDraft] = useState(comment.body)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => {
     if (!editing) setDraft(comment.body)
   }, [comment.body, editing])
+
+  useEffect(() => {
+    if (readOnly) {
+      setEditing(false)
+      setDeleteDialogOpen(false)
+    }
+  }, [readOnly])
 
   useEffect(() => {
     if (editing && textareaRef.current) {
@@ -829,54 +991,46 @@ function InlineCommentRow({ comment, globalIdx, focused, onEdit, onDelete, onVer
       <td colSpan={3} className={`diff-comment-cell diff-comment-cell--${comment.type}`}>
         <div className="diff-comment">
           <div className="diff-comment__header">
-            <Badge
-              variant="outline"
-              className={cn('text-[9px] font-bold tracking-widest uppercase px-1.5 py-0', COMMENT_BADGE_CLASS[comment.type])}
-            >
-              {comment.type}
-            </Badge>
-            {comment.severity && (
+            <div className="diff-comment__identity">
               <Badge
                 variant="outline"
-                className={cn('text-[9px] font-bold tracking-widest uppercase px-1.5 py-0', SEVERITY_BADGE_CLASS[comment.severity])}
+                className={cn(
+                  'text-[9px] font-bold tracking-wide uppercase px-1.5 py-0',
+                  comment.severity ? SEVERITY_BADGE_CLASS[comment.severity] : COMMENT_BADGE_CLASS[comment.type],
+                )}
               >
-                {comment.severity}
+                {findingLabel(comment)}
               </Badge>
-            )}
-            {comment.category && (
-              <Badge
-                variant="outline"
-                className="text-[9px] font-medium tracking-wide uppercase px-1.5 py-0 text-muted-foreground border-border bg-muted/40"
-              >
-                {comment.category}
-              </Badge>
-            )}
-            {comment.confidence && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Badge
-                    variant="outline"
-                    className={cn('text-[9px] font-medium tracking-wide px-1.5 py-0', CONFIDENCE_BADGE_CLASS[comment.confidence])}
-                  >
-                    {comment.confidence} conf
-                  </Badge>
-                </TooltipTrigger>
-                {comment.rationale && <TooltipContent side="top" className="max-w-xs">{comment.rationale}</TooltipContent>}
-              </Tooltip>
-            )}
+              {(comment.category || comment.confidence) && (
+                <span className="diff-comment__metadata">
+                  {comment.category}
+                  {comment.category && comment.confidence && <span aria-hidden="true"> · </span>}
+                  {comment.confidence && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="cursor-help">{comment.confidence} confidence</span>
+                      </TooltipTrigger>
+                      {comment.rationale && <TooltipContent side="top" className="max-w-xs">{comment.rationale}</TooltipContent>}
+                    </Tooltip>
+                  )}
+                </span>
+              )}
+            </div>
             {(onVerify || onSuggestFix || onEdit || onDelete) && !editing && (
-              <div className="flex items-center gap-1">
+              <div className="diff-comment__actions">
                 {onVerify && (
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-6 w-6 p-0 text-muted-foreground hover:text-amber-400"
+                        className="diff-comment__ai-action text-muted-foreground hover:text-amber-400"
                         onClick={onVerify}
                         aria-label="Verify with AI"
+                        disabled={readOnly}
                       >
                         <ShieldCheck className="w-3.5 h-3.5" />
+                        <span className="diff-comment__action-label">Verify</span>
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent side="top">Verify with AI</TooltipContent>
@@ -888,68 +1042,70 @@ function InlineCommentRow({ comment, globalIdx, focused, onEdit, onDelete, onVer
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-6 w-6 p-0 text-muted-foreground hover:text-primary"
+                        className="diff-comment__ai-action text-muted-foreground hover:text-primary"
                         onClick={onSuggestFix}
                         aria-label="Suggest fix with AI"
+                        disabled={readOnly}
                       >
                         <Sparkles className="w-3.5 h-3.5" />
+                        <span className="diff-comment__action-label">Suggest fix</span>
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent side="top">Suggest fix with AI</TooltipContent>
                   </Tooltip>
                 )}
-                {onEdit && (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
+                {(onEdit || onDelete) && (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
                       <Button
                         variant="ghost"
                         size="sm"
                         className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
-                        onClick={() => setEditing(true)}
-                        aria-label="Edit comment"
+                        aria-label="More finding actions"
+                        disabled={readOnly}
                       >
-                        <Pencil className="w-3.5 h-3.5" />
+                        <MoreHorizontal className="w-3.5 h-3.5" />
                       </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="top">Edit</TooltipContent>
-                  </Tooltip>
-                )}
-                {onDelete && (
-                  <AlertDialog>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <AlertDialogTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-6 w-6 p-0 text-muted-foreground hover:text-destructive"
-                            aria-label="Delete comment"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </Button>
-                        </AlertDialogTrigger>
-                      </TooltipTrigger>
-                      <TooltipContent side="top">Delete</TooltipContent>
-                    </Tooltip>
-                    <AlertDialogContent>
-                      <AlertDialogHeader>
-                        <AlertDialogTitle>Delete this comment?</AlertDialogTitle>
-                        <AlertDialogDescription>
-                          This comment will be removed. Save the draft to persist the change.
-                        </AlertDialogDescription>
-                      </AlertDialogHeader>
-                      <AlertDialogFooter>
-                        <AlertDialogCancel>Cancel</AlertDialogCancel>
-                        <AlertDialogAction
-                          onClick={onDelete}
-                          className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      {onEdit && (
+                        <DropdownMenuItem className="gap-2 text-xs" onSelect={() => setEditing(true)}>
+                          <Pencil className="h-3.5 w-3.5" />
+                          Edit comment
+                        </DropdownMenuItem>
+                      )}
+                      {onEdit && onDelete && <DropdownMenuSeparator />}
+                      {onDelete && (
+                        <DropdownMenuItem
+                          className="gap-2 text-xs text-destructive focus:text-destructive"
+                          onSelect={() => setDeleteDialogOpen(true)}
                         >
-                          Delete
-                        </AlertDialogAction>
-                      </AlertDialogFooter>
-                    </AlertDialogContent>
-                  </AlertDialog>
+                          <Trash2 className="h-3.5 w-3.5" />
+                          Delete comment
+                        </DropdownMenuItem>
+                      )}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 )}
+                <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Delete this comment?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        This comment will be removed. Save the draft to persist the change.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>Cancel</AlertDialogCancel>
+                      <AlertDialogAction
+                        onClick={onDelete}
+                        className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                      >
+                        Delete
+                      </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
               </div>
             )}
           </div>

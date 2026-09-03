@@ -86,9 +86,11 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
     <PaneContent
       state={model.state}
       focusedCommentIdx={model.focusedCommentIdx}
+      commentFocusRequestId={model.commentFocusRequestId}
       onGenerate={actions.generate}
       onVerifyComment={model.hasReview ? actions.verifyComment : undefined}
       onSuggestFixComment={model.hasReview ? actions.suggestFixComment : undefined}
+      onFocusComment={actions.focusComment}
       editCommentHandlers={actions.editCommentHandlers}
       inlineComments={model.inlineComments}
       orphanComments={model.orphanComments}
@@ -119,7 +121,6 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
                   size="sm"
                   className="h-6 w-6 p-0"
                   onClick={actions.focusPreviousComment}
-                  disabled={model.focusedCommentIdx <= 0}
                   aria-label="Previous comment"
                 >
                   <ChevronUp className="w-3.5 h-3.5" />
@@ -132,7 +133,6 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
                   size="sm"
                   className="h-6 w-6 p-0"
                   onClick={actions.focusNextComment}
-                  disabled={model.focusedCommentIdx >= commentCount - 1}
                   aria-label="Next comment"
                 >
                   <ChevronDown className="w-3.5 h-3.5" />
@@ -223,7 +223,10 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
               {model.state.kind === 'error' && paneContent}
               {model.state.kind !== 'error' && reviewOverrides}
               {model.activity.outcome !== 'idle' && (
-                <div className="px-4 pt-3">
+                <div className={cn(
+                  'px-4 pt-3',
+                  model.activity.outcome === 'running' && 'sticky top-0 z-20',
+                )}>
                   <ReviewActivityLog
                     activity={model.activity}
                     onCancel={model.activity.outcome === 'running' ? actions.cancel : undefined}
@@ -231,12 +234,19 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
                 </div>
               )}
               {model.state.kind === 'error' && reviewOverrides}
-              {model.result && model.qualityReport && model.qualityRiskCount > 0 && !model.qualityExpanded && (
+              {model.state.kind !== 'generating'
+                && model.result
+                && model.qualityReport
+                && model.qualityRiskCount > 0
+                && !model.qualityExpanded && (
                 <div className="px-4 pt-3">
                   <QualityCheckBadge count={model.qualityRiskCount} onReview={actions.runQualityCheck} />
                 </div>
               )}
-              {model.result && model.qualityReport && model.qualityExpanded && (
+              {model.state.kind !== 'generating'
+                && model.result
+                && model.qualityReport
+                && model.qualityExpanded && (
                 <div className="px-4 pt-3">
                   <ReviewQualityCheckCard
                     report={model.qualityReport}
@@ -246,7 +256,6 @@ export const ReviewPane = forwardRef<ReviewPaneHandle, Props>(function ReviewPan
                 </div>
               )}
               {model.state.kind !== 'noDraft'
-                && model.state.kind !== 'generating'
                 && model.state.kind !== 'error'
                 && paneContent}
             </div>

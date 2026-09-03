@@ -174,7 +174,8 @@ Shared Vite/React/TypeScript UI used by both IDE hosts.
 - `src/lib/autosave.ts` - Draft dirty-check, snapshot, and debounce decisions.
 - `src/lib/validateComments.ts` - Inline-comment validation.
 - `src/lib/keyboard.ts`, `layout.ts`, `motion.ts` - Shared interaction/layout policies.
-- `src/components/DiffViewer/fileNavigation.ts` - Changed-file navigation.
+- `src/components/DiffViewer/fileNavigation.ts`, `findingNavigation.ts` - Changed-file and
+  severity-sorted review-finding navigation.
 - `src/components/ReviewPane/` helpers - Chat sizing, comment navigation, and verify prompts.
 - `src/components/a11y/LiveStatus.tsx` - Screen-reader announcements.
 - `src/i18n/` - Typed English catalog and test pseudo-localization.

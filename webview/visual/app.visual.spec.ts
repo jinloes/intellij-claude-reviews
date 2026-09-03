@@ -73,6 +73,64 @@ async function openDraftReview(page: Page) {
   })
 }
 
+async function openFindingNavigationReview(page: Page) {
+  const files = [
+    'src/security/AuthenticationPolicyVerificationCoordinator.ts',
+    'src/security/AuthenticationPolicyVerificationRepository.ts',
+    'src/security/AuthenticationPolicyVerificationTelemetry.ts',
+  ]
+  const diff = files.map((file, index) => [
+    `diff --git a/${file} b/${file}`,
+    `--- a/${file}`,
+    `+++ b/${file}`,
+    '@@ -0,0 +1 @@',
+    `+export const value${index} = true`,
+  ].join('\n')).join('\n')
+
+  await selectExamplePr(page, true)
+  await pushHostMessage(page, {
+    type: 'draftLoaded',
+    prKey: 'acme/platform#42',
+    prState: 'DRAFT_PRESENT',
+    reviewId: 'draft-findings',
+    diff,
+    validationDiff: diff,
+    result: {
+      summary: 'Authentication policy review',
+      verdict: 'COMMENT',
+      lineComments: [
+        {
+          file: files[1],
+          line: 1,
+          type: 'issue',
+          severity: 'major',
+          category: 'security',
+          confidence: 'high',
+          body: 'Reject policies that do not have a trusted issuer before persisting them.',
+        },
+        {
+          file: files[0],
+          line: 1,
+          type: 'issue',
+          severity: 'blocker',
+          category: 'correctness',
+          confidence: 'high',
+          body: 'Stop evaluation when the authentication policy cannot be verified.',
+        },
+        {
+          file: files[2],
+          line: 999,
+          type: 'note',
+          severity: 'minor',
+          category: 'maintainability',
+          confidence: 'medium',
+          body: 'Record the rejected policy reason in telemetry.',
+        },
+      ],
+    },
+  })
+}
+
 async function openNoDraftReview(page: Page, diff = reviewDiff) {
   await selectExamplePr(page, false)
   await pushHostMessage(page, {
@@ -415,7 +473,8 @@ test('wide generation stays on a bounded reading rail without exposing provider 
     const bounds = element.getBoundingClientRect()
     return { width: bounds.width, x: bounds.x }
   })
-  expect(geometry.width).toBeLessThanOrEqual(896)
+  expect(geometry.width).toBeGreaterThan(900)
+  await expect(page.getByRole('navigation', { name: 'Review navigation' })).toBeVisible()
   await expect(page.getByText('PRIVATE_PROVIDER_REASONING_SENTINEL')).toHaveCount(0)
   await expect(page.getByText('RAW_PROVIDER_TEXT_SENTINEL')).toHaveCount(0)
   await expect(activity.getByRole('button', { name: 'Stop generation' })).toBeVisible()
@@ -429,6 +488,7 @@ test('long generation activity remains usable in a narrow high-contrast host', a
   await openGeneratingReview(page, 16)
 
   const activity = page.getByRole('region', { name: 'Review generation activity' })
+  await activity.getByRole('button', { name: 'Show details for Generating review' }).click()
   const entries = activity.getByRole('region', { name: 'Review activity entries' })
   await expectNoHorizontalOverflow(page, '[data-testid="review-pane-shell"]')
   expect(await entries.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true)
@@ -571,6 +631,49 @@ test('selected review and chat remain usable in a narrow dark host', async ({ pa
   await expect(page).toHaveScreenshot('selected-review-chat-narrow-dark.png')
 })
 
+test('wide review provides scannable file and finding navigation', async ({ page }) => {
+  await page.setViewportSize({ width: 1_440, height: 900 })
+  await page.goto('/')
+  await pushHostMessage(page, { type: 'themeChanged', theme: 'dark' })
+  await openFindingNavigationReview(page)
+
+  await expect(page.getByRole('navigation', { name: 'Review navigation' })).toBeVisible()
+  await expect(page).toHaveScreenshot('selected-review-files-wide-dark.png')
+
+  await page.getByRole('button', { name: /Findings/ }).click()
+  await expect(page.getByRole('list', { name: 'Anchored findings', exact: true })).toBeVisible()
+  await expect(page.getByRole('list', { name: 'Unanchored findings' })).toBeVisible()
+  await expect(page).toHaveScreenshot('selected-review-findings-wide-dark.png')
+})
+
+test('adaptive file navigation remains useful at wide-layout boundaries', async ({ page }) => {
+  for (const width of [1_100, 2_133]) {
+    await page.setViewportSize({ width, height: 900 })
+    await page.goto('/')
+    await pushHostMessage(page, { type: 'themeChanged', theme: 'dark' })
+    await openFindingNavigationReview(page)
+
+    const navigation = page.getByRole('navigation', { name: 'Review navigation' })
+    const navigationWidth = await navigation.evaluate((element) => element.getBoundingClientRect().width)
+    expect(navigationWidth).toBeGreaterThanOrEqual(280)
+    expect(navigationWidth).toBeLessThanOrEqual(360)
+    await expect(page).toHaveScreenshot(`selected-review-files-${width}-dark.png`)
+  }
+})
+
+test('finding actions stay clear in a narrow review', async ({ page }) => {
+  await page.setViewportSize({ width: 400, height: 568 })
+  await page.goto('/')
+  await pushHostMessage(page, { type: 'themeChanged', theme: 'dark' })
+  await openFindingNavigationReview(page)
+
+  const finding = page.locator('#diff-comment-0')
+  await finding.scrollIntoViewIfNeeded()
+  await expect(finding.getByRole('button', { name: 'Verify with AI' })).toBeVisible()
+  await expect(finding.getByRole('button', { name: 'Suggest fix with AI' })).toBeVisible()
+  await expect(page).toHaveScreenshot('selected-review-finding-actions-narrow-dark.png')
+})
+
 test('Verify with AI keeps review, chat, and footer usable in a constrained viewport', async ({ page }) => {
   await page.setViewportSize({ width: 600, height: 500 })
   await page.goto('/')
@@ -594,10 +697,10 @@ test('Verify with AI keeps review, chat, and footer usable in a constrained view
   const chat = page.getByRole('region', { name: 'Chat' })
   const body = page.getByTestId('review-scroll-body')
   const chatPanel = page.getByTestId('chat-panel')
-  const savedButton = page.getByRole('button', { name: 'Saved' })
+  const savedStatus = page.getByText('Saved to GitHub')
   await expect(chat).toBeVisible()
   await expect(body).toBeVisible()
-  await expect(savedButton).toBeVisible()
+  await expect(savedStatus).toBeVisible()
   await expect(page.getByRole('textbox', { name: 'Ask about this pull request' })).toBeVisible()
   await expect(page.getByTestId('chat-messages')).toContainText('Verify whether the draft review comment is supported by the pull-request evidence.')
   await expect(page.getByTestId('chat-messages')).toContainText('"verdict":"valid|invalid|unclear"')
@@ -605,7 +708,7 @@ test('Verify with AI keeps review, chat, and footer usable in a constrained view
   await expect(page.getByTestId('chat-messages')).toContainText('"action":"keep|revise|delete"')
   await expect(chat).toContainText('Context: draft comment, diff excerpt, PR worktree (read-only)')
 
-  const geometry = await Promise.all([body.boundingBox(), chatPanel.boundingBox(), savedButton.boundingBox()])
+  const geometry = await Promise.all([body.boundingBox(), chatPanel.boundingBox(), savedStatus.boundingBox()])
   expect(geometry.every((box) => box !== null)).toBe(true)
   const [bodyBox, chatBox, savedBox] = geometry
   expect(bodyBox!.height).toBeGreaterThan(0)
@@ -625,17 +728,17 @@ test('wide tall Verify layout fills the viewport instead of collapsing to conten
   const reviewShell = page.getByTestId('review-pane-shell')
   const reviewContent = page.getByTestId('review-pane-content')
   const body = page.getByTestId('review-scroll-body')
-  const savedButton = reviewContent.getByRole('button', { name: 'Saved', exact: true })
+  const savedStatus = reviewContent.getByText('Saved to GitHub')
   await expect(prList).toBeVisible()
   await expect(reviewContent).toBeVisible()
-  await expect(savedButton).toBeVisible()
+  await expect(savedStatus).toBeVisible()
 
   const geometry = await Promise.all([
     prList.boundingBox(),
     reviewShell.boundingBox(),
     reviewContent.boundingBox(),
     body.boundingBox(),
-    savedButton.boundingBox(),
+    savedStatus.boundingBox(),
   ])
   expect(geometry.every((box) => box !== null)).toBe(true)
   const [prListBox, reviewShellBox, reviewContentBox, bodyBox, savedBox] = geometry
@@ -654,7 +757,7 @@ test('narrow selected review keeps Save and submit controls reachable', async ({
     await openDraftReview(page)
 
     for (const control of [
-      page.getByRole('button', { name: 'Saved', exact: true }),
+      page.getByText('Saved to GitHub'),
       page.getByRole('button', { name: 'Comment', exact: true }),
       page.getByRole('button', { name: 'More submit options' }),
     ]) {

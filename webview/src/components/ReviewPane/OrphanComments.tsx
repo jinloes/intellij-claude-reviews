@@ -25,10 +25,12 @@ export function OrphanCommentsSection({
   orphans,
   onEdit,
   onDelete,
+  readOnly = false,
 }: {
   orphans: LineComment[]
-  onEdit: (orphan: LineComment, body: string) => void
-  onDelete: (orphan: LineComment) => void
+  onEdit?: (orphan: LineComment, body: string) => void
+  onDelete?: (orphan: LineComment) => void
+  readOnly?: boolean
 }) {
   return (
     <div className="rounded border border-status-suggestion/40 bg-status-suggestion/5">
@@ -45,9 +47,11 @@ export function OrphanCommentsSection({
         {orphans.map((orphan, index) => (
           <OrphanRow
             key={`${orphan.file}|${orphan.line}|${index}`}
+            index={index}
             orphan={orphan}
-            onEdit={(body) => onEdit(orphan, body)}
-            onDelete={() => onDelete(orphan)}
+            onEdit={onEdit ? (body) => onEdit(orphan, body) : undefined}
+            onDelete={onDelete ? () => onDelete(orphan) : undefined}
+            readOnly={readOnly}
           />
         ))}
       </ul>
@@ -56,13 +60,17 @@ export function OrphanCommentsSection({
 }
 
 function OrphanRow({
+  index,
   orphan,
   onEdit,
   onDelete,
+  readOnly,
 }: {
+  index: number
   orphan: LineComment
-  onEdit: (body: string) => void
-  onDelete: () => void
+  onEdit?: (body: string) => void
+  onDelete?: () => void
+  readOnly: boolean
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(orphan.body)
@@ -71,6 +79,9 @@ function OrphanRow({
   useEffect(() => {
     if (!editing) setDraft(orphan.body)
   }, [editing, orphan.body])
+  useEffect(() => {
+    if (readOnly) setEditing(false)
+  }, [readOnly])
   useEffect(() => {
     if (editing && textareaRef.current) {
       const element = textareaRef.current
@@ -82,12 +93,12 @@ function OrphanRow({
 
   function handleSave() {
     const trimmed = draft.trim()
-    if (trimmed) onEdit(trimmed)
+    if (trimmed) onEdit?.(trimmed)
     setEditing(false)
   }
 
   return (
-    <li className="px-3 py-2 flex flex-col gap-1.5">
+    <li id={`orphan-comment-${index}`} className="scroll-mt-16 px-3 py-2 flex flex-col gap-1.5">
       <div className="flex items-center gap-2">
         <span className={cn('inline-flex items-center rounded border px-1.5 py-0 text-[9px] font-bold tracking-widest uppercase', ORPHAN_BADGE[orphan.type])}>
           {orphan.type}
@@ -95,46 +106,52 @@ function OrphanRow({
         <span className="font-mono text-[11px] text-muted-foreground truncate flex-1">
           {orphan.file}:{orphan.line}
         </span>
-        {!editing && (
+        {!editing && (onEdit || onDelete) && (
           <div className="flex items-center gap-1">
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-6 px-1.5 text-[10px] text-muted-foreground hover:text-foreground"
-              onClick={() => setEditing(true)}
-              aria-label="Edit unanchored comment"
-            >
-              Edit
-            </Button>
-            <AlertDialog>
-              <AlertDialogTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-6 px-1.5 text-[10px] text-muted-foreground hover:text-destructive"
-                  aria-label="Delete unanchored comment"
-                >
-                  Delete
-                </Button>
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>Delete this comment?</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    This comment will be removed. Save the draft to persist the change.
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>Cancel</AlertDialogCancel>
-                  <AlertDialogAction
-                    onClick={onDelete}
-                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            {onEdit && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 px-1.5 text-[10px] text-muted-foreground hover:text-foreground"
+                onClick={() => setEditing(true)}
+                aria-label="Edit unanchored comment"
+                disabled={readOnly}
+              >
+                Edit
+              </Button>
+            )}
+            {onDelete && (
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-1.5 text-[10px] text-muted-foreground hover:text-destructive"
+                    aria-label="Delete unanchored comment"
+                    disabled={readOnly}
                   >
                     Delete
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Delete this comment?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      This comment will be removed. Save the draft to persist the change.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                    <AlertDialogAction
+                      onClick={onDelete}
+                      className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    >
+                      Delete
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            )}
           </div>
         )}
       </div>

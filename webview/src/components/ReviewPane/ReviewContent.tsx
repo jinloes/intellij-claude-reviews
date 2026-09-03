@@ -27,9 +27,11 @@ export interface EditCommentHandlers {
 interface PaneContentProps {
   state: PaneState
   focusedCommentIdx: number
+  commentFocusRequestId: number
   onGenerate: () => void
   onVerifyComment?: (comment: LineComment) => void
   onSuggestFixComment?: (comment: LineComment) => void
+  onFocusComment: (index: number) => void
   editCommentHandlers: EditCommentHandlers
   inlineComments: LineComment[]
   orphanComments: LineComment[]
@@ -59,9 +61,11 @@ function ReviewAndDiff({
   diff,
   generationElapsedSec,
   focusedCommentIdx,
+  commentFocusRequestId,
   editCommentHandlers,
   onVerifyComment,
   onSuggestFixComment,
+  onFocusComment,
   staleCommits,
   importedFromGitHub,
   onReanchor,
@@ -69,14 +73,18 @@ function ReviewAndDiff({
   orphanComments,
   onEditOrphan,
   onDeleteOrphan,
+  readOnly = false,
+  generationMessage,
 }: {
-  result: ReviewResult
+  result: ReviewResult | null
   diff?: string
   generationElapsedSec?: number
   focusedCommentIdx: number
+  commentFocusRequestId: number
   editCommentHandlers: EditCommentHandlers
   onVerifyComment?: (comment: LineComment) => void
   onSuggestFixComment?: (comment: LineComment) => void
+  onFocusComment: (index: number) => void
   staleCommits?: boolean
   importedFromGitHub?: boolean
   onReanchor?: () => void
@@ -84,10 +92,17 @@ function ReviewAndDiff({
   orphanComments: LineComment[]
   onEditOrphan: (orphan: LineComment, body: string) => void
   onDeleteOrphan: (orphan: LineComment) => void
+  readOnly?: boolean
+  generationMessage?: string
 }) {
   const generationSummary = formatGenerationSummary(generationElapsedSec)
   return (
     <>
+      {generationMessage && (
+        <div className="mx-4 mt-3 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
+          {generationMessage}
+        </div>
+      )}
       {staleCommits && (
         <Alert className="mx-4 mt-3 mb-0 border-status-suggestion/40 bg-status-suggestion/5">
           <AlertTriangle className="h-3.5 w-3.5 text-status-suggestion" />
@@ -131,29 +146,36 @@ function ReviewAndDiff({
       {generationSummary && (
         <p className="px-4 pt-3 text-xs text-muted-foreground">{generationSummary}</p>
       )}
-      <div className="px-4 pt-3">
-        <ReviewDisplay result={result} />
-      </div>
-      {orphanComments.length > 0 && (
+      {result && (
+        <div className="px-4 pt-3">
+          <ReviewDisplay result={result} />
+        </div>
+      )}
+      {result && orphanComments.length > 0 && (
         <div className="px-4 pt-3">
           <OrphanCommentsSection
             orphans={orphanComments}
             onEdit={onEditOrphan}
             onDelete={onDeleteOrphan}
+            readOnly={readOnly}
           />
         </div>
       )}
       {diff && (
-        <div className="px-4 pb-4">
+        <div key="review-diff" className="px-4 pb-4">
           <DiffViewer
             diff={diff}
             comments={inlineComments}
+            orphanComments={orphanComments}
             focusedCommentIdx={focusedCommentIdx}
+            commentFocusRequestId={commentFocusRequestId}
+            onFocusComment={onFocusComment}
             onEditComment={editCommentHandlers.onEditComment}
             onDeleteComment={editCommentHandlers.onDeleteComment}
             onAddComment={editCommentHandlers.onAddComment}
             onVerifyComment={onVerifyComment}
             onSuggestFixComment={onSuggestFixComment}
+            readOnly={readOnly}
           />
         </div>
       )}
@@ -166,44 +188,53 @@ function ErrorWithReview({
   result,
   diff,
   focusedCommentIdx,
+  commentFocusRequestId,
   editCommentHandlers,
   inlineComments,
   orphanComments,
   onEditOrphan,
   onDeleteOrphan,
+  onFocusComment,
+  readOnly = false,
   actions,
 }: {
   message: string
   result: ReviewResult | null
   diff: string
   focusedCommentIdx: number
+  commentFocusRequestId: number
   editCommentHandlers: EditCommentHandlers
   inlineComments: LineComment[]
   orphanComments: LineComment[]
   onEditOrphan: (orphan: LineComment, body: string) => void
   onDeleteOrphan: (orphan: LineComment) => void
+  onFocusComment: (index: number) => void
+  readOnly?: boolean
   actions?: ReactNode
 }) {
   return (
     <div className="flex flex-col">
-      {result && (
-        <ReviewAndDiff
-          result={result}
-          diff={diff || undefined}
-          focusedCommentIdx={focusedCommentIdx}
-          editCommentHandlers={editCommentHandlers}
-          inlineComments={inlineComments}
-          orphanComments={orphanComments}
-          onEditOrphan={onEditOrphan}
-          onDeleteOrphan={onDeleteOrphan}
-        />
-      )}
-      <div className="px-4 pb-3">
+      <div className="px-4 pb-3 pt-3">
         <Alert variant="destructive">
           <AlertDescription>{message}</AlertDescription>
         </Alert>
         {actions && <div className="mt-3">{actions}</div>}
       </div>
+      {(result || diff) && (
+        <ReviewAndDiff
+          result={result}
+          diff={diff || undefined}
+          focusedCommentIdx={focusedCommentIdx}
+          commentFocusRequestId={commentFocusRequestId}
+          editCommentHandlers={editCommentHandlers}
+          onFocusComment={onFocusComment}
+          inlineComments={inlineComments}
+          orphanComments={orphanComments}
+          onEditOrphan={onEditOrphan}
+          onDeleteOrphan={onDeleteOrphan}
+          readOnly={readOnly}
+        />
+      )}
     </div>
   )
 }
@@ -211,9 +242,11 @@ function ErrorWithReview({
 export function PaneContent({
   state,
   focusedCommentIdx,
+  commentFocusRequestId,
   onGenerate,
   onVerifyComment,
   onSuggestFixComment,
+  onFocusComment,
   editCommentHandlers,
   inlineComments,
   orphanComments,
@@ -293,7 +326,27 @@ export function PaneContent({
       )
 
     case 'generating':
-      return null
+      return (
+        <ReviewAndDiff
+          result={state.result}
+          diff={state.diff}
+          generationElapsedSec={state.generationElapsedSec}
+          focusedCommentIdx={focusedCommentIdx}
+          commentFocusRequestId={commentFocusRequestId}
+          editCommentHandlers={editCommentHandlers}
+          onVerifyComment={onVerifyComment}
+          onSuggestFixComment={onSuggestFixComment}
+          onFocusComment={onFocusComment}
+          inlineComments={inlineComments}
+          orphanComments={orphanComments}
+          onEditOrphan={onEditOrphan}
+          onDeleteOrphan={onDeleteOrphan}
+          readOnly
+          generationMessage={state.replacingDraft
+            ? 'Regenerating — current draft remains until the new review is ready. Editing and review actions are paused.'
+            : 'Keep inspecting the changed files while PR Pilot generates the review. Editing and review actions are paused.'}
+        />
+      )
 
     case 'draftPresent':
       return (
@@ -302,7 +355,9 @@ export function PaneContent({
           diff={state.diff}
           generationElapsedSec={state.generationElapsedSec}
           focusedCommentIdx={focusedCommentIdx}
+          commentFocusRequestId={commentFocusRequestId}
           editCommentHandlers={editCommentHandlers}
+          onFocusComment={onFocusComment}
           onVerifyComment={onVerifyComment}
           onSuggestFixComment={onSuggestFixComment}
           staleCommits={state.staleCommits}
@@ -322,7 +377,9 @@ export function PaneContent({
           diff={state.diff}
           generationElapsedSec={state.generationElapsedSec}
           focusedCommentIdx={focusedCommentIdx}
+          commentFocusRequestId={commentFocusRequestId}
           editCommentHandlers={editCommentHandlers}
+          onFocusComment={onFocusComment}
           onVerifyComment={onVerifyComment}
           onSuggestFixComment={onSuggestFixComment}
           inlineComments={inlineComments}
@@ -354,6 +411,30 @@ export function PaneContent({
       )
 
     case 'error':
+      if (state.result || state.diff) {
+        return (
+          <ErrorWithReview
+            message={state.message}
+            result={state.result ?? null}
+            diff={state.diff ?? ''}
+            focusedCommentIdx={focusedCommentIdx}
+            commentFocusRequestId={commentFocusRequestId}
+            editCommentHandlers={editCommentHandlers}
+            onFocusComment={onFocusComment}
+            inlineComments={inlineComments}
+            orphanComments={orphanComments}
+            onEditOrphan={onEditOrphan}
+            onDeleteOrphan={onDeleteOrphan}
+            readOnly
+            actions={(
+              <Button variant="outline" size="sm" onClick={onGenerate} className="w-fit gap-1.5">
+                <RotateCcw className="w-3.5 h-3.5" />
+                Try Again
+              </Button>
+            )}
+          />
+        )
+      }
       return (
         <div className="p-4 flex flex-col gap-3">
           <Alert variant="destructive">
@@ -373,7 +454,9 @@ export function PaneContent({
           result={state.result}
           diff={state.diff}
           focusedCommentIdx={focusedCommentIdx}
+          commentFocusRequestId={commentFocusRequestId}
           editCommentHandlers={editCommentHandlers}
+          onFocusComment={onFocusComment}
           inlineComments={inlineComments}
           orphanComments={orphanComments}
           onEditOrphan={onEditOrphan}
@@ -388,7 +471,9 @@ export function PaneContent({
           result={state.result}
           diff={state.diff}
           focusedCommentIdx={focusedCommentIdx}
+          commentFocusRequestId={commentFocusRequestId}
           editCommentHandlers={editCommentHandlers}
+          onFocusComment={onFocusComment}
           inlineComments={inlineComments}
           orphanComments={orphanComments}
           onEditOrphan={onEditOrphan}
@@ -403,7 +488,9 @@ export function PaneContent({
           result={state.draft.result}
           diff={state.draft.diff ?? ''}
           focusedCommentIdx={focusedCommentIdx}
+          commentFocusRequestId={commentFocusRequestId}
           editCommentHandlers={editCommentHandlers}
+          onFocusComment={onFocusComment}
           inlineComments={inlineComments}
           orphanComments={orphanComments}
           onEditOrphan={onEditOrphan}

@@ -20,17 +20,20 @@ describe('ReviewActivityLog', () => {
 
     expect(screen.getByRole('region', { name: 'Review generation activity' })).toBeVisible()
     expect(screen.getByText('Generating review')).toBeVisible()
-    expect(screen.getByRole('button', { name: 'Hide details for Generating review' })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: 'Show details for Generating review' })).toHaveAttribute(
       'aria-expanded',
-      'true',
+      'false',
     )
-    expect(screen.getByText('Starting review')).toBeVisible()
     expect(screen.getAllByText('Reading files')).toHaveLength(1)
-    expect(screen.getByText('+0s')).toBeVisible()
     expect(screen.getByRole('progressbar', { name: 'Review generation progress' })).toHaveAttribute(
       'aria-valuetext',
       'Reading files',
     )
+    expect(screen.queryByRole('region', { name: 'Review activity entries' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show details for Generating review' }))
+    expect(screen.getByText('Starting review')).toBeVisible()
+    expect(screen.getByText('+0s')).toBeVisible()
     expect(screen.getByRole('region', { name: 'Review activity entries' })).toHaveAttribute('tabindex', '0')
     expect(screen.getByText(/Provider output, private reasoning, arguments, and file contents are not displayed/)).toBeVisible()
 
