@@ -27,7 +27,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v5
         with:
-          node-version: "20.17.0"
+          node-version: "20.20.2"
           cache: npm
           cache-dependency-path: |
             webview/package-lock.json
